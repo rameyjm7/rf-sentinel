@@ -737,9 +737,6 @@ class BluetoothDetector:
     @classmethod
     def _compute_remainder(cls, input_value: int, divisor: int) -> int:
         divisor_length = cls._bit_length(divisor)
-        input_length = cls._bit_length(input_value)
-        if divisor_length + input_length > 63:
-            return input_value
         input_value <<= divisor_length
         while cls._bit_length(input_value) >= divisor_length:
             input_value ^= divisor << (cls._bit_length(input_value) - divisor_length)
