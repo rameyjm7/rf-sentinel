@@ -132,6 +132,7 @@ class BluetoothDetector:
         self.stats = {
             "preamble_hits": 0,
             "barker_hits": 0,
+            "access_code_mismatch": 0,
             "access_code_hits": 0,
             "lap_hits": 0,
             "header_failures": 0,
@@ -508,7 +509,7 @@ class BluetoothDetector:
         return (even == 2 and odd == 0) or (even == 0 and odd == 2)
 
     def _classic_barker(self, bits: list[int], pos: int) -> int | None:
-        barker = self._swap_bits(self._extract_msb_byte(bits, pos + 62)) & 0x3F
+        barker = self._extract_lsb_byte(bits, pos + 62) & 0x3F
         return barker if barker in {0x13, 0x2C} else None
 
     def _classic_access_code(self, bits: list[int], pos: int) -> dict[str, int] | None:
@@ -516,16 +517,16 @@ class BluetoothDetector:
         if barker is None:
             return None
         lap = (
-            (self._swap_bits(self._extract_msb_byte(bits, pos + 54)) << 16)
-            | (self._swap_bits(self._extract_msb_byte(bits, pos + 46)) << 8)
-            | self._swap_bits(self._extract_msb_byte(bits, pos + 38))
+            (self._extract_lsb_byte(bits, pos + 54) << 16)
+            | (self._extract_lsb_byte(bits, pos + 46) << 8)
+            | self._extract_lsb_byte(bits, pos + 38)
         )
         code = (
-            (self._swap_bits(self._extract_msb_byte(bits, pos + 4)) << 0)
-            | (self._swap_bits(self._extract_msb_byte(bits, pos + 12)) << 8)
-            | (self._swap_bits(self._extract_msb_byte(bits, pos + 20)) << 16)
-            | (self._swap_bits(self._extract_msb_byte(bits, pos + 28)) << 24)
-            | (self._swap_bits(self._extract_msb_byte(bits, pos + 36)) << 32)
+            (self._extract_lsb_byte(bits, pos + 4) << 0)
+            | (self._extract_lsb_byte(bits, pos + 12) << 8)
+            | (self._extract_lsb_byte(bits, pos + 20) << 16)
+            | (self._extract_lsb_byte(bits, pos + 28) << 24)
+            | (self._extract_lsb_byte(bits, pos + 36) << 32)
         ) & 0x3FFFFFFFF
         access_word = (barker << 58) | (lap << 34) | code
 
@@ -538,6 +539,7 @@ class BluetoothDetector:
         ctilde = self._compute_remainder(xtilde, g)
         expected = (ctilde | (xtilde << 34)) ^ p
         if access_word != expected:
+            self.stats["access_code_mismatch"] += 1
             return None
         return {"lap": lap, "access_word": access_word}
 
@@ -715,10 +717,10 @@ class BluetoothDetector:
         }
 
     @staticmethod
-    def _extract_msb_byte(bits: list[int], start: int) -> int:
+    def _extract_lsb_byte(bits: list[int], start: int) -> int:
         value = 0
         for idx in range(8):
-            value |= (bits[start + idx] & 1) << (7 - idx)
+            value |= (bits[start + idx] & 1) << idx
         return value
 
     @staticmethod
@@ -825,6 +827,7 @@ class WideClassicDetector:
         self.stats = {
             "preamble_hits": 0,
             "barker_hits": 0,
+            "access_code_mismatch": 0,
             "access_code_hits": 0,
             "lap_hits": 0,
             "header_failures": 0,
