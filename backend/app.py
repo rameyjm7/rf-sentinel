@@ -102,6 +102,7 @@ class ExplorerState:
     channel_activity: dict[int, dict[str, Any]] = field(default_factory=dict)
     decoder_stats: dict[str, Any] = field(default_factory=dict)
     test_target: dict[str, Any] | None = None
+    test_target_error: str = ""
 
 
 @dataclass
@@ -1618,6 +1619,18 @@ def start_scan():
     if btle_device_id and btle_device_id != btc_device_id:
         _stop_duplicate_gateway_streams(btle_device_id)
 
+    btc_test_target: dict[str, Any] | None = None
+    btc_test_error = ""
+    if mode in {"classic", "both"}:
+        try:
+            btc_test_target, _ = _enable_discoverable_controller()
+        except FileNotFoundError:
+            btc_test_error = "bluetoothctl is not installed or not on PATH"
+        except subprocess.TimeoutExpired:
+            btc_test_error = "bluetoothctl timed out while enabling discoverable mode"
+        except (RuntimeError, ValueError) as exc:
+            btc_test_error = str(exc)
+
     try:
         started: dict[str, dict[str, Any]] = {}
         if mode in {"classic", "both"}:
@@ -1684,6 +1697,12 @@ def start_scan():
         state.channels_by_mode = {key: int(value["channel"]) for key, value in started.items()}
         state.gateway_start_response = {key: value["body"] for key, value in started.items()}
         state.worker_error = ""
+        if mode in {"classic", "both"}:
+            state.test_target = btc_test_target
+            state.test_target_error = btc_test_error
+        else:
+            state.test_target = None
+            state.test_target_error = ""
 
     worker_threads = {}
     worker_stops = {}
@@ -1719,6 +1738,8 @@ def start_scan():
                 }
                 for key, value in started.items()
             },
+            "test_target": btc_test_target,
+            "test_target_error": btc_test_error,
         }
     )
 
@@ -1766,6 +1787,7 @@ def status():
                 "classic_addresses": state.classic_addresses[:64],
                 "decoder_stats": state.decoder_stats,
                 "test_target": state.test_target,
+                "test_target_error": state.test_target_error,
                 "channel_activity": [
                     state.channel_activity.get(idx, {"channel": idx, "hits": 0, "rssi_dbfs": -120.0})
                     for idx in range(79)

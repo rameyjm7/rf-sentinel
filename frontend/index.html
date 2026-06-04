@@ -1038,11 +1038,27 @@
         });
       }
 
-      function renderCandidates(candidates, addresses = []) {
-        if (!candidates.length && !addresses.length) {
+      function renderCandidates(candidates, addresses = [], target = null, targetError = "") {
+        if (!candidates.length && !addresses.length && !target && !targetError) {
           candidatesEl.innerHTML = `<div class="empty">No LAPs yet</div>`;
           return;
         }
+        const targetRow = target || targetError
+          ? `
+            <article class="candidate">
+              <div class="candidate-top">
+                <strong>${target ? `BTC target ${target.mac}` : "BTC target not armed"}</strong>
+                <span class="chip">${targetError ? "warning" : "discoverable"}</span>
+              </div>
+              <div class="chips">
+                ${target ? `<span class="chip">LAP ${target.lap}</span>` : ""}
+                ${target ? `<span class="chip">UAP ${target.uap}</span>` : ""}
+                ${target ? `<span class="chip">NAP ${target.nap}</span>` : ""}
+              </div>
+              <p class="small">${targetError || "Bluetoothctl enabled discoverable mode; matching Classic detections against this MAC-derived LAP/UAP."}</p>
+            </article>
+          `
+          : "";
         const addressRows = addresses
           .map((address) => `
             <article class="candidate">
@@ -1082,7 +1098,7 @@
             `;
           })
           .join("");
-        candidatesEl.innerHTML = addressRows + candidateRows;
+        candidatesEl.innerHTML = targetRow + addressRows + candidateRows;
       }
 
       function renderBars(status) {
@@ -1158,7 +1174,7 @@
           metrics.access.textContent = Number(status.decoder_stats?.access_code_hits || 0).toLocaleString();
           metrics.lap.textContent = Number(status.decoder_stats?.lap_hits || 0).toLocaleString();
           renderIdentityTable(status.discovery_table || []);
-          renderCandidates(status.classic_candidates || [], status.classic_addresses || []);
+          renderCandidates(status.classic_candidates || [], status.classic_addresses || [], status.test_target, status.test_target_error || "");
           renderBars(status);
           renderChannelActivity(status);
         } catch {
