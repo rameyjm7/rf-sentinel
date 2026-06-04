@@ -134,6 +134,7 @@ class BluetoothDetector:
             "barker_hits": 0,
             "access_code_mismatch": 0,
             "access_code_hits": 0,
+            "target_access_near_hits": 0,
             "lap_hits": 0,
             "header_failures": 0,
             "uap_candidate_hits": 0,
@@ -478,6 +479,7 @@ class BluetoothDetector:
                 self.stats["barker_hits"] += 1
             access = self._classic_access_code(bits, pos)
             if access is None:
+                self._classic_target_access_diagnostic(bits, pos)
                 continue
             self.stats["access_code_hits"] += 1
             header_result = self._classic_bruteforce_all_uaps(bits[pos + 72 : pos + 72 + 54])
@@ -542,6 +544,54 @@ class BluetoothDetector:
             self.stats["access_code_mismatch"] += 1
             return None
         return {"lap": lap, "access_word": access_word}
+
+    def _classic_target_access_diagnostic(self, bits: list[int], pos: int) -> None:
+        with state_lock:
+            target = dict(state.test_target or {})
+        if target.get("protocol") != "BTC":
+            return
+        try:
+            lap = int(str(target.get("lap") or ""), 16)
+        except ValueError:
+            return
+        expected = self._classic_expected_access_word(lap)
+        observed = self._classic_observed_access_word(bits, pos)
+        if observed is None:
+            return
+        distance = (observed ^ expected).bit_count()
+        if distance <= 8:
+            self.stats["target_access_near_hits"] += 1
+
+    def _classic_observed_access_word(self, bits: list[int], pos: int) -> int | None:
+        if pos + 72 > len(bits):
+            return None
+        barker = self._classic_barker(bits, pos)
+        if barker is None:
+            return None
+        lap = (
+            (self._extract_lsb_byte(bits, pos + 54) << 16)
+            | (self._extract_lsb_byte(bits, pos + 46) << 8)
+            | self._extract_lsb_byte(bits, pos + 38)
+        )
+        code = (
+            (self._extract_lsb_byte(bits, pos + 4) << 0)
+            | (self._extract_lsb_byte(bits, pos + 12) << 8)
+            | (self._extract_lsb_byte(bits, pos + 20) << 16)
+            | (self._extract_lsb_byte(bits, pos + 28) << 24)
+            | (self._extract_lsb_byte(bits, pos + 36) << 32)
+        ) & 0x3FFFFFFFF
+        return (barker << 58) | (lap << 34) | code
+
+    @classmethod
+    def _classic_expected_access_word(cls, lap: int) -> int:
+        barker_true = 0x13 if (lap & 0x800000) else 0x2C
+        x = (barker_true << 24) | lap
+        p = 0x83848D96BBCC54FC
+        xtilde = (p >> 34) ^ x
+        gp = int("157464165547", 8)
+        g = (gp << 1) ^ gp
+        ctilde = cls._compute_remainder(xtilde, g)
+        return (ctilde | (xtilde << 34)) ^ p
 
     def _classic_bruteforce_all_uaps(self, header_bits: list[int]) -> dict[str, Any]:
         header = 0
@@ -826,6 +876,7 @@ class WideClassicDetector:
             "barker_hits": 0,
             "access_code_mismatch": 0,
             "access_code_hits": 0,
+            "target_access_near_hits": 0,
             "lap_hits": 0,
             "header_failures": 0,
             "uap_candidate_hits": 0,
@@ -1587,6 +1638,10 @@ def start_scan():
     sample_rate_sps = int(payload.get("sample_rate_sps", 60_000_000 if mode in {"classic", "both"} else BLE_ADV_SAMPLE_RATE_SPS))
     lna_gain_db = int(payload.get("lna_gain_db", 24))
     vga_gain_db = int(payload.get("vga_gain_db", 28))
+    btc_lna_gain_db = int(payload.get("btc_lna_gain_db", lna_gain_db))
+    btc_vga_gain_db = int(payload.get("btc_vga_gain_db", vga_gain_db))
+    btle_lna_gain_db = int(payload.get("btle_lna_gain_db", lna_gain_db))
+    btle_vga_gain_db = int(payload.get("btle_vga_gain_db", vga_gain_db))
     preserve_detections = bool(payload.get("preserve_detections", False))
 
     if mode not in {"ble", "classic", "both"}:
@@ -1638,8 +1693,8 @@ def start_scan():
                 btc_device_id,
                 center_freq_hz,
                 sample_rate_sps,
-                lna_gain_db,
-                vga_gain_db,
+                btc_lna_gain_db,
+                btc_vga_gain_db,
             )
             started["classic"] = {
                 "body": body,
@@ -1658,8 +1713,8 @@ def start_scan():
                 btle_device_id,
                 ble_center,
                 BLE_ADV_SAMPLE_RATE_SPS,
-                lna_gain_db,
-                vga_gain_db,
+                btle_lna_gain_db,
+                btle_vga_gain_db,
             )
             started["ble"] = {
                 "body": body,

@@ -699,10 +699,17 @@
           <input id="sampleRateInput" type="number" min="1" max="60" step="1" value="60" />
         </label>
         <label>
-          Gain
+          BTC Gain
           <span class="slider-control">
-            <input id="gainInput" type="range" min="0" max="102" step="1" value="72" />
-            <span class="control-value" id="gainValue">L32 V40</span>
+            <input id="btcGainInput" type="range" min="0" max="102" step="1" value="72" />
+            <span class="control-value" id="btcGainValue">L32 V40</span>
+          </span>
+        </label>
+        <label>
+          BTLE Gain
+          <span class="slider-control">
+            <input id="btleGainInput" type="range" min="0" max="102" step="1" value="56" />
+            <span class="control-value" id="btleGainValue">L40 V16</span>
           </span>
         </label>
         <label>
@@ -732,6 +739,7 @@
             <div class="metric"><span>Barker</span><strong id="barkerMetric">0</strong></div>
             <div class="metric"><span>Access</span><strong id="accessMetric">0</strong></div>
             <div class="metric"><span>Access Rejects</span><strong id="accessRejectMetric">0</strong></div>
+            <div class="metric"><span>Target Near</span><strong id="targetNearMetric">0</strong></div>
             <div class="metric"><span>LAP</span><strong id="lapMetric">0</strong></div>
           </div>
           <div class="spectrum" id="spectrum"></div>
@@ -787,8 +795,10 @@
       const runToggleText = document.getElementById("runToggleText");
       const clearBtn = document.getElementById("clearBtn");
       const hopDwellInput = document.getElementById("hopDwellInput");
-      const gainInput = document.getElementById("gainInput");
-      const gainValue = document.getElementById("gainValue");
+      const btcGainInput = document.getElementById("btcGainInput");
+      const btcGainValue = document.getElementById("btcGainValue");
+      const btleGainInput = document.getElementById("btleGainInput");
+      const btleGainValue = document.getElementById("btleGainValue");
       const liveDot = document.getElementById("liveDot");
       const runState = document.getElementById("runState");
       const spectrum = document.getElementById("spectrum");
@@ -815,6 +825,7 @@
         barker: document.getElementById("barkerMetric"),
         access: document.getElementById("accessMetric"),
         accessReject: document.getElementById("accessRejectMetric"),
+        targetNear: document.getElementById("targetNearMetric"),
         lap: document.getElementById("lapMetric"),
       };
 
@@ -950,6 +961,17 @@
       function age(ts) {
         const seconds = Math.max(0, Math.round(Date.now() / 1000 - Number(ts || 0)));
         return `${seconds}s`;
+      }
+
+      function splitGain(total) {
+        const lna = Math.max(0, Math.min(40, Number(total || 0)));
+        const vga = Math.max(0, Math.min(62, Number(total || 0) - lna));
+        return { lna, vga };
+      }
+
+      function updateGainLabel(input, label) {
+        const { lna, vga } = splitGain(input.value);
+        label.textContent = `L${lna} V${vga}`;
       }
 
       function fmtUuid16(row) {
@@ -1175,6 +1197,7 @@
           metrics.barker.textContent = Number(status.decoder_stats?.barker_hits || 0).toLocaleString();
           metrics.access.textContent = Number(status.decoder_stats?.access_code_hits || 0).toLocaleString();
           metrics.accessReject.textContent = Number(status.decoder_stats?.access_code_mismatch || 0).toLocaleString();
+          metrics.targetNear.textContent = Number(status.decoder_stats?.target_access_near_hits || 0).toLocaleString();
           metrics.lap.textContent = Number(status.decoder_stats?.lap_hits || 0).toLocaleString();
           renderIdentityTable(status.discovery_table || []);
           renderCandidates(status.classic_candidates || [], status.classic_addresses || [], status.test_target, status.test_target_error || "");
@@ -1188,9 +1211,8 @@
 
       async function startScan({ preserve = false, hop = false } = {}) {
         const rateMhz = Math.max(1, Math.min(60, Number(document.getElementById("sampleRateInput").value || 60)));
-        const totalGain = Number(gainInput.value || 72);
-        const lnaGain = Math.max(0, Math.min(40, totalGain));
-        const vgaGain = Math.max(0, Math.min(62, totalGain - lnaGain));
+        const btcGain = splitGain(btcGainInput.value || 72);
+        const btleGain = splitGain(btleGainInput.value || 56);
         await fetch("/api/scan/start", {
           method: "POST",
           headers: { "Content-Type": "application/json" },
@@ -1202,8 +1224,12 @@
             channel: Number(channelSelect.value),
             ble_channel: [37, 38, 39][(window.bleHopIndex || 0) % 3],
             sample_rate_sps: Math.round(rateMhz * 1_000_000),
-            lna_gain_db: lnaGain,
-            vga_gain_db: vgaGain,
+            lna_gain_db: btcGain.lna,
+            vga_gain_db: btcGain.vga,
+            btc_lna_gain_db: btcGain.lna,
+            btc_vga_gain_db: btcGain.vga,
+            btle_lna_gain_db: btleGain.lna,
+            btle_vga_gain_db: btleGain.vga,
             preserve_detections: preserve,
           }),
         });
@@ -1240,12 +1266,8 @@
         pollStatus();
       });
 
-      gainInput.addEventListener("input", () => {
-        const totalGain = Number(gainInput.value || 0);
-        const lnaGain = Math.max(0, Math.min(40, totalGain));
-        const vgaGain = Math.max(0, Math.min(62, totalGain - lnaGain));
-        gainValue.textContent = `L${lnaGain} V${vgaGain}`;
-      });
+      btcGainInput.addEventListener("input", () => updateGainLabel(btcGainInput, btcGainValue));
+      btleGainInput.addEventListener("input", () => updateGainLabel(btleGainInput, btleGainValue));
       hopDwellInput.addEventListener("change", scheduleAutoHop);
       btcTabBtn.addEventListener("click", () => {
         activeDetectionTab = "BTC";
