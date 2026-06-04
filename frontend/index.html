@@ -740,6 +740,7 @@
             <div class="metric"><span>Access</span><strong id="accessMetric">0</strong></div>
             <div class="metric"><span>Access Rejects</span><strong id="accessRejectMetric">0</strong></div>
             <div class="metric"><span>Target Near</span><strong id="targetNearMetric">0</strong></div>
+            <div class="metric"><span>Best Dist</span><strong id="targetBestMetric">68</strong></div>
             <div class="metric"><span>LAP</span><strong id="lapMetric">0</strong></div>
           </div>
           <div class="spectrum" id="spectrum"></div>
@@ -826,6 +827,7 @@
         access: document.getElementById("accessMetric"),
         accessReject: document.getElementById("accessRejectMetric"),
         targetNear: document.getElementById("targetNearMetric"),
+        targetBest: document.getElementById("targetBestMetric"),
         lap: document.getElementById("lapMetric"),
       };
 
@@ -1201,6 +1203,7 @@
           metrics.access.textContent = Number(status.decoder_stats?.access_code_hits || 0).toLocaleString();
           metrics.accessReject.textContent = Number(status.decoder_stats?.access_code_mismatch || 0).toLocaleString();
           metrics.targetNear.textContent = Number(status.decoder_stats?.target_access_near_hits || 0).toLocaleString();
+          metrics.targetBest.textContent = Number(status.decoder_stats?.target_access_best_distance ?? 68).toLocaleString();
           metrics.lap.textContent = Number(status.decoder_stats?.lap_hits || 0).toLocaleString();
           renderIdentityTable(status.discovery_table || []);
           renderCandidates(status.classic_candidates || [], status.classic_addresses || [], status.test_target, status.test_target_error || "");

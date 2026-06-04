@@ -41,6 +41,20 @@ SLOT_DURATION_US = 625.0
 SLOT_ERROR_THRESHOLD = 0.03
 
 
+def _design_lowpass_taps(sample_rate_hz: int, cutoff_hz: float, num_taps: int) -> np.ndarray:
+    taps = max(15, int(num_taps) | 1)
+    nyquist = max(1.0, float(sample_rate_hz) / 2.0)
+    normalized_cutoff = min(0.98, max(0.001, float(cutoff_hz) / nyquist))
+    n = np.arange(taps, dtype=np.float64) - ((taps - 1) / 2.0)
+    kernel = normalized_cutoff * np.sinc(normalized_cutoff * n)
+    kernel *= np.hamming(taps)
+    kernel_sum = float(np.sum(kernel))
+    if abs(kernel_sum) < 1e-12:
+        return np.array([1.0], dtype=np.float32)
+    kernel /= kernel_sum
+    return kernel.astype(np.float32)
+
+
 def _gateway_base() -> str:
     return os.getenv("SDR_GATEWAY_BASE_URL", "http://127.0.0.1:8080").rstrip("/")
 
@@ -55,6 +69,19 @@ def _gateway_token() -> str:
 def _gateway_headers() -> dict[str, str]:
     token = _gateway_token()
     return {"Authorization": f"Bearer {token}"} if token else {}
+
+
+def _configured_btc_target() -> dict[str, Any] | None:
+    mac = (os.getenv("BTC_TARGET_MAC", "") or "").strip()
+    if not mac:
+        mac = "34:C9:F0:88:B5:97"
+    try:
+        target = _classic_target_from_mac(mac)
+    except ValueError:
+        return None
+    target["inquiry_status"] = "manual traffic generation"
+    target["source"] = "env BTC_TARGET_MAC" if os.getenv("BTC_TARGET_MAC") else "default target MAC"
+    return target
 
 
 def _ws_url_for_stream(stream_id: str) -> str:
@@ -135,6 +162,7 @@ class BluetoothDetector:
             "access_code_mismatch": 0,
             "access_code_hits": 0,
             "target_access_near_hits": 0,
+            "target_access_best_distance": 68,
             "lap_hits": 0,
             "header_failures": 0,
             "uap_candidate_hits": 0,
@@ -559,6 +587,7 @@ class BluetoothDetector:
         if observed is None:
             return
         distance = (observed ^ expected).bit_count()
+        self.stats["target_access_best_distance"] = min(int(self.stats.get("target_access_best_distance", 68)), int(distance))
         if distance <= 8:
             self.stats["target_access_near_hits"] += 1
 
@@ -870,6 +899,9 @@ class WideClassicDetector:
         self.bank_start_channel = int(bank_start_channel)
         self.lane_rate_sps = BT_CLASSIC_LANE_RATE_SPS
         self.decim = max(1, int(round(self.sample_rate_sps / self.lane_rate_sps)))
+        filter_taps = max(31, min(193, (self.decim * 4) | 1))
+        cutoff_hz = min(float(self.lane_rate_sps) * 0.40, 800_000.0)
+        self._lane_filter_taps = _design_lowpass_taps(self.sample_rate_sps, cutoff_hz, filter_taps)
         self.lanes: list[dict[str, Any]] = []
         self.stats = {
             "preamble_hits": 0,
@@ -877,6 +909,7 @@ class WideClassicDetector:
             "access_code_mismatch": 0,
             "access_code_hits": 0,
             "target_access_near_hits": 0,
+            "target_access_best_distance": 68,
             "lap_hits": 0,
             "header_failures": 0,
             "uap_candidate_hits": 0,
@@ -891,6 +924,8 @@ class WideClassicDetector:
                     "channel": channel,
                     "freq_hz": freq_hz,
                     "offset_hz": float(freq_hz - self.center_freq_hz),
+                    "mix_phase_rad": 0.0,
+                    "filter_state": np.empty(0, dtype=np.complex64),
                     "detector": BluetoothDetector(self.lane_rate_sps, "classic", freq_hz, channel),
                 }
             )
@@ -906,13 +941,21 @@ class WideClassicDetector:
         sample_idx = np.arange(z.size, dtype=np.float32)
         for lane in self.lanes:
             offset_hz = float(lane["offset_hz"])
-            rot = np.exp((-2j * np.pi * offset_hz / float(self.sample_rate_sps)) * sample_idx).astype(np.complex64)
+            phase_step = float((-2.0 * np.pi * offset_hz) / float(self.sample_rate_sps))
+            phase0 = float(lane.get("mix_phase_rad", 0.0))
+            rot = np.exp(1j * (phase0 + (phase_step * sample_idx))).astype(np.complex64)
+            lane["mix_phase_rad"] = float((phase0 + (phase_step * float(z.size))) % (2.0 * np.pi))
             mixed = z * rot
-            lane_samples = self._decimate_lane(mixed)
+            lane_samples = self._decimate_lane(lane, mixed)
             if lane_samples.size < 64:
                 continue
             rssi, events, candidates = lane["detector"].process_complex(lane_samples)
             for key, value in lane["detector"].stats.items():
+                if key == "target_access_best_distance":
+                    current = int(self.stats.get(key, 68))
+                    self.stats[key] = min(current, int(value))
+                    lane["detector"].stats[key] = 68
+                    continue
                 self.stats[key] = int(self.stats.get(key, 0)) + int(value)
                 lane["detector"].stats[key] = 0
             rssis.append(rssi)
@@ -922,14 +965,26 @@ class WideClassicDetector:
         bank_rssi = max(rssis) if rssis else -120.0
         return bank_rssi, all_events[:80], all_candidates[:80]
 
-    def _decimate_lane(self, z: np.ndarray) -> np.ndarray:
+    def _decimate_lane(self, lane: dict[str, Any], z: np.ndarray) -> np.ndarray:
+        history = lane.get("filter_state")
+        if not isinstance(history, np.ndarray):
+            history = np.empty(0, dtype=np.complex64)
+        if history.size:
+            z = np.concatenate((history, z))
+        taps = self._lane_filter_taps
+        if z.size < taps.size:
+            lane["filter_state"] = z[-(taps.size - 1) :].astype(np.complex64, copy=False)
+            return np.empty(0, dtype=np.complex64)
+        filtered_i = np.convolve(z.real.astype(np.float32, copy=False), taps, mode="valid")
+        filtered_q = np.convolve(z.imag.astype(np.float32, copy=False), taps, mode="valid")
+        lane["filter_state"] = z[-(taps.size - 1) :].astype(np.complex64, copy=False)
+        filtered = (filtered_i + 1j * filtered_q).astype(np.complex64)
         if self.decim <= 1:
-            return z
-        usable = (z.size // self.decim) * self.decim
+            return filtered
+        usable = (filtered.size // self.decim) * self.decim
         if usable <= 0:
             return np.empty(0, dtype=np.complex64)
-        # A boxcar averager is a cheap low-pass for ten 2 MHz lanes from a 20 MHz stream.
-        return z[:usable].reshape(-1, self.decim).mean(axis=1).astype(np.complex64)
+        return filtered[:usable:self.decim].astype(np.complex64, copy=False)
 
 
 class CombinedBluetoothDetector:
@@ -1747,17 +1802,10 @@ def start_scan():
     btc_test_target: dict[str, Any] | None = None
     btc_test_error = ""
     if mode in {"classic", "both"}:
-        try:
-            btc_test_target, _ = _enable_discoverable_controller()
-            helper, helper_message = _start_bredr_inquiry(str(btc_test_target.get("controller") or ""))
-            btc_test_target["inquiry_helper"] = helper
-            btc_test_target["inquiry_status"] = helper_message
-        except FileNotFoundError:
-            btc_test_error = "bluetoothctl is not installed or not on PATH"
-        except subprocess.TimeoutExpired:
-            btc_test_error = "bluetoothctl timed out while enabling discoverable mode"
-        except (RuntimeError, ValueError) as exc:
-            btc_test_error = str(exc)
+        btc_test_target = _configured_btc_target()
+        if btc_test_target is None:
+            btc_test_error = "BTC target MAC is invalid; set BTC_TARGET_MAC if needed"
+        _stop_bredr_inquiry()
     else:
         _stop_bredr_inquiry()
 
