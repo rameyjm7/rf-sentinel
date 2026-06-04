@@ -23,9 +23,9 @@ BLE_ADV_CHANNELS = {
 
 BT_CLASSIC_CHANNELS = {idx: 2_402_000_000 + (idx * 1_000_000) for idx in range(79)}
 BT_CLASSIC_BANK_SIZE = 60
-# Classic BR/EDR channels are 1 MHz spaced; we decode lanes at 2 Msps for a little timing margin.
+# Match the reference path more closely: 1 MHz-spaced Classic lanes decoded at 1 Msps after channelization.
 BT_CLASSIC_CHANNEL_BW_HZ = 1_000_000
-BT_CLASSIC_LANE_RATE_SPS = 2_000_000
+BT_CLASSIC_LANE_RATE_SPS = 1_000_000
 BT_CLASSIC_LANE_SPACING_HZ = 1_000_000
 BLE_ADV_CHANNEL_BW_HZ = 2_000_000
 BLE_ADV_SAMPLE_RATE_SPS = 2_000_000
@@ -994,6 +994,7 @@ class CombinedBluetoothDetector:
         self.classic = WideClassicDetector(sample_rate_sps, center_freq_hz, bank_start_channel)
         self.ble_lanes: list[dict[str, Any]] = []
         self.stats = self.classic.stats
+        self.ble_decim = max(1, int(round(self.sample_rate_sps / BLE_ADV_SAMPLE_RATE_SPS)))
         for channel, freq_hz in BLE_ADV_CHANNELS.items():
             offset_hz = float(freq_hz - self.center_freq_hz)
             if abs(offset_hz) > (self.sample_rate_sps / 2.0) - 1_200_000:
@@ -1003,7 +1004,7 @@ class CombinedBluetoothDetector:
                     "channel": channel,
                     "freq_hz": freq_hz,
                     "offset_hz": offset_hz,
-                    "detector": BluetoothDetector(BT_CLASSIC_LANE_RATE_SPS, "ble", freq_hz, channel),
+                    "detector": BluetoothDetector(BLE_ADV_SAMPLE_RATE_SPS, "ble", freq_hz, channel),
                 }
             )
 
@@ -1016,11 +1017,10 @@ class CombinedBluetoothDetector:
         self.stats = self.classic.stats
         rssis = [classic_rssi]
         sample_idx = np.arange(z.size, dtype=np.float32)
-        decim = max(1, int(round(self.sample_rate_sps / BT_CLASSIC_LANE_RATE_SPS)))
         for lane in self.ble_lanes:
             rot = np.exp((-2j * np.pi * float(lane["offset_hz"]) / float(self.sample_rate_sps)) * sample_idx).astype(np.complex64)
             mixed = z * rot
-            lane_samples = self._decimate(mixed, decim)
+            lane_samples = self._decimate(mixed, self.ble_decim)
             if lane_samples.size < 64:
                 continue
             rssi, ble_events, _ = lane["detector"].process_complex(lane_samples)
