@@ -1,0 +1,10 @@
+.venv/
+__pycache__/
+*.py[cod]
+
+# Local capture/cache data. The public LUTs in backend/data are intentionally tracked.
+backend/data/ble_identities.json
+backend/data/ble_identities.json.tmp
+
+# Research checkouts/PDFs are local references, not app runtime code.
+research/

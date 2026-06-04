@@ -1,0 +1,1257 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Bluetooth Explorer</title>
+    <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Material+Symbols+Rounded:opsz,wght,FILL,GRAD@20..48,400..700,0..1,0" />
+    <style>
+      :root {
+        --bg: #f3f0e8;
+        --panel: #fffaf0;
+        --ink: #17211b;
+        --muted: #65716a;
+        --line: #d7d0bf;
+        --green: #1f8f62;
+        --teal: #087b83;
+        --red: #b83c32;
+        --gold: #b77b17;
+        --chip: #e8e0ce;
+        --shadow: 0 18px 60px rgba(23, 33, 27, 0.12);
+      }
+
+      * {
+        box-sizing: border-box;
+      }
+
+      body {
+        margin: 0;
+        min-height: 100vh;
+        color: var(--ink);
+        font-family: "Aptos", "Segoe UI", sans-serif;
+        background:
+          linear-gradient(135deg, rgba(31, 143, 98, 0.14), transparent 34%),
+          linear-gradient(215deg, rgba(183, 123, 23, 0.14), transparent 36%),
+          repeating-linear-gradient(0deg, rgba(23, 33, 27, 0.035) 0 1px, transparent 1px 24px),
+          var(--bg);
+      }
+
+      button,
+      input,
+      select {
+        font: inherit;
+      }
+
+      .material-symbols-rounded {
+        font-family: "Material Symbols Rounded";
+        font-weight: normal;
+        font-style: normal;
+        font-size: 20px;
+        line-height: 1;
+        letter-spacing: 0;
+        text-transform: none;
+        display: inline-block;
+        white-space: nowrap;
+        word-wrap: normal;
+        direction: ltr;
+        -webkit-font-feature-settings: "liga";
+        -webkit-font-smoothing: antialiased;
+      }
+
+      .app {
+        display: grid;
+        grid-template-rows: auto auto 1fr;
+        gap: 16px;
+        width: min(1480px, calc(100vw - 28px));
+        min-height: 100vh;
+        margin: 0 auto;
+        padding: 18px 0;
+      }
+
+      header {
+        display: flex;
+        align-items: end;
+        justify-content: space-between;
+        gap: 16px;
+        padding: 10px 2px 0;
+      }
+
+      h1 {
+        margin: 0;
+        font-family: Georgia, "Times New Roman", serif;
+        font-size: clamp(2rem, 4vw, 4.8rem);
+        font-weight: 700;
+        line-height: 0.95;
+        letter-spacing: 0;
+      }
+
+      .subtitle {
+        margin-top: 8px;
+        color: var(--muted);
+        font-size: 0.98rem;
+      }
+
+      .status-pill {
+        display: inline-flex;
+        align-items: center;
+        gap: 9px;
+        min-height: 40px;
+        padding: 9px 13px;
+        border: 1px solid var(--line);
+        border-radius: 999px;
+        background: rgba(255, 250, 240, 0.74);
+        box-shadow: var(--shadow);
+        white-space: nowrap;
+      }
+
+      .dot {
+        width: 10px;
+        height: 10px;
+        border-radius: 50%;
+        background: var(--red);
+      }
+
+      .dot.live {
+        background: var(--green);
+        box-shadow: 0 0 0 5px rgba(31, 143, 98, 0.14);
+      }
+
+      .toolbar {
+        display: grid;
+        grid-template-columns: minmax(170px, 1fr) minmax(170px, 1fr) minmax(150px, 0.75fr) minmax(150px, 0.75fr) minmax(88px, 0.45fr) minmax(190px, 1fr) minmax(76px, 0.35fr) minmax(78px, 0.35fr) auto auto;
+        gap: 12px;
+        align-items: end;
+        padding: 14px;
+        border: 1px solid var(--line);
+        border-radius: 8px;
+        background: rgba(255, 250, 240, 0.9);
+        box-shadow: var(--shadow);
+      }
+
+      label {
+        display: grid;
+        gap: 6px;
+        color: var(--muted);
+        font-size: 0.76rem;
+        font-weight: 700;
+        text-transform: uppercase;
+      }
+
+      select,
+      input {
+        width: 100%;
+        min-height: 40px;
+        padding: 8px 10px;
+        border: 1px solid var(--line);
+        border-radius: 6px;
+        color: var(--ink);
+        background: #fffdf8;
+      }
+
+      button {
+        min-height: 40px;
+        border: 0;
+        border-radius: 20px;
+        padding: 9px 16px;
+        color: white;
+        background: var(--teal);
+        cursor: pointer;
+        display: inline-flex;
+        align-items: center;
+        justify-content: center;
+        gap: 8px;
+        transition:
+          transform 140ms ease,
+          opacity 140ms ease,
+          background 140ms ease;
+      }
+
+      button:hover {
+        transform: translateY(-1px);
+      }
+
+      button:disabled {
+        cursor: not-allowed;
+        opacity: 0.48;
+        transform: none;
+      }
+
+      .secondary {
+        color: var(--ink);
+        border: 1px solid var(--line);
+        background: #fffdf8;
+      }
+
+      .danger {
+        background: var(--red);
+      }
+
+      .control-value {
+        color: var(--ink);
+        font-size: 0.82rem;
+        font-weight: 800;
+        text-align: right;
+      }
+
+      .slider-control {
+        display: grid;
+        grid-template-columns: 1fr auto;
+        gap: 8px;
+        align-items: center;
+        min-height: 40px;
+        padding: 0 10px;
+        border: 1px solid var(--line);
+        border-radius: 6px;
+        background: #fffdf8;
+      }
+
+      .slider-control input {
+        min-height: 28px;
+        padding: 0;
+        border: 0;
+        accent-color: var(--teal);
+        background: transparent;
+      }
+
+      .toggle-label {
+        min-height: 40px;
+        align-content: center;
+      }
+
+      .toggle {
+        display: inline-flex;
+        align-items: center;
+        gap: 8px;
+        min-height: 40px;
+        color: var(--ink);
+        text-transform: none;
+        font-size: 0.9rem;
+        font-weight: 700;
+      }
+
+      .toggle input {
+        width: 18px;
+        min-height: 18px;
+        accent-color: var(--teal);
+      }
+
+      .protocol-toggles {
+        display: flex;
+        align-items: center;
+        gap: 10px;
+        min-height: 40px;
+        padding: 0 10px;
+        border: 1px solid var(--line);
+        border-radius: 6px;
+        background: #fffdf8;
+      }
+
+      main {
+        display: grid;
+        grid-template-columns: 320px minmax(0, 1fr) 360px;
+        gap: 16px;
+        min-height: 0;
+      }
+
+      section {
+        min-width: 0;
+      }
+
+      .panel {
+        border: 1px solid var(--line);
+        border-radius: 8px;
+        background: rgba(255, 250, 240, 0.9);
+        box-shadow: var(--shadow);
+      }
+
+      .panel h2 {
+        margin: 0;
+        padding: 14px 14px 10px;
+        font-size: 0.83rem;
+        color: var(--muted);
+        text-transform: uppercase;
+        letter-spacing: 0;
+      }
+
+      .metrics {
+        display: grid;
+        gap: 10px;
+        padding: 0 14px 14px;
+      }
+
+      .metric {
+        display: flex;
+        align-items: baseline;
+        justify-content: space-between;
+        gap: 12px;
+        padding: 12px;
+        border: 1px solid var(--line);
+        border-radius: 6px;
+        background: #fffdf8;
+      }
+
+      .metric span {
+        color: var(--muted);
+        font-size: 0.82rem;
+      }
+
+      .metric strong {
+        font-size: 1.35rem;
+        font-variant-numeric: tabular-nums;
+      }
+
+      .spectrum {
+        display: none;
+        grid-template-columns: repeat(40, 1fr);
+        align-items: end;
+        gap: 3px;
+        height: 138px;
+        padding: 14px;
+        border-top: 1px solid var(--line);
+      }
+
+      .bar {
+        min-height: 6px;
+        border-radius: 4px 4px 0 0;
+        background: linear-gradient(180deg, var(--teal), var(--green));
+        opacity: 0.78;
+        transform-origin: bottom;
+      }
+
+      .center-stack {
+        display: grid;
+        gap: 16px;
+        min-width: 0;
+      }
+
+      .rssi-viewer {
+        padding: 14px;
+      }
+
+      .rssi-title {
+        display: flex;
+        justify-content: center;
+        color: #9aa3a0;
+        font-size: 0.82rem;
+        font-weight: 800;
+        margin-bottom: 8px;
+      }
+
+      .channel-chart {
+        display: grid;
+        grid-template-columns: 46px minmax(0, 1fr);
+        gap: 8px;
+        min-height: 360px;
+        overflow-x: hidden;
+        overflow-y: hidden;
+        padding-bottom: 6px;
+      }
+
+      .db-axis {
+        display: grid;
+        grid-template-rows: repeat(10, 1fr);
+        align-items: start;
+        padding-top: 24px;
+        padding-bottom: 38px;
+        color: #98a19c;
+        font-size: 0.72rem;
+        text-align: right;
+      }
+
+      .db-axis-title {
+        writing-mode: vertical-rl;
+        transform: rotate(180deg);
+        align-self: center;
+        justify-self: center;
+        color: #98a19c;
+        font-size: 0.78rem;
+        font-weight: 800;
+      }
+
+      .bar-grid {
+        display: grid;
+        grid-template-columns: repeat(79, minmax(0, 1fr));
+        align-items: stretch;
+        gap: 3px;
+        min-width: 0;
+        padding-bottom: 4px;
+      }
+
+      .channel-cell {
+        display: grid;
+        grid-template-rows: 18px minmax(230px, 1fr) 34px;
+        min-width: 0;
+      }
+
+      .channel-top,
+      .channel-bottom {
+        color: #a7afaa;
+        font-size: 0.58rem;
+        font-weight: 800;
+        text-align: center;
+        font-variant-numeric: tabular-nums;
+      }
+
+      .channel-bottom {
+        justify-self: center;
+        line-height: 1;
+      }
+
+      .bar-slot {
+        position: relative;
+        display: flex;
+        align-items: end;
+        justify-content: center;
+        min-height: 230px;
+        background:
+          repeating-linear-gradient(180deg, rgba(151, 162, 158, 0.28) 0 1px, transparent 1px 28px),
+          linear-gradient(90deg, rgba(151, 162, 158, 0.2) 0 1px, transparent 1px),
+          #eef2ef;
+      }
+
+      .bar-slot.ble-adv {
+        background:
+          repeating-linear-gradient(180deg, rgba(42, 130, 76, 0.18) 0 1px, transparent 1px 28px),
+          linear-gradient(90deg, rgba(42, 130, 76, 0.18) 0 1px, transparent 1px),
+          #edf8ef;
+        box-shadow: inset 0 0 0 1px rgba(42, 130, 76, 0.28);
+      }
+
+      .channel-bar.active {
+        background: linear-gradient(180deg, #6fc1ff, #0759c8);
+      }
+
+      .channel-bar.ble-adv {
+        background: linear-gradient(180deg, #86e06d, #199447);
+      }
+
+      .channel-bar.current {
+        background: linear-gradient(180deg, #8ccfff, #2f75d7);
+        opacity: 0.5;
+      }
+
+      .channel-bar {
+        width: min(100%, 10px);
+        min-height: 3px;
+        border-radius: 2px 2px 0 0;
+        background: #d7ddda;
+        box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.45);
+        transition: height 160ms ease;
+      }
+
+      .channel-top.ble-adv,
+      .channel-bottom.ble-adv {
+        color: #1f8f4b;
+      }
+
+      .events {
+        display: grid;
+        gap: 10px;
+        max-height: calc(100vh - 222px);
+        overflow: auto;
+        padding: 14px;
+      }
+
+      .identity-table-wrap {
+        max-height: 280px;
+        overflow: auto;
+        padding: 0 14px 14px;
+      }
+
+      .tabs {
+        display: inline-flex;
+        gap: 6px;
+        padding: 0 14px 12px;
+      }
+
+      .tab-btn {
+        min-height: 32px;
+        padding: 6px 12px;
+        border-radius: 999px;
+        color: var(--ink);
+        border: 1px solid var(--line);
+        background: #fffdf8;
+      }
+
+      .tab-btn.active {
+        color: white;
+        background: var(--teal);
+        border-color: var(--teal);
+      }
+
+      .identity-table {
+        width: 100%;
+        border-collapse: collapse;
+        font-size: 0.86rem;
+      }
+
+      .identity-table th,
+      .identity-table td {
+        padding: 9px 8px;
+        border-bottom: 1px solid rgba(215, 208, 191, 0.75);
+        text-align: left;
+        white-space: nowrap;
+      }
+
+      .identity-table th {
+        color: var(--muted);
+        font-size: 0.72rem;
+        text-transform: uppercase;
+        cursor: pointer;
+        user-select: none;
+      }
+
+      .identity-table td:nth-child(2),
+      .identity-table td:nth-child(3),
+      .identity-table td:nth-child(4),
+      .identity-table td:nth-child(5),
+      .identity-table td:nth-child(6) {
+        white-space: normal;
+      }
+
+      .identity-table td:nth-child(2) {
+        font-weight: 800;
+      }
+
+      .identity-table td:nth-child(3) {
+        color: var(--muted);
+      }
+
+      .identity-table td:nth-child(4) {
+        font-variant-numeric: tabular-nums;
+        color: var(--muted);
+      }
+
+      .identity-table td:nth-child(5),
+      .identity-table td:nth-child(6) {
+        color: var(--muted);
+        font-size: 0.8rem;
+      }
+
+      .event {
+        display: grid;
+        grid-template-columns: minmax(0, 1fr) auto;
+        gap: 12px;
+        padding: 12px;
+        border: 1px solid var(--line);
+        border-left: 4px solid var(--teal);
+        border-radius: 6px;
+        background: #fffdf8;
+      }
+
+      .event.classic {
+        border-left-color: var(--gold);
+      }
+
+      .event h3 {
+        margin: 0 0 8px;
+        font-size: 1rem;
+        letter-spacing: 0;
+      }
+
+      .chips {
+        display: flex;
+        flex-wrap: wrap;
+        gap: 6px;
+      }
+
+      .chip {
+        padding: 4px 7px;
+        border-radius: 999px;
+        color: var(--ink);
+        background: var(--chip);
+        font-size: 0.78rem;
+        font-variant-numeric: tabular-nums;
+      }
+
+      .score {
+        align-self: start;
+        min-width: 58px;
+        padding: 8px;
+        border-radius: 6px;
+        color: #fff;
+        background: var(--teal);
+        text-align: center;
+        font-size: 0.82rem;
+        font-variant-numeric: tabular-nums;
+      }
+
+      .empty {
+        display: grid;
+        place-items: center;
+        min-height: 220px;
+        color: var(--muted);
+        text-align: center;
+        padding: 24px;
+      }
+
+      .candidate-list {
+        display: grid;
+        gap: 10px;
+        max-height: calc(100vh - 222px);
+        overflow: auto;
+        padding: 14px;
+      }
+
+      .candidate {
+        padding: 12px;
+        border: 1px solid var(--line);
+        border-radius: 6px;
+        background: #fffdf8;
+      }
+
+      .candidate-top {
+        display: flex;
+        justify-content: space-between;
+        gap: 10px;
+        margin-bottom: 8px;
+      }
+
+      .candidate strong {
+        font-variant-numeric: tabular-nums;
+      }
+
+      .small {
+        color: var(--muted);
+        font-size: 0.83rem;
+        line-height: 1.45;
+      }
+
+      @media (max-width: 1120px) {
+        .toolbar {
+          grid-template-columns: repeat(3, minmax(0, 1fr));
+        }
+
+        main {
+          grid-template-columns: 1fr;
+        }
+
+        .events,
+        .candidate-list {
+          max-height: none;
+        }
+
+        .channel-chart {
+          min-height: 300px;
+        }
+      }
+
+      @media (max-width: 680px) {
+        .app {
+          width: min(100vw - 18px, 1480px);
+          padding: 10px 0;
+        }
+
+        header {
+          align-items: start;
+          flex-direction: column;
+        }
+
+        .toolbar {
+          grid-template-columns: 1fr;
+        }
+
+        .event {
+          grid-template-columns: 1fr;
+        }
+
+        .score {
+          justify-self: start;
+        }
+      }
+    </style>
+  </head>
+  <body>
+    <div class="app">
+      <header>
+        <div>
+          <h1>Bluetooth Explorer</h1>
+          <div class="subtitle">SDR gateway scanner for BLE advertisements and BT Classic channel evidence</div>
+        </div>
+        <div class="status-pill">
+          <span class="dot" id="liveDot"></span>
+          <strong id="runState">Idle</strong>
+        </div>
+      </header>
+
+      <form class="toolbar" id="scanForm">
+        <label>
+          BTC SDR
+          <select id="btcDeviceSelect"></select>
+        </label>
+        <label>
+          BTLE SDR
+          <select id="btleDeviceSelect"></select>
+        </label>
+        <label>
+          Protocol
+          <span class="protocol-toggles">
+            <span class="toggle"><input id="btcInput" type="checkbox" checked /> BTC</span>
+            <span class="toggle"><input id="btleInput" type="checkbox" /> BTLE</span>
+          </span>
+        </label>
+        <label>
+          Bank
+          <select id="channelSelect"></select>
+        </label>
+        <label>
+          Rate MHz
+          <input id="sampleRateInput" type="number" min="1" max="60" step="1" value="60" />
+        </label>
+        <label>
+          Gain
+          <span class="slider-control">
+            <input id="gainInput" type="range" min="0" max="102" step="1" value="72" />
+            <span class="control-value" id="gainValue">L32 V40</span>
+          </span>
+        </label>
+        <label>
+          Dwell
+          <input id="hopDwellInput" type="number" min="0.25" max="30" step="0.05" value="0.25" />
+        </label>
+        <button id="runToggleBtn" type="submit"><span class="material-symbols-rounded">play_arrow</span><span id="runToggleText">Start</span></button>
+        <button id="clearBtn" class="secondary" type="button"><span class="material-symbols-rounded">delete_sweep</span>Clear</button>
+      </form>
+
+      <main>
+        <section class="panel">
+          <h2>RF Health</h2>
+          <div class="metrics">
+            <div class="metric"><span>RSSI</span><strong id="rssiMetric">-120.0</strong></div>
+            <div class="metric"><span>BTC RSSI</span><strong id="btcRssiMetric">-120.0</strong></div>
+            <div class="metric"><span>BTLE RSSI</span><strong id="btleRssiMetric">-120.0</strong></div>
+            <div class="metric"><span>BTC Chunks</span><strong id="btcChunksMetric">0</strong></div>
+            <div class="metric"><span>BTLE Chunks</span><strong id="btleChunksMetric">0</strong></div>
+            <div class="metric"><span>BTLE Adv CH</span><strong id="btleChannelMetric">37</strong></div>
+            <div class="metric"><span>Noise</span><strong id="noiseMetric">-120.0</strong></div>
+            <div class="metric"><span>Chunks</span><strong id="chunksMetric">0</strong></div>
+            <div class="metric"><span>Bursts</span><strong id="burstsMetric">0</strong></div>
+            <div class="metric"><span>BLE</span><strong id="bleMetric">0</strong></div>
+            <div class="metric"><span>Classic</span><strong id="classicMetric">0</strong></div>
+            <div class="metric"><span>Preamble</span><strong id="preambleMetric">0</strong></div>
+            <div class="metric"><span>Barker</span><strong id="barkerMetric">0</strong></div>
+            <div class="metric"><span>Access</span><strong id="accessMetric">0</strong></div>
+            <div class="metric"><span>LAP</span><strong id="lapMetric">0</strong></div>
+          </div>
+          <div class="spectrum" id="spectrum"></div>
+        </section>
+
+        <div class="center-stack">
+          <section class="panel rssi-viewer">
+            <h2>Classic Channels</h2>
+            <div class="rssi-title">BT Classic channel</div>
+            <div class="channel-chart">
+              <div class="db-axis">
+                <span>-20</span>
+                <span>-30</span>
+                <span>-40</span>
+                <span>-50</span>
+                <span>-60</span>
+                <span>-70</span>
+                <span>-80</span>
+                <span>-90</span>
+                <span>-100</span>
+                <span>-110</span>
+              </div>
+              <div class="bar-grid" id="channelChart"></div>
+            </div>
+            <div class="db-axis-title">dBFS</div>
+          </section>
+
+          <section class="panel">
+            <h2>Detections</h2>
+            <div class="tabs">
+              <button class="tab-btn active" id="btcTabBtn" type="button">BTC</button>
+              <button class="tab-btn" id="btleTabBtn" type="button">BTLE</button>
+            </div>
+            <div class="identity-table-wrap" id="identityTableWrap"></div>
+          </section>
+        </div>
+
+        <section class="panel">
+          <h2>UAP Candidates</h2>
+          <div class="candidate-list" id="candidates"></div>
+        </section>
+      </main>
+    </div>
+
+    <script>
+      const btcDeviceSelect = document.getElementById("btcDeviceSelect");
+      const btleDeviceSelect = document.getElementById("btleDeviceSelect");
+      const btcInput = document.getElementById("btcInput");
+      const btleInput = document.getElementById("btleInput");
+      const channelSelect = document.getElementById("channelSelect");
+      const scanForm = document.getElementById("scanForm");
+      const runToggleBtn = document.getElementById("runToggleBtn");
+      const runToggleText = document.getElementById("runToggleText");
+      const clearBtn = document.getElementById("clearBtn");
+      const hopDwellInput = document.getElementById("hopDwellInput");
+      const gainInput = document.getElementById("gainInput");
+      const gainValue = document.getElementById("gainValue");
+      const liveDot = document.getElementById("liveDot");
+      const runState = document.getElementById("runState");
+      const spectrum = document.getElementById("spectrum");
+      const channelChart = document.getElementById("channelChart");
+      const identityTableWrap = document.getElementById("identityTableWrap");
+      const btcTabBtn = document.getElementById("btcTabBtn");
+      const btleTabBtn = document.getElementById("btleTabBtn");
+      const candidatesEl = document.getElementById("candidates");
+      let activeDetectionTab = "BTC";
+      let tableSort = { key: "last_seen_at", direction: "desc" };
+      const metrics = {
+        rssi: document.getElementById("rssiMetric"),
+        btcRssi: document.getElementById("btcRssiMetric"),
+        btleRssi: document.getElementById("btleRssiMetric"),
+        btcChunks: document.getElementById("btcChunksMetric"),
+        btleChunks: document.getElementById("btleChunksMetric"),
+        btleChannel: document.getElementById("btleChannelMetric"),
+        noise: document.getElementById("noiseMetric"),
+        chunks: document.getElementById("chunksMetric"),
+        bursts: document.getElementById("burstsMetric"),
+        ble: document.getElementById("bleMetric"),
+        classic: document.getElementById("classicMetric"),
+        preamble: document.getElementById("preambleMetric"),
+        barker: document.getElementById("barkerMetric"),
+        access: document.getElementById("accessMetric"),
+        lap: document.getElementById("lapMetric"),
+      };
+
+      const bars = Array.from({ length: 40 }, (_, idx) => {
+        const bar = document.createElement("div");
+        bar.className = "bar";
+        bar.style.height = `${8 + ((idx * 13) % 42)}px`;
+        spectrum.appendChild(bar);
+        return bar;
+      });
+      const bleAdvByClassicChannel = new Map([
+        [0, { channel: 37, mhz: 2402 }],
+        [24, { channel: 38, mhz: 2426 }],
+        [78, { channel: 39, mhz: 2480 }],
+      ]);
+      const channelBars = Array.from({ length: 79 }, (_, idx) => {
+        const cell = document.createElement("div");
+        cell.className = "channel-cell";
+        const bleAdv = bleAdvByClassicChannel.get(idx);
+
+        const top = document.createElement("div");
+        top.className = "channel-top";
+        top.textContent = bleAdv ? `BLE ${bleAdv.channel}` : idx % 5 === 0 ? String(idx).padStart(2, "0") : "";
+        top.classList.toggle("ble-adv", Boolean(bleAdv));
+
+        const slot = document.createElement("div");
+        slot.className = "bar-slot";
+        slot.classList.toggle("ble-adv", Boolean(bleAdv));
+
+        const bar = document.createElement("div");
+        bar.className = "channel-bar";
+        bar.dataset.channel = String(idx);
+        bar.classList.toggle("ble-adv", Boolean(bleAdv));
+        slot.appendChild(bar);
+
+        const bottom = document.createElement("div");
+        bottom.className = "channel-bottom";
+        bottom.textContent = bleAdv ? `${bleAdv.mhz}` : idx % 10 === 0 ? `${2402 + idx}` : "";
+        bottom.classList.toggle("ble-adv", Boolean(bleAdv));
+
+        cell.appendChild(top);
+        cell.appendChild(slot);
+        cell.appendChild(bottom);
+        channelChart.appendChild(cell);
+        return bar;
+      });
+
+      function setChannels() {
+        const mode = selectedMode();
+        channelSelect.innerHTML = "";
+        if (mode === "classic" || mode === "both") {
+          document.getElementById("sampleRateInput").value = "60";
+          [0, 19].forEach((idx) => {
+            const opt = document.createElement("option");
+            opt.value = String(idx);
+            opt.textContent = `${idx}-${idx + 59} · ${(2402 + idx + 29.5).toFixed(1)} MHz`;
+            channelSelect.appendChild(opt);
+          });
+        } else {
+          document.getElementById("sampleRateInput").value = "2";
+          [
+            [37, 2402],
+            [38, 2426],
+            [39, 2480],
+          ].forEach(([ch, mhz]) => {
+            const opt = document.createElement("option");
+            opt.value = String(ch);
+            opt.textContent = `${ch} · ${mhz} MHz`;
+            channelSelect.appendChild(opt);
+          });
+        }
+      }
+
+      function selectedMode() {
+        if (btcInput.checked && btleInput.checked) return "both";
+        if (btcInput.checked) return "classic";
+        if (btleInput.checked) return "ble";
+        btcInput.checked = true;
+        return "classic";
+      }
+
+      function nextChannelValue() {
+        const options = Array.from(channelSelect.options);
+        if (!options.length) return Number(channelSelect.value || 0);
+        const current = options.findIndex((opt) => opt.value === channelSelect.value);
+        const next = options[(current + 1 + options.length) % options.length];
+        channelSelect.value = next.value;
+        window.bleHopIndex = ((window.bleHopIndex || 0) + 1) % 3;
+        return Number(next.value);
+      }
+
+      async function loadDevices() {
+        btcDeviceSelect.innerHTML = "<option>Loading...</option>";
+        btleDeviceSelect.innerHTML = "<option>Loading...</option>";
+        try {
+          const resp = await fetch("/api/devices");
+          const data = await resp.json();
+          if (!resp.ok || !Array.isArray(data)) throw new Error(data.error || "No devices");
+          btcDeviceSelect.innerHTML = "";
+          btleDeviceSelect.innerHTML = "";
+          data.forEach((dev) => {
+            [btcDeviceSelect, btleDeviceSelect].forEach((select) => {
+              const opt = document.createElement("option");
+              opt.value = dev.id;
+              opt.textContent = `${dev.label || dev.id} (${dev.id})`;
+              select.appendChild(opt);
+            });
+          });
+          const selectMatch = (select, pattern) => {
+            const option = Array.from(select.options).find((opt) => opt.value.toLowerCase().includes(pattern) || opt.textContent.toLowerCase().includes(pattern));
+            if (option) select.value = option.value;
+          };
+          selectMatch(btcDeviceSelect, "bladerf");
+          selectMatch(btleDeviceSelect, "hackrf");
+          if (!data.length) {
+            btcDeviceSelect.innerHTML = "<option>No SDR devices</option>";
+            btleDeviceSelect.innerHTML = "<option>No SDR devices</option>";
+          }
+        } catch (err) {
+          btcDeviceSelect.innerHTML = `<option>${err.message}</option>`;
+          btleDeviceSelect.innerHTML = `<option>${err.message}</option>`;
+        }
+      }
+
+      function fmtDb(value) {
+        return `${Number(value || -120).toFixed(1)}`;
+      }
+
+      function fmtFreq(hz) {
+        return `${(Number(hz || 0) / 1e6).toFixed(3)} MHz`;
+      }
+
+      function age(ts) {
+        const seconds = Math.max(0, Math.round(Date.now() / 1000 - Number(ts || 0)));
+        return `${seconds}s`;
+      }
+
+      function fmtUuid16(row) {
+        if (!Array.isArray(row.uuid16)) return "";
+        return row.uuid16
+          .map((uuid, idx) => {
+            const name = Array.isArray(row.uuid16_names) ? row.uuid16_names[idx] : "";
+            return name ? `${uuid} ${name}` : uuid;
+          })
+          .join(", ");
+      }
+
+      function fmtManufacturer(row) {
+        if (!row.manufacturer) return "";
+        const company = row.manufacturer.company_id || "";
+        const name = row.manufacturer.company_name || "";
+        const data = row.manufacturer.data || "";
+        const label = name || company;
+        return data ? `${label} ${data.slice(0, 10)}${data.length > 10 ? "..." : ""}` : label;
+      }
+
+      function sortValue(row, key) {
+        if (key === "uuid16") return fmtUuid16(row);
+        if (key === "manufacturer") return fmtManufacturer(row);
+        return row[key];
+      }
+
+      function renderIdentityTable(rows) {
+        const filtered = rows.filter((row) => row.protocol === activeDetectionTab);
+        const sorted = [...filtered].sort((a, b) => {
+          const dir = tableSort.direction === "asc" ? 1 : -1;
+          const av = sortValue(a, tableSort.key);
+          const bv = sortValue(b, tableSort.key);
+          if (typeof av === "number" || typeof bv === "number") return ((Number(av) || 0) - (Number(bv) || 0)) * dir;
+          return String(av || "").localeCompare(String(bv || "")) * dir;
+        });
+        if (!filtered.length) {
+          identityTableWrap.innerHTML = `<div class="empty">No detections yet</div>`;
+          return;
+        }
+        identityTableWrap.innerHTML = `
+          <table class="identity-table">
+            <thead>
+              <tr>
+                <th data-sort="protocol">Proto</th>
+                <th data-sort="identity">Identity</th>
+                <th data-sort="identity_source">Source</th>
+                <th data-sort="mac">MAC</th>
+                <th data-sort="uuid16">UUID16</th>
+                <th data-sort="manufacturer">Manufacturer</th>
+                <th data-sort="detections">Count</th>
+                <th data-sort="last_seen_at">Last</th>
+                <th data-sort="last_rssi_dbfs">RSSI</th>
+                <th data-sort="channel">CH</th>
+              </tr>
+            </thead>
+            <tbody>
+              ${sorted
+                .map(
+                  (row) => `
+                    <tr>
+                      <td>${row.protocol || ""}</td>
+                      <td>${row.identity || row.name || row.mac || ""}</td>
+                      <td>${row.identity_source || ""}</td>
+                      <td>${row.mac || ""}</td>
+                      <td>${fmtUuid16(row)}</td>
+                      <td title="${row.manufacturer?.company_id || ""} ${row.manufacturer?.data || ""}">${fmtManufacturer(row)}</td>
+                      <td>${Number(row.detections || 0).toLocaleString()}</td>
+                      <td>${age(row.last_seen_at)}</td>
+                      <td>${fmtDb(row.last_rssi_dbfs)}</td>
+                      <td>${row.channel ?? ""}</td>
+                    </tr>
+                  `,
+                )
+                .join("")}
+            </tbody>
+          </table>
+        `;
+        identityTableWrap.querySelectorAll("th[data-sort]").forEach((th) => {
+          th.addEventListener("click", () => {
+            const key = th.dataset.sort;
+            tableSort = {
+              key,
+              direction: tableSort.key === key && tableSort.direction === "desc" ? "asc" : "desc",
+            };
+            renderIdentityTable(rows);
+          });
+        });
+      }
+
+      function renderCandidates(candidates, addresses = []) {
+        if (!candidates.length && !addresses.length) {
+          candidatesEl.innerHTML = `<div class="empty">No LAPs yet</div>`;
+          return;
+        }
+        const addressRows = addresses
+          .map((address) => `
+            <article class="candidate">
+              <div class="candidate-top">
+                <strong>LAP ${address.lap} · UAP ${address.uap || "XXX"}</strong>
+                <span class="chip">${address.status || "observed"}</span>
+              </div>
+              <div class="chips">
+                <span class="chip">CH ${address.channel}</span>
+                <span class="chip">${address.candidate_count || 0} candidates</span>
+                <span class="chip">${Number(address.seen_count || 1)} hits</span>
+                <span class="chip">${fmtDb(address.rssi_dbfs)} dBFS</span>
+              </div>
+              <p class="small">Holding UAP as XXX until header/HEC brute force resolves it.</p>
+            </article>
+          `)
+          .join("");
+        const candidateRows = candidates
+          .map((candidate) => {
+            const uap = candidate.uap_hex || (candidate.uap === null || candidate.uap === undefined ? "Pending" : candidate.uap);
+            const note = Array.isArray(candidate.notes) ? candidate.notes[0] : candidate.status || "";
+            return `
+              <article class="candidate">
+                <div class="candidate-top">
+                  <strong>${candidate.lap ? `LAP ${candidate.lap} · ` : ""}UAP ${uap}</strong>
+                  <span class="chip">${Math.round(Number(candidate.score || 0) * 100)}%</span>
+                </div>
+                <div class="chips">
+                  <span class="chip">CH ${candidate.channel}</span>
+                  <span class="chip">${candidate.status || "candidate"}</span>
+                  <span class="chip">${candidate.candidate_count || 0} left</span>
+                  <span class="chip">${fmtFreq(candidate.center_freq_hz)}</span>
+                  <span class="chip">${fmtDb(candidate.rssi_dbfs)} dBFS</span>
+                </div>
+                <p class="small">${note}</p>
+              </article>
+            `;
+          })
+          .join("");
+        candidatesEl.innerHTML = addressRows + candidateRows;
+      }
+
+      function renderBars(status) {
+        const rssi = Number(status.last_rssi_dbfs || -120);
+        const level = Math.max(0, Math.min(1, (rssi + 90) / 60));
+        bars.forEach((bar, idx) => {
+          const wobble = Math.sin(Date.now() / 310 + idx * 0.55) * 0.18;
+          const value = Math.max(0.04, Math.min(1, level + wobble + ((idx * 7) % 11) / 42));
+          bar.style.height = `${8 + value * 120}px`;
+        });
+      }
+
+      function currentBankChannels(status) {
+        if (!["classic", "both"].includes(status.mode) || !status.running) return new Set();
+        const start = Number(status.channel || 0);
+        return new Set(Array.from({ length: 60 }, (_, idx) => start + idx).filter((ch) => ch >= 0 && ch < 79));
+      }
+
+      function statusLabel(status) {
+        if (!status.running) return "Idle";
+        if (status.mode === "classic" || status.mode === "both") {
+          const start = Number(status.channel || 0);
+          return `${status.mode === "both" ? "BTC+BTLE" : "CLASSIC"} BANK ${start}-${Math.min(78, start + 59)}`;
+        }
+        return `BTLE CH ${status.channel}`;
+      }
+
+      function renderChannelActivity(status) {
+        const activity = status.channel_activity || [];
+        const bank = currentBankChannels(status);
+        const maxHits = Math.max(1, ...activity.map((item) => Number(item.hits || 0)));
+        channelBars.forEach((bar, idx) => {
+          const row = activity[idx] || { hits: 0, rssi_dbfs: -120 };
+          const hits = Number(row.hits || 0);
+          const rssi = Number(row.rssi_dbfs || -120);
+          const hitLevel = hits / maxHits;
+          const rssiLevel = Math.max(0, Math.min(1, (rssi + 110) / 80));
+          const scannedIdle = bank.has(idx) ? 0.18 : 0.02;
+          const level = hits > 0 ? Math.max(0.22, hitLevel, rssiLevel * 0.78) : scannedIdle;
+          const bleAdv = bleAdvByClassicChannel.get(idx);
+          bar.classList.toggle("active", hits > 0);
+          bar.classList.toggle("ble-adv", Boolean(bleAdv));
+          bar.classList.toggle("current", bank.has(idx) && hits === 0 && !bleAdv);
+          bar.style.height = `${3 + level * 224}px`;
+          bar.title = bleAdv
+            ? `BLE adv CH ${bleAdv.channel} / BTC CH ${idx}: ${hits} BTC hits, ${fmtDb(rssi)} dBFS`
+            : `BTC CH ${idx}: ${hits} hits, ${fmtDb(rssi)} dBFS`;
+        });
+      }
+
+      async function pollStatus() {
+        try {
+          const resp = await fetch("/api/status");
+          const status = await resp.json();
+          liveDot.classList.toggle("live", Boolean(status.running && status.worker_alive));
+          runState.textContent = statusLabel(status);
+          runToggleBtn.classList.toggle("danger", Boolean(status.running));
+          runToggleText.textContent = status.running ? "Stop" : "Start";
+          runToggleBtn.querySelector(".material-symbols-rounded").textContent = status.running ? "stop" : "play_arrow";
+          metrics.rssi.textContent = fmtDb(status.last_rssi_dbfs);
+          metrics.btcRssi.textContent = fmtDb(status.rssi_by_mode?.classic);
+          metrics.btleRssi.textContent = fmtDb(status.rssi_by_mode?.ble);
+          metrics.btcChunks.textContent = Number(status.chunks_by_mode?.classic || 0).toLocaleString();
+          metrics.btleChunks.textContent = Number(status.chunks_by_mode?.ble || 0).toLocaleString();
+          metrics.btleChannel.textContent = status.channels_by_mode?.ble || [37, 38, 39][window.bleHopIndex || 0];
+          metrics.noise.textContent = fmtDb(status.noise_floor_dbfs);
+          metrics.chunks.textContent = Number(status.chunks_seen || 0).toLocaleString();
+          metrics.bursts.textContent = Number(status.bursts_seen || 0).toLocaleString();
+          metrics.ble.textContent = Number(status.ble_packets_seen || 0).toLocaleString();
+          metrics.classic.textContent = Number(status.classic_bursts_seen || 0).toLocaleString();
+          metrics.preamble.textContent = Number(status.decoder_stats?.preamble_hits || 0).toLocaleString();
+          metrics.barker.textContent = Number(status.decoder_stats?.barker_hits || 0).toLocaleString();
+          metrics.access.textContent = Number(status.decoder_stats?.access_code_hits || 0).toLocaleString();
+          metrics.lap.textContent = Number(status.decoder_stats?.lap_hits || 0).toLocaleString();
+          renderIdentityTable(status.discovery_table || []);
+          renderCandidates(status.classic_candidates || [], status.classic_addresses || []);
+          renderBars(status);
+          renderChannelActivity(status);
+        } catch {
+          liveDot.classList.remove("live");
+          runState.textContent = "Offline";
+        }
+      }
+
+      async function startScan({ preserve = false, hop = false } = {}) {
+        const rateMhz = Math.max(1, Math.min(60, Number(document.getElementById("sampleRateInput").value || 60)));
+        const totalGain = Number(gainInput.value || 72);
+        const lnaGain = Math.max(0, Math.min(40, totalGain));
+        const vgaGain = Math.max(0, Math.min(62, totalGain - lnaGain));
+        await fetch("/api/scan/start", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            device_id: btcDeviceSelect.value || btleDeviceSelect.value,
+            btc_device_id: btcDeviceSelect.value,
+            btle_device_id: btleDeviceSelect.value,
+            mode: selectedMode(),
+            channel: Number(channelSelect.value),
+            ble_channel: [37, 38, 39][(window.bleHopIndex || 0) % 3],
+            sample_rate_sps: Math.round(rateMhz * 1_000_000),
+            lna_gain_db: lnaGain,
+            vga_gain_db: vgaGain,
+            preserve_detections: preserve,
+          }),
+        });
+        if (!hop) scheduleAutoHop();
+        pollStatus();
+      }
+
+      function scheduleAutoHop() {
+        clearTimeout(window.autoHopTimer);
+        if (runToggleText.textContent !== "Stop") return;
+        const dwellMs = Math.max(0.25, Math.min(30, Number(hopDwellInput.value || 0.25))) * 1000;
+        window.autoHopTimer = setTimeout(async () => {
+          if (runToggleText.textContent !== "Stop") return;
+          nextChannelValue();
+          await startScan({ preserve: true, hop: true });
+          scheduleAutoHop();
+        }, dwellMs);
+      }
+
+      scanForm.addEventListener("submit", async (event) => {
+        event.preventDefault();
+        if (runToggleText.textContent === "Stop") {
+          clearTimeout(window.autoHopTimer);
+          await fetch("/api/scan/stop", { method: "POST" });
+          pollStatus();
+        } else {
+          await startScan();
+        }
+      });
+
+      clearBtn.addEventListener("click", async () => {
+        clearTimeout(window.autoHopTimer);
+        await fetch("/api/clear", { method: "POST" });
+        pollStatus();
+      });
+
+      gainInput.addEventListener("input", () => {
+        const totalGain = Number(gainInput.value || 0);
+        const lnaGain = Math.max(0, Math.min(40, totalGain));
+        const vgaGain = Math.max(0, Math.min(62, totalGain - lnaGain));
+        gainValue.textContent = `L${lnaGain} V${vgaGain}`;
+      });
+      hopDwellInput.addEventListener("change", scheduleAutoHop);
+      btcTabBtn.addEventListener("click", () => {
+        activeDetectionTab = "BTC";
+        btcTabBtn.classList.add("active");
+        btleTabBtn.classList.remove("active");
+        pollStatus();
+      });
+      btleTabBtn.addEventListener("click", () => {
+        activeDetectionTab = "BTLE";
+        btleTabBtn.classList.add("active");
+        btcTabBtn.classList.remove("active");
+        pollStatus();
+      });
+      btcInput.addEventListener("change", () => {
+        setChannels();
+        scheduleAutoHop();
+      });
+      btleInput.addEventListener("change", () => {
+        setChannels();
+        scheduleAutoHop();
+      });
+      setChannels();
+      loadDevices();
+      pollStatus();
+      setInterval(pollStatus, 900);
+    </script>
+  </body>
+</html>
