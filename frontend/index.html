@@ -1067,19 +1067,22 @@
           candidatesEl.innerHTML = `<div class="empty">No LAPs yet</div>`;
           return;
         }
+        const inquiryStatus = target?.inquiry_status || "";
+        const inquiryHelper = target?.inquiry_helper?.mac || "";
         const targetRow = target || targetError
           ? `
             <article class="candidate">
               <div class="candidate-top">
                 <strong>${target ? `BTC target ${target.mac}` : "BTC target not armed"}</strong>
-                <span class="chip">${targetError ? "warning" : "discoverable"}</span>
+                <span class="chip">${targetError ? "warning" : inquiryHelper ? "inquiry active" : "discoverable only"}</span>
               </div>
               <div class="chips">
                 ${target ? `<span class="chip">LAP ${target.lap}</span>` : ""}
                 ${target ? `<span class="chip">UAP ${target.uap}</span>` : ""}
                 ${target ? `<span class="chip">NAP ${target.nap}</span>` : ""}
+                ${inquiryHelper ? `<span class="chip">helper ${inquiryHelper}</span>` : ""}
               </div>
-              <p class="small">${targetError || "Bluetoothctl enabled discoverable mode; matching Classic detections against this MAC-derived LAP/UAP."}</p>
+              <p class="small">${targetError || inquiryStatus || "Discoverable mode is on, but no second Bluetooth controller is actively performing BR/EDR inquiry."}</p>
             </article>
           `
           : "";

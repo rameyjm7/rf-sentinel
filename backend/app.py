@@ -991,6 +991,7 @@ worker_stop = threading.Event()
 worker_thread: threading.Thread | None = None
 worker_stops: dict[str, threading.Event] = {}
 worker_threads: dict[str, threading.Thread] = {}
+inquiry_process: subprocess.Popen[str] | None = None
 ble_identity_cache: dict[str, dict[str, Any]] = {}
 company_identifier_lut: dict[str, str] = {}
 uuid16_identifier_lut: dict[str, str] = {}
@@ -1361,9 +1362,26 @@ def _classic_target_from_mac(mac: str) -> dict[str, Any]:
     }
 
 
-def _enable_discoverable_controller() -> tuple[dict[str, Any], str]:
+def _bluetooth_controllers() -> list[dict[str, str]]:
+    proc = subprocess.run(
+        ["bluetoothctl", "list"],
+        text=True,
+        capture_output=True,
+        timeout=5,
+        check=False,
+    )
+    output = (proc.stdout or "") + (proc.stderr or "")
+    controllers: list[dict[str, str]] = []
+    for match in re.finditer(r"Controller\s+([0-9A-Fa-f:]{17})(?:\s+(.+))?", output):
+        controllers.append({"mac": match.group(1).upper(), "name": (match.group(2) or "").strip()})
+    return controllers
+
+
+def _enable_discoverable_controller(controller_mac: str | None = None) -> tuple[dict[str, Any], str]:
+    select_cmd = [f"select {controller_mac}"] if controller_mac else []
     commands = "\n".join(
-        [
+        select_cmd
+        + [
             "power on",
             "agent on",
             "default-agent",
@@ -1387,9 +1405,58 @@ def _enable_discoverable_controller() -> tuple[dict[str, Any], str]:
     if not match:
         raise RuntimeError(output.strip() or "bluetoothctl did not report a controller address")
     target = _classic_target_from_mac(match.group(1))
+    target["controller"] = match.group(1).upper()
     target["discoverable"] = "Discoverable: yes" in output or "Changing discoverable on succeeded" in output
     target["bluetoothctl_returncode"] = proc.returncode
     return target, output
+
+
+def _start_bredr_inquiry(exclude_controller: str | None = None) -> tuple[dict[str, Any] | None, str]:
+    global inquiry_process
+    _stop_bredr_inquiry()
+    controllers = _bluetooth_controllers()
+    helper = next(
+        (controller for controller in controllers if controller["mac"].upper() != str(exclude_controller or "").upper()),
+        None,
+    )
+    if helper is None:
+        return None, "No second Bluetooth controller available for active BR/EDR inquiry"
+    commands = "\n".join(
+        [
+            f"select {helper['mac']}",
+            "power on",
+            "scan bredr on",
+        ]
+    )
+    inquiry_process = subprocess.Popen(
+        ["bluetoothctl"],
+        stdin=subprocess.PIPE,
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+        text=True,
+    )
+    if inquiry_process.stdin:
+        inquiry_process.stdin.write(commands + "\n")
+        inquiry_process.stdin.flush()
+    return helper, f"BR/EDR inquiry running on {helper['mac']}"
+
+
+def _stop_bredr_inquiry() -> None:
+    global inquiry_process
+    proc = inquiry_process
+    inquiry_process = None
+    if proc is None:
+        return
+    try:
+        if proc.stdin:
+            proc.stdin.write("scan off\nexit\n")
+            proc.stdin.flush()
+    except (BrokenPipeError, OSError):
+        pass
+    try:
+        proc.wait(timeout=2)
+    except subprocess.TimeoutExpired:
+        proc.terminate()
 
 
 def _stream_active(stream_id: str) -> bool:
@@ -1542,6 +1609,7 @@ def _available_devices() -> list[dict[str, Any]]:
 
 def _stop_scan(stop_gateway: bool = True) -> None:
     global worker_thread, worker_threads, worker_stops
+    _stop_bredr_inquiry()
     worker_stop.set()
     if worker_thread and worker_thread.is_alive():
         worker_thread.join(timeout=2.0)
@@ -1568,6 +1636,8 @@ def _stop_scan(stop_gateway: bool = True) -> None:
         state.worker_error = ""
         state.worker_errors = {}
         state.gateway_start_response = None
+        state.test_target = None
+        state.test_target_error = ""
 
 
 def _channel_freq(mode: str, channel: int) -> int:
@@ -1679,12 +1749,17 @@ def start_scan():
     if mode in {"classic", "both"}:
         try:
             btc_test_target, _ = _enable_discoverable_controller()
+            helper, helper_message = _start_bredr_inquiry(str(btc_test_target.get("controller") or ""))
+            btc_test_target["inquiry_helper"] = helper
+            btc_test_target["inquiry_status"] = helper_message
         except FileNotFoundError:
             btc_test_error = "bluetoothctl is not installed or not on PATH"
         except subprocess.TimeoutExpired:
             btc_test_error = "bluetoothctl timed out while enabling discoverable mode"
         except (RuntimeError, ValueError) as exc:
             btc_test_error = str(exc)
+    else:
+        _stop_bredr_inquiry()
 
     try:
         started: dict[str, dict[str, Any]] = {}
