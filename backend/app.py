@@ -34,11 +34,18 @@ DATA_DIR = Path(__file__).resolve().parent / "data"
 BLE_IDENTITY_CACHE_PATH = DATA_DIR / "ble_identities.json"
 COMPANY_IDENTIFIERS_PATH = DATA_DIR / "company_identifiers.json"
 UUID16_IDENTIFIERS_PATH = DATA_DIR / "uuid16_identifiers.json"
+BTC_SNIFFER_ROOT = Path(os.getenv("BTC_SNIFFER_ROOT", str(Path(__file__).resolve().parents[1] / "cpp" / "btcexplorer-sniffer")))
+BTC_SNIFFER_BINARY = Path(os.getenv("BTC_SNIFFER_BINARY", str(BTC_SNIFFER_ROOT / "build" / "btcexplorer-sniffer")))
+BTC_SNIFFER_LOG_PATH = Path(os.getenv("BTC_SNIFFER_LOG", str(DATA_DIR / "btcexplorer-sniffer.log")))
+BTC_ENGINE_DEFAULT = os.getenv("BTC_ENGINE", "btcsniffer").strip().lower()
 INVALID_CLK_INDEX = -1
 DELTA_TS_SAME_THRESHOLD_US = 40
 DELTA_TS_SLOT_THRESHOLD_US = 620
 SLOT_DURATION_US = 625.0
-SLOT_ERROR_THRESHOLD = 0.03
+SLOT_ERROR_THRESHOLD = 0.05
+BT_CLASSIC_ACCESS_REPAIR_MAX_DISTANCE = 0
+BT_CLASSIC_HEADER_MIN_PERFECT_TRIPLETS = 18
+BT_CLASSIC_USE_CPP_FFT = os.getenv("BT_CLASSIC_USE_CPP_FFT", "1").strip().lower() not in {"0", "false", "no"}
 
 
 def _design_lowpass_taps(sample_rate_hz: int, cutoff_hz: float, num_taps: int) -> np.ndarray:
@@ -130,6 +137,9 @@ class ExplorerState:
     decoder_stats: dict[str, Any] = field(default_factory=dict)
     test_target: dict[str, Any] | None = None
     test_target_error: str = ""
+    btc_engine: str = ""
+    btc_engine_command: list[str] = field(default_factory=list)
+    btc_engine_log: str = ""
 
 
 @dataclass
@@ -161,10 +171,12 @@ class BluetoothDetector:
             "barker_hits": 0,
             "access_code_mismatch": 0,
             "access_code_hits": 0,
+            "access_code_repair_hits": 0,
             "target_access_near_hits": 0,
             "target_access_best_distance": 68,
             "lap_hits": 0,
             "header_failures": 0,
+            "header_relaxed_hits": 0,
             "uap_candidate_hits": 0,
         }
 
@@ -491,6 +503,61 @@ class BluetoothDetector:
             )
         return rssi_dbfs, events, []
 
+    def process_classic_cpp_bits(self, bits: list[int], rssi_dbfs: float) -> tuple[float, list[dict[str, Any]], list[dict[str, Any]]]:
+        events: list[dict[str, Any]] = []
+        candidates: list[dict[str, Any]] = []
+        tail = self._classic_bit_tails.get(0, [])
+        base_bit_index = self._classic_bits_processed - len(tail)
+        search_bits = tail + bits
+        min_packet_bits = 72 + 54
+        pos = 0
+        stop = max(0, len(search_bits) - min_packet_bits)
+        while pos < stop:
+            if not self._classic_preamble_ok(search_bits, pos):
+                pos += 1
+                continue
+            self.stats["preamble_hits"] += 1
+            if self._classic_barker(search_bits, pos) is not None:
+                self.stats["barker_hits"] += 1
+            access = self._classic_access_code(search_bits, pos)
+            if access is None:
+                self._classic_target_access_diagnostic(search_bits, pos)
+                pos += 1
+                continue
+            self.stats["access_code_hits"] += 1
+            header_result = self._classic_bruteforce_all_uaps(search_bits[pos + 72 : pos + 72 + 54])
+            if header_result["valid_uaps"] == 0:
+                self.stats["header_failures"] += 1
+                pos += 1
+                continue
+            self.stats["lap_hits"] += 1
+            self.stats["uap_candidate_hits"] += int(header_result["valid_uaps"])
+            observation = {
+                "lap": access["lap"],
+                "access_word": access["access_word"],
+                "observed_access_word": access.get("observed_access_word", access["access_word"]),
+                "repair_distance": int(access.get("repair_distance", 0)),
+                "repaired": bool(access.get("repaired", False)),
+                "header": header_result["header"],
+                "header_perfect_triplets": int(header_result.get("perfect_triplets", 0)),
+                "header_relaxed": bool(header_result.get("relaxed", False)),
+                "uap_results": header_result["uap_results"],
+                "valid_uaps": header_result["valid_uaps"],
+                "ts_us": int(base_bit_index + pos),
+                "rssi_dbfs": round(rssi_dbfs, 1),
+            }
+            event, lap_candidates = self._update_lap_state(observation)
+            event["phase"] = 0
+            event["demod"] = "cpp-cross"
+            events.append(event)
+            candidates.extend(lap_candidates)
+            pos += 100
+            if len(events) >= 8:
+                break
+        self._classic_bit_tails[0] = search_bits[-192:]
+        self._classic_bits_processed += len(bits)
+        return rssi_dbfs, events, candidates
+
     def _extract_classic_observations(
         self,
         bits: list[int],
@@ -520,13 +587,18 @@ class BluetoothDetector:
                 {
                     "lap": access["lap"],
                     "access_word": access["access_word"],
+                    "observed_access_word": access.get("observed_access_word", access["access_word"]),
+                    "repair_distance": int(access.get("repair_distance", 0)),
+                    "repaired": bool(access.get("repaired", False)),
                     "header": header_result["header"],
+                    "header_perfect_triplets": int(header_result.get("perfect_triplets", 0)),
+                    "header_relaxed": bool(header_result.get("relaxed", False)),
                     "uap_results": header_result["uap_results"],
-                    "valid_uaps": header_result["valid_uaps"],
-                    "ts_us": int(base_bit_index + pos),
-                    "rssi_dbfs": round(rssi_dbfs, 1),
-                }
-            )
+            "valid_uaps": header_result["valid_uaps"],
+            "ts_us": int(base_bit_index + pos),
+            "rssi_dbfs": round(rssi_dbfs, 1),
+        }
+    )
             if len(observations) >= 8:
                 break
         return observations
@@ -570,8 +642,18 @@ class BluetoothDetector:
         expected = (ctilde | (xtilde << 34)) ^ p
         if access_word != expected:
             self.stats["access_code_mismatch"] += 1
-            return None
-        return {"lap": lap, "access_word": access_word}
+            distance = (access_word ^ expected).bit_count()
+            if distance > BT_CLASSIC_ACCESS_REPAIR_MAX_DISTANCE:
+                return None
+            self.stats["access_code_repair_hits"] += 1
+            return {
+                "lap": lap,
+                "access_word": expected,
+                "observed_access_word": access_word,
+                "repair_distance": distance,
+                "repaired": True,
+            }
+        return {"lap": lap, "access_word": access_word, "repair_distance": 0, "repaired": False}
 
     def _classic_target_access_diagnostic(self, bits: list[int], pos: int) -> None:
         with state_lock:
@@ -634,15 +716,24 @@ class BluetoothDetector:
                 perfect_rx += 1
             if s1 > s0:
                 header |= 0x20000
-        if perfect_rx != 18:
-            return {"header": header, "valid_uaps": 0, "uap_results": []}
+        if perfect_rx < BT_CLASSIC_HEADER_MIN_PERFECT_TRIPLETS:
+            return {"header": header, "valid_uaps": 0, "uap_results": [], "perfect_triplets": perfect_rx, "relaxed": False}
+        relaxed = perfect_rx != 18
+        if relaxed:
+            self.stats["header_relaxed_hits"] += 1
 
         results: list[dict[str, Any]] = []
         for uap in range(256):
             clks = self._classic_header_clks_for_uap(header, uap)
             if clks:
                 results.append({"uap": uap, "clks": clks})
-        return {"header": header, "valid_uaps": len(results), "uap_results": results}
+        return {
+            "header": header,
+            "valid_uaps": len(results),
+            "uap_results": results,
+            "perfect_triplets": perfect_rx,
+            "relaxed": relaxed,
+        }
 
     def _classic_header_clks_for_uap(self, header: int, uap: int) -> list[int]:
         found: list[int] = []
@@ -714,7 +805,16 @@ class BluetoothDetector:
             "rssi_dbfs": observation["rssi_dbfs"],
             "lap": f"{lap:06X}",
             "access_word": f"{int(observation['access_word']):018X}",
+            "observed_access_word": f"{int(observation.get('observed_access_word', observation['access_word'])):018X}",
+            "repaired": bool(observation.get("repaired", False)),
+            "repair_distance": int(observation.get("repair_distance", 0)),
+            "header_perfect_triplets": int(observation.get("header_perfect_triplets", 0)),
+            "header_relaxed": bool(observation.get("header_relaxed", False)),
+            "ts_us": int(observation.get("ts_us", 0)),
             "candidate_count": len(candidates),
+            "processed_packets": node.processed_packets,
+            "broken_packets": node.broken_packets,
+            "cannot_init": node.cannot_init,
             "uap": f"{candidates[0]['uap']:02X}" if len(candidates) == 1 else None,
             "status": event_status,
             "confidence": 0.92 if len(candidates) == 1 else 0.68 if candidates else 0.42,
@@ -788,6 +888,12 @@ class BluetoothDetector:
             "status": node.status,
             "candidate_count": len(valid),
             "processed_packets": node.processed_packets,
+            "broken_packets": node.broken_packets,
+            "repaired": bool(observation.get("repaired", False)),
+            "repair_distance": int(observation.get("repair_distance", 0)),
+            "header_perfect_triplets": int(observation.get("header_perfect_triplets", 0)),
+            "header_relaxed": bool(observation.get("header_relaxed", False)),
+            "ts_us": int(observation.get("ts_us", 0)),
             "clks": candidate["clks"],
             "notes": [
                 "LAP extracted from Classic access code.",
@@ -899,6 +1005,10 @@ class WideClassicDetector:
         self.bank_start_channel = int(bank_start_channel)
         self.lane_rate_sps = BT_CLASSIC_LANE_RATE_SPS
         self.decim = max(1, int(round(self.sample_rate_sps / self.lane_rate_sps)))
+        self.use_cpp_fft = bool(BT_CLASSIC_USE_CPP_FFT and self.decim == BT_CLASSIC_BANK_SIZE)
+        self._fft_tail = np.empty(0, dtype=np.complex64)
+        self.sample_phase_offsets = self._sample_phase_offsets(self.decim)
+        self.freq_offset_adjustments_hz = self._freq_offset_adjustments_hz()
         filter_taps = max(31, min(193, (self.decim * 4) | 1))
         cutoff_hz = min(float(self.lane_rate_sps) * 0.40, 800_000.0)
         self._lane_filter_taps = _design_lowpass_taps(self.sample_rate_sps, cutoff_hz, filter_taps)
@@ -908,10 +1018,12 @@ class WideClassicDetector:
             "barker_hits": 0,
             "access_code_mismatch": 0,
             "access_code_hits": 0,
+            "access_code_repair_hits": 0,
             "target_access_near_hits": 0,
             "target_access_best_distance": 68,
             "lap_hits": 0,
             "header_failures": 0,
+            "header_relaxed_hits": 0,
             "uap_candidate_hits": 0,
         }
         for idx in range(BT_CLASSIC_BANK_SIZE):
@@ -924,9 +1036,22 @@ class WideClassicDetector:
                     "channel": channel,
                     "freq_hz": freq_hz,
                     "offset_hz": float(freq_hz - self.center_freq_hz),
-                    "mix_phase_rad": 0.0,
-                    "filter_state": np.empty(0, dtype=np.complex64),
-                    "detector": BluetoothDetector(self.lane_rate_sps, "classic", freq_hz, channel),
+                    "cpp_detector": BluetoothDetector(self.lane_rate_sps, "classic", freq_hz, channel),
+                    "mix_paths": [
+                        {
+                            "freq_adjust_hz": int(freq_adjust_hz),
+                            "mix_phase_rad": 0.0,
+                            "filter_state": np.empty(0, dtype=np.complex64),
+                            "phase_paths": [
+                                {
+                                    "sample_offset": sample_offset,
+                                    "detector": BluetoothDetector(self.lane_rate_sps, "classic", freq_hz, channel),
+                                }
+                                for sample_offset in self.sample_phase_offsets
+                            ],
+                        }
+                        for freq_adjust_hz in self.freq_offset_adjustments_hz
+                    ],
                 }
             )
 
@@ -934,57 +1059,197 @@ class WideClassicDetector:
         z = BluetoothDetector._iq_bytes_to_complex(self, raw)
         if z.size < 64:
             return -120.0, [], []
+        if self.use_cpp_fft:
+            return self._process_iq_cpp_fft(z)
 
         all_events: list[dict[str, Any]] = []
         all_candidates: list[dict[str, Any]] = []
         rssis: list[float] = []
         sample_idx = np.arange(z.size, dtype=np.float32)
         for lane in self.lanes:
-            offset_hz = float(lane["offset_hz"])
-            phase_step = float((-2.0 * np.pi * offset_hz) / float(self.sample_rate_sps))
-            phase0 = float(lane.get("mix_phase_rad", 0.0))
-            rot = np.exp(1j * (phase0 + (phase_step * sample_idx))).astype(np.complex64)
-            lane["mix_phase_rad"] = float((phase0 + (phase_step * float(z.size))) % (2.0 * np.pi))
-            mixed = z * rot
-            lane_samples = self._decimate_lane(lane, mixed)
-            if lane_samples.size < 64:
+            base_offset_hz = float(lane["offset_hz"])
+            for mix_path in lane.get("mix_paths", []):
+                offset_hz = base_offset_hz + float(mix_path.get("freq_adjust_hz", 0))
+                phase_step = float((-2.0 * np.pi * offset_hz) / float(self.sample_rate_sps))
+                phase0 = float(mix_path.get("mix_phase_rad", 0.0))
+                rot = np.exp(1j * (phase0 + (phase_step * sample_idx))).astype(np.complex64)
+                mix_path["mix_phase_rad"] = float((phase0 + (phase_step * float(z.size))) % (2.0 * np.pi))
+                mixed = z * rot
+                lane_samples_by_offset = self._decimate_lane(mix_path, mixed)
+                if not lane_samples_by_offset:
+                    continue
+                for phase_path in mix_path.get("phase_paths", []):
+                    sample_offset = int(phase_path.get("sample_offset", 0))
+                    lane_samples = lane_samples_by_offset.get(sample_offset)
+                    if lane_samples is None or lane_samples.size < 64:
+                        continue
+                    detector = phase_path["detector"]
+                    rssi, events, candidates = detector.process_complex(lane_samples)
+                    for key, value in detector.stats.items():
+                        if key == "target_access_best_distance":
+                            current = int(self.stats.get(key, 68))
+                            self.stats[key] = min(current, int(value))
+                            detector.stats[key] = 68
+                            continue
+                        self.stats[key] = int(self.stats.get(key, 0)) + int(value)
+                        detector.stats[key] = 0
+                    rssis.append(rssi)
+                    all_events.extend(events)
+                    all_candidates.extend(candidates)
+
+        all_events = self._dedupe_classic_events(all_events)
+        all_candidates = self._dedupe_classic_candidates(all_candidates)
+        bank_rssi = max(rssis) if rssis else -120.0
+        return bank_rssi, all_events[:80], all_candidates[:80]
+
+    def _process_iq_cpp_fft(self, z: np.ndarray) -> tuple[float, list[dict[str, Any]], list[dict[str, Any]]]:
+        if self._fft_tail.size:
+            z = np.concatenate((self._fft_tail, z))
+        usable = (z.size // self.decim) * self.decim
+        self._fft_tail = z[usable:].astype(np.complex64, copy=False)
+        if usable <= 0:
+            return -120.0, [], []
+
+        frames = z[:usable].reshape(-1, self.decim)
+        bins = np.fft.fft(frames, axis=1).astype(np.complex64, copy=False)
+        all_events: list[dict[str, Any]] = []
+        all_candidates: list[dict[str, Any]] = []
+        rssis: list[float] = []
+
+        for idx, lane in enumerate(self.lanes):
+            fft_bin = (idx + (self.decim // 2)) % self.decim
+            lane_samples = bins[:, fft_bin]
+            if lane_samples.size < 2:
                 continue
-            rssi, events, candidates = lane["detector"].process_complex(lane_samples)
-            for key, value in lane["detector"].stats.items():
+            prev = lane_samples[:-1]
+            cur = lane_samples[1:]
+            cross = (prev.real * cur.imag) - (prev.imag * cur.real)
+            bits = [1 if value > 0 else 0 for value in cross.tolist()]
+            rssi = float(10.0 * np.log10(float(np.mean(np.abs(lane_samples) ** 2)) + 1e-12))
+            detector = lane["cpp_detector"]
+            _, events, candidates = detector.process_classic_cpp_bits(bits, rssi)
+            for event in events:
+                event["btcsniffer_bin"] = idx
+                event["demod"] = "cpp-fft"
+            for candidate in candidates:
+                candidate["btcsniffer_bin"] = idx
+                candidate["demod"] = "cpp-fft"
+            for key, value in detector.stats.items():
                 if key == "target_access_best_distance":
                     current = int(self.stats.get(key, 68))
                     self.stats[key] = min(current, int(value))
-                    lane["detector"].stats[key] = 68
+                    detector.stats[key] = 68
                     continue
                 self.stats[key] = int(self.stats.get(key, 0)) + int(value)
-                lane["detector"].stats[key] = 0
+                detector.stats[key] = 0
             rssis.append(rssi)
             all_events.extend(events)
             all_candidates.extend(candidates)
 
+        all_events = self._dedupe_classic_events(all_events)
+        all_candidates = self._dedupe_classic_candidates(all_candidates)
         bank_rssi = max(rssis) if rssis else -120.0
         return bank_rssi, all_events[:80], all_candidates[:80]
 
-    def _decimate_lane(self, lane: dict[str, Any], z: np.ndarray) -> np.ndarray:
-        history = lane.get("filter_state")
+    @staticmethod
+    def _event_rank(event: dict[str, Any]) -> tuple[float, ...]:
+        return (
+            1.0 if not bool(event.get("repaired", False)) else 0.0,
+            -float(event.get("candidate_count") or 99),
+            float(event.get("processed_packets") or 0),
+            float(event.get("header_perfect_triplets") or 0),
+            float(event.get("rssi_dbfs") or -120.0),
+        )
+
+    @classmethod
+    def _dedupe_classic_events(cls, events: list[dict[str, Any]]) -> list[dict[str, Any]]:
+        deduped: dict[tuple[Any, ...], dict[str, Any]] = {}
+        passthrough: list[dict[str, Any]] = []
+        for event in events:
+            if event.get("kind") != "classic_lap":
+                passthrough.append(event)
+                continue
+            ts_bucket = int(round(float(event.get("ts_us") or 0) / 80.0))
+            key = (
+                str(event.get("lap") or ""),
+                int(event.get("channel") or -1),
+                ts_bucket,
+            )
+            existing = deduped.get(key)
+            if existing is None or cls._event_rank(event) > cls._event_rank(existing):
+                deduped[key] = event
+        lap_events = list(deduped.values())
+        lap_events.sort(key=lambda item: float(item.get("seen_at") or 0), reverse=True)
+        passthrough.sort(key=lambda item: float(item.get("seen_at") or 0), reverse=True)
+        return lap_events + passthrough
+
+    @classmethod
+    def _dedupe_classic_candidates(cls, candidates: list[dict[str, Any]]) -> list[dict[str, Any]]:
+        deduped: dict[tuple[Any, ...], dict[str, Any]] = {}
+        for candidate in candidates:
+            ts_bucket = int(round(float(candidate.get("ts_us") or 0) / 80.0))
+            key = (
+                str(candidate.get("lap") or ""),
+                str(candidate.get("uap_hex") or candidate.get("uap") or ""),
+                int(candidate.get("channel") or -1),
+                ts_bucket,
+            )
+            existing = deduped.get(key)
+            if existing is None or cls._event_rank(candidate) > cls._event_rank(existing):
+                deduped[key] = candidate
+        rows = list(deduped.values())
+        rows.sort(
+            key=lambda item: (
+                float(item.get("candidate_count") or 99),
+                -float(item.get("processed_packets") or 0),
+                -float(item.get("rssi_dbfs") or -120.0),
+            )
+        )
+        return rows
+
+    @staticmethod
+    def _sample_phase_offsets(decim: int) -> list[int]:
+        if decim <= 1:
+            return [0]
+        count = min(4, decim)
+        if count == decim:
+            return list(range(decim))
+        offsets = sorted({min(decim - 1, int(round((idx * decim) / count))) for idx in range(count)})
+        if 0 not in offsets:
+            offsets.insert(0, 0)
+        return offsets
+
+    @staticmethod
+    def _freq_offset_adjustments_hz() -> list[int]:
+        # Small CFO sweep around each nominal 1 MHz channel center.
+        return [-40_000, 0, 40_000]
+
+    def _decimate_lane(self, path_state: dict[str, Any], z: np.ndarray) -> dict[int, np.ndarray]:
+        history = path_state.get("filter_state")
         if not isinstance(history, np.ndarray):
             history = np.empty(0, dtype=np.complex64)
         if history.size:
             z = np.concatenate((history, z))
         taps = self._lane_filter_taps
         if z.size < taps.size:
-            lane["filter_state"] = z[-(taps.size - 1) :].astype(np.complex64, copy=False)
-            return np.empty(0, dtype=np.complex64)
+            path_state["filter_state"] = z[-(taps.size - 1) :].astype(np.complex64, copy=False)
+            return {}
         filtered_i = np.convolve(z.real.astype(np.float32, copy=False), taps, mode="valid")
         filtered_q = np.convolve(z.imag.astype(np.float32, copy=False), taps, mode="valid")
-        lane["filter_state"] = z[-(taps.size - 1) :].astype(np.complex64, copy=False)
+        path_state["filter_state"] = z[-(taps.size - 1) :].astype(np.complex64, copy=False)
         filtered = (filtered_i + 1j * filtered_q).astype(np.complex64)
         if self.decim <= 1:
-            return filtered
-        usable = (filtered.size // self.decim) * self.decim
-        if usable <= 0:
-            return np.empty(0, dtype=np.complex64)
-        return filtered[:usable:self.decim].astype(np.complex64, copy=False)
+            return {0: filtered}
+        outputs: dict[int, np.ndarray] = {}
+        for sample_offset in self.sample_phase_offsets:
+            if sample_offset >= filtered.size:
+                continue
+            available = filtered.size - sample_offset
+            usable = (available // self.decim) * self.decim
+            if usable <= 0:
+                continue
+            outputs[sample_offset] = filtered[sample_offset : sample_offset + usable : self.decim].astype(np.complex64, copy=False)
+        return outputs
 
 
 class CombinedBluetoothDetector:
@@ -1047,9 +1312,16 @@ worker_thread: threading.Thread | None = None
 worker_stops: dict[str, threading.Event] = {}
 worker_threads: dict[str, threading.Thread] = {}
 inquiry_process: subprocess.Popen[str] | None = None
+btc_engine_process: subprocess.Popen[str] | None = None
+btc_engine_thread: threading.Thread | None = None
+btc_engine_stop = threading.Event()
 ble_identity_cache: dict[str, dict[str, Any]] = {}
 company_identifier_lut: dict[str, str] = {}
 uuid16_identifier_lut: dict[str, str] = {}
+UUID16_VENDOR_OVERRIDES = {
+    "0xFCB2": "Apple, Inc.",
+    "0xFEED": "Tile, Inc.",
+}
 
 
 def _normalize_mac(mac: str) -> str:
@@ -1092,11 +1364,39 @@ def _load_uuid16_identifier_lut() -> dict[str, str]:
 
 
 def _uuid16_name(uuid16: str) -> str:
-    return uuid16_identifier_lut.get(str(uuid16 or "").upper().replace("X", "x"), "")
+    key = str(uuid16 or "").upper().replace("X", "x")
+    return UUID16_VENDOR_OVERRIDES.get(key) or uuid16_identifier_lut.get(key, "")
 
 
 def _uuid16_names(uuid16_values: list[str]) -> list[str]:
     return list(dict.fromkeys(name for uuid in uuid16_values for name in [_uuid16_name(uuid)] if name))
+
+
+def _canonical_ble_vendor(name: str) -> str:
+    value = str(name or "").strip()
+    lowered = value.lower()
+    if "apple" in lowered:
+        return "Apple, Inc."
+    if "microsoft" in lowered:
+        return "Microsoft"
+    if "tile" in lowered:
+        return "Tile, Inc."
+    return value
+
+
+def _manufacturer_from_uuid16(uuid16_values: list[str]) -> dict[str, Any] | None:
+    for uuid in uuid16_values:
+        name = _canonical_ble_vendor(_uuid16_name(uuid))
+        if not name:
+            continue
+        return {
+            "company_id": "",
+            "company_name": name,
+            "data": "",
+            "source": "uuid16",
+            "uuid16": str(uuid).upper().replace("X", "x"),
+        }
+    return None
 
 
 def _ble_identity_source(name: str, uuid16_names: list[str], manufacturer: dict[str, Any] | None) -> str:
@@ -1107,6 +1407,8 @@ def _ble_identity_source(name: str, uuid16_names: list[str], manufacturer: dict[
         label = uuid16_names[0]
         return f"{label} UUID16 service"
     if manufacturer_name:
+        if (manufacturer or {}).get("source") == "uuid16":
+            return f"{manufacturer_name} inferred from UUID16 service"
         return f"{manufacturer_name} manufacturer data"
     return "MAC only"
 
@@ -1133,12 +1435,15 @@ def _load_ble_identity_cache() -> dict[str, dict[str, Any]]:
         if manufacturer and manufacturer.get("company_id") and not manufacturer.get("company_name"):
             manufacturer = dict(manufacturer)
             manufacturer["company_name"] = _company_name(str(manufacturer.get("company_id")))
+        uuid16 = value.get("uuid16") if isinstance(value.get("uuid16"), list) else []
+        if not manufacturer:
+            manufacturer = _manufacturer_from_uuid16(uuid16)
         out[mac] = {
             "mac": mac,
             "name": str(value.get("name") or "").strip(),
             "address_type": str(value.get("address_type") or "").strip(),
-            "uuid16": value.get("uuid16") if isinstance(value.get("uuid16"), list) else [],
-            "uuid16_names": _uuid16_names(value.get("uuid16") if isinstance(value.get("uuid16"), list) else []),
+            "uuid16": uuid16,
+            "uuid16_names": _uuid16_names(uuid16),
             "manufacturer": manufacturer,
             "identity_source": str(value.get("identity_source") or ""),
             "first_seen_at": float(value.get("first_seen_at") or value.get("last_seen_at") or time.time()),
@@ -1188,7 +1493,7 @@ def _remember_ble_identity(
         if manufacturer:
             row["manufacturer"] = manufacturer
         else:
-            row.setdefault("manufacturer", None)
+            row["manufacturer"] = row.get("manufacturer") or _manufacturer_from_uuid16(merged_uuid16)
         row["identity_source"] = _ble_identity_source(str(row.get("name") or ""), row["uuid16_names"], row.get("manufacturer"))
         row["first_seen_at"] = float(row.get("first_seen_at") or seen_at)
         row["last_seen_at"] = seen_at
@@ -1201,6 +1506,401 @@ def _remember_ble_identity(
 company_identifier_lut.update(_load_company_identifier_lut())
 uuid16_identifier_lut.update(_load_uuid16_identifier_lut())
 ble_identity_cache.update(_load_ble_identity_cache())
+
+
+def _btcsniffer_binary() -> Path:
+    if BTC_SNIFFER_BINARY.exists():
+        return BTC_SNIFFER_BINARY
+    fallback = BTC_SNIFFER_ROOT / "build" / "btsniffer"
+    return fallback if fallback.exists() else BTC_SNIFFER_BINARY
+
+
+def _btcsniffer_driver_from_device(device_id: str) -> str:
+    lowered = device_id.lower()
+    if lowered.startswith("bladerf"):
+        return "bladerf"
+    if lowered.startswith("hackrf"):
+        return "hackrf"
+    if lowered.startswith("sidekiq"):
+        return "sidekiq"
+    return "bladerf"
+
+
+def _tail_text(path: Path, max_lines: int = 20) -> str:
+    try:
+        lines = path.read_text(errors="replace").splitlines()
+    except OSError:
+        return ""
+    return "\n".join(lines[-max_lines:])
+
+
+def _classic_center_for_channel(channel: int) -> int:
+    return BT_CLASSIC_CHANNELS.get(channel, BT_CLASSIC_CHANNELS[0])
+
+
+def _btcsniffer_event_from_line(line: str, center_freq_hz: int, bank_start_channel: int) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
+    now = time.time()
+    events: list[dict[str, Any]] = []
+    candidates: list[dict[str, Any]] = []
+    prefix = re.search(r"\[\s*(?P<channel>\d+)\]\s+(?P<ts>\d+)\s+us\s+--\s+(?P<lap>[0-9A-Fa-f]{6})\s+--\s+(?P<msg>.*)", line)
+    if not prefix:
+        return events, candidates
+
+    bin_index = int(prefix.group("channel"))
+    channel = bank_start_channel + bin_index
+    ts_us = int(prefix.group("ts"))
+    lap = prefix.group("lap").upper()
+    msg = prefix.group("msg").strip()
+    freq_hz = _classic_center_for_channel(channel)
+
+    resolved = re.search(r"RESOLVED UAP:LAP\s+(?P<uap>[0-9A-Fa-f]{2}):(?P<lap>[0-9A-Fa-f]{6}).*tracking for\s+(?P<tracking>\d+)\s+us", msg)
+    if resolved:
+        event = {
+            "kind": "classic_lap",
+            "protocol": "BTC",
+            "source": "btcsniffer",
+            "seen_at": now,
+            "channel": channel,
+            "btcsniffer_bin": bin_index,
+            "center_freq_hz": freq_hz,
+            "bank_center_freq_hz": center_freq_hz,
+            "rssi_dbfs": -120.0,
+            "lap": resolved.group("lap").upper(),
+            "uap": resolved.group("uap").upper(),
+            "status": "resolved",
+            "candidate_count": 1,
+            "processed_packets": 1,
+            "ts_us": ts_us,
+            "tracking_us": int(resolved.group("tracking")),
+        }
+        events.append(event)
+        candidates.append({**event, "uap_hex": event["uap"], "score": 0.99})
+        return events, candidates
+
+    two_left = re.search(
+        r"Only two UAP left \((?P<uap0>[0-9A-Fa-f]{2}) and (?P<uap1>[0-9A-Fa-f]{2})\).*tracking for\s+(?P<tracking>\d+)\s+us",
+        msg,
+    )
+    if two_left:
+        event = {
+            "kind": "classic_lap",
+            "protocol": "BTC",
+            "source": "btcsniffer",
+            "seen_at": now,
+            "channel": channel,
+            "btcsniffer_bin": bin_index,
+            "center_freq_hz": freq_hz,
+            "bank_center_freq_hz": center_freq_hz,
+            "rssi_dbfs": -120.0,
+            "lap": lap,
+            "uap": None,
+            "status": "brute_forcing",
+            "candidate_count": 2,
+            "processed_packets": 1,
+            "ts_us": ts_us,
+            "tracking_us": int(two_left.group("tracking")),
+        }
+        events.append(event)
+        candidates.append(
+            {
+                **event,
+                "uap_hex": f"{two_left.group('uap0').upper()} / {two_left.group('uap1').upper()}",
+                "score": 0.82,
+                "notes": [f"btcsniffer narrowed LAP {lap} to two UAPs."],
+            }
+        )
+        return events, candidates
+
+    narrowed = re.search(r"(?P<count>\d+)\s+possible UAPs remaining\s+\[(?P<uaps>[0-9A-Fa-f ]+)\]", msg)
+    if narrowed:
+        count = int(narrowed.group("count"))
+        event = {
+            "kind": "classic_lap",
+            "protocol": "BTC",
+            "source": "btcsniffer",
+            "seen_at": now,
+            "channel": channel,
+            "btcsniffer_bin": bin_index,
+            "center_freq_hz": freq_hz,
+            "bank_center_freq_hz": center_freq_hz,
+            "rssi_dbfs": -120.0,
+            "lap": lap,
+            "uap": None,
+            "status": "brute_forcing",
+            "candidate_count": count,
+            "processed_packets": 1,
+            "ts_us": ts_us,
+        }
+        events.append(event)
+        candidates.append({**event, "uap_hex": "Pending", "score": 0.68, "notes": [f"Remaining UAPs: {narrowed.group('uaps').strip()}"]})
+        return events, candidates
+
+    if "Initialized" in msg:
+        event = {
+            "kind": "classic_lap",
+            "protocol": "BTC",
+            "source": "btcsniffer",
+            "seen_at": now,
+            "channel": channel,
+            "btcsniffer_bin": bin_index,
+            "center_freq_hz": freq_hz,
+            "bank_center_freq_hz": center_freq_hz,
+            "rssi_dbfs": -120.0,
+            "lap": lap,
+            "uap": None,
+            "status": "initialized",
+            "candidate_count": 32,
+            "processed_packets": 1,
+            "ts_us": ts_us,
+        }
+        events.append(event)
+        return events, candidates
+
+    fhs = re.search(r"PASSIVE FHS BD_ADDR\s+(?P<addr>(?:[0-9A-Fa-f]{2}:){5}[0-9A-Fa-f]{2})", msg)
+    if fhs:
+        addr = fhs.group("addr").upper()
+        parts = addr.split(":")
+        event = {
+            "kind": "classic_lap",
+            "protocol": "BTC",
+            "source": "btcsniffer",
+            "seen_at": now,
+            "channel": channel,
+            "btcsniffer_bin": bin_index,
+            "center_freq_hz": freq_hz,
+            "bank_center_freq_hz": center_freq_hz,
+            "rssi_dbfs": -120.0,
+            "lap": "".join(parts[3:6]),
+            "uap": parts[2],
+            "nap": "".join(parts[0:2]),
+            "mac": addr,
+            "status": "passive_fhs",
+            "candidate_count": 1,
+            "processed_packets": 1,
+            "ts_us": ts_us,
+        }
+        events.append(event)
+        candidates.append({**event, "uap_hex": event["uap"], "score": 1.0})
+        return events, candidates
+
+    return events, candidates
+
+
+def _btcsniffer_event_from_json(payload: dict[str, Any], center_freq_hz: int, bank_start_channel: int) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
+    event_type = str(payload.get("type") or "")
+    now = time.time()
+    events: list[dict[str, Any]] = []
+    candidates: list[dict[str, Any]] = []
+
+    if event_type == "metrics":
+        access_hits = int(payload.get("access_hits") or 0)
+        lap_events = int(payload.get("lap_events") or 0)
+        resolved_events = int(payload.get("resolved_events") or 0)
+        fhs_events = int(payload.get("fhs_events") or 0)
+        with state_lock:
+            state.decoder_stats["preamble_hits"] = int(payload.get("preamble_hits") or 0)
+            state.decoder_stats["barker_hits"] = int(payload.get("barker_hits") or 0)
+            state.decoder_stats["access_code_hits"] = access_hits
+            state.decoder_stats["access_code_mismatch"] = int(payload.get("access_rejects") or 0)
+            state.decoder_stats["lap_hits"] = lap_events + resolved_events + fhs_events
+            state.decoder_stats["btcsniffer_packets_seen"] = int(payload.get("packets_seen") or 0)
+            state.decoder_stats["btcsniffer_samples_processed"] = int(payload.get("samples_processed") or 0)
+            state.decoder_stats["btcsniffer_solved_laps"] = int(payload.get("solved_laps") or 0)
+            state.decoder_stats["btcsniffer_active_laps"] = int(payload.get("active_laps") or 0)
+            state.decoder_stats["btcsniffer_bins"] = int(payload.get("bins") or 0)
+            state.classic_bursts_seen = max(state.classic_bursts_seen, lap_events + resolved_events + fhs_events)
+        return events, candidates
+
+    if event_type == "config":
+        with state_lock:
+            state.decoder_stats["btcsniffer_bins"] = int(payload.get("bins") or 0)
+            state.decoder_stats["btcsniffer_sample_rate"] = int(float(payload.get("sample_rate") or 0))
+        return events, candidates
+
+    try:
+        bin_index = int(payload.get("channel"))
+    except (TypeError, ValueError):
+        bin_index = 0
+    channel = bank_start_channel + bin_index
+    freq_hz = _classic_center_for_channel(channel)
+    lap = str(payload.get("lap") or "").upper()
+    ts_us = int(payload.get("ts_us") or 0)
+    rssi_dbfs = float(payload.get("rssi_dbfs", -120.0))
+
+    base = {
+        "kind": "classic_lap",
+        "protocol": "BTC",
+        "source": "btcexplorer-sniffer",
+        "seen_at": now,
+        "channel": channel,
+        "btcsniffer_bin": bin_index,
+        "center_freq_hz": freq_hz,
+        "bank_center_freq_hz": center_freq_hz,
+        "rssi_dbfs": round(rssi_dbfs, 1),
+        "lap": lap,
+        "ts_us": ts_us,
+        "processed_packets": 1,
+    }
+
+    if event_type == "lap_initialized":
+        event = {**base, "uap": None, "status": "initialized", "candidate_count": int(payload.get("candidate_count") or 32)}
+        events.append(event)
+        return events, candidates
+
+    if event_type == "lap_narrowed":
+        event = {**base, "uap": None, "status": "brute_forcing", "candidate_count": int(payload.get("candidate_count") or 0)}
+        events.append(event)
+        candidates.append({**event, "uap_hex": "Pending", "score": 0.68, "notes": [f"Remaining UAPs: {payload.get('uaps') or ''}"]})
+        return events, candidates
+
+    if event_type == "lap_two_uap_left":
+        event = {
+            **base,
+            "uap": None,
+            "status": "brute_forcing",
+            "candidate_count": 2,
+            "tracking_us": int(payload.get("tracking_us") or 0),
+        }
+        events.append(event)
+        candidates.append({**event, "uap_hex": f"{payload.get('uap0')} / {payload.get('uap1')}", "score": 0.82})
+        return events, candidates
+
+    if event_type == "lap_resolved":
+        uap = str(payload.get("uap") or "").upper()
+        event = {
+            **base,
+            "uap": uap,
+            "status": "resolved",
+            "candidate_count": 1,
+            "tracking_us": int(payload.get("tracking_us") or 0),
+        }
+        events.append(event)
+        candidates.append({**event, "uap_hex": uap, "score": 0.99})
+        return events, candidates
+
+    if event_type == "passive_fhs_bdaddr":
+        address = str(payload.get("address") or "").upper()
+        event = {
+            **base,
+            "uap": str(payload.get("uap") or "").upper(),
+            "nap": str(payload.get("nap") or "").upper(),
+            "mac": address,
+            "status": "passive_fhs",
+            "candidate_count": 1,
+        }
+        events.append(event)
+        candidates.append({**event, "uap_hex": event["uap"], "score": 1.0})
+        return events, candidates
+
+    return events, candidates
+
+
+def _btcsniffer_loop(proc: subprocess.Popen[str], center_freq_hz: int, bank_start_channel: int) -> None:
+    with state_lock:
+        state.worker_alive_by_mode["classic"] = True
+        state.worker_alive = True
+        state.worker_errors["classic"] = ""
+        state.worker_error = ""
+    try:
+        assert proc.stdout is not None
+        for raw_line in proc.stdout:
+            if btc_engine_stop.is_set():
+                break
+            line = raw_line.strip()
+            if not line:
+                continue
+            if line.startswith("{"):
+                try:
+                    events, candidates = _btcsniffer_event_from_json(json.loads(line), center_freq_hz, bank_start_channel)
+                except (json.JSONDecodeError, TypeError, ValueError):
+                    events, candidates = [], []
+            else:
+                events, candidates = _btcsniffer_event_from_line(line, center_freq_hz, bank_start_channel)
+            with state_lock:
+                state.chunks_seen += 1
+                state.chunks_by_mode["classic"] = int(state.chunks_by_mode.get("classic", 0)) + 1
+                state.last_rssi_dbfs = state.rssi_by_mode.get("classic", state.last_rssi_dbfs)
+                state.decoder_stats["btcsniffer_lines"] = int(state.decoder_stats.get("btcsniffer_lines", 0)) + 1
+            _append_detections(events, candidates)
+    except Exception as exc:
+        with state_lock:
+            state.worker_errors["classic"] = f"btcsniffer error: {exc}"
+            state.worker_error = f"btcsniffer error: {exc}"
+    finally:
+        rc = proc.poll()
+        with state_lock:
+            state.worker_alive_by_mode["classic"] = False
+            state.worker_alive = any(state.worker_alive_by_mode.values())
+            if not btc_engine_stop.is_set() and rc not in {None, 0}:
+                state.worker_errors["classic"] = f"btcsniffer exited with code {rc}"
+                state.worker_error = f"btcsniffer exited with code {rc}"
+
+
+def _start_btcsniffer_engine(device_id: str, center_freq_hz: int, bandwidth_mhz: int, bank_start_channel: int) -> dict[str, Any]:
+    global btc_engine_process, btc_engine_thread
+    binary = _btcsniffer_binary()
+    if not binary.exists():
+        raise RuntimeError(f"btcsniffer binary not found: {binary}")
+    BTC_SNIFFER_LOG_PATH.parent.mkdir(parents=True, exist_ok=True)
+    cmd = [
+        str(binary),
+        "--driver",
+        _btcsniffer_driver_from_device(device_id),
+        "--freq-mhz",
+        f"{center_freq_hz / 1_000_000.0:.3f}MHz",
+        "--bandwidth-mhz",
+        f"{int(bandwidth_mhz)}MHz",
+        "--log",
+        str(BTC_SNIFFER_LOG_PATH),
+        "--jsonl-stdout",
+    ]
+    btc_engine_stop.clear()
+    proc = subprocess.Popen(
+        cmd,
+        cwd=str(BTC_SNIFFER_ROOT),
+        stdout=subprocess.PIPE,
+        stderr=subprocess.STDOUT,
+        text=True,
+        bufsize=1,
+    )
+    btc_engine_process = proc
+    btc_engine_thread = threading.Thread(target=_btcsniffer_loop, args=(proc, center_freq_hz, bank_start_channel), daemon=True)
+    btc_engine_thread.start()
+    time.sleep(0.25)
+    if proc.poll() not in {None, 0}:
+        log_tail = _tail_text(BTC_SNIFFER_LOG_PATH)
+        detail = f"btcsniffer exited immediately with code {proc.returncode}"
+        if log_tail:
+            detail = f"{detail}\n{log_tail}"
+        raise RuntimeError(detail)
+    return {
+        "engine": "btcsniffer",
+        "stream_id": "btcsniffer",
+        "device_id": device_id,
+        "center_freq_hz": center_freq_hz,
+        "sample_rate_sps": int(bandwidth_mhz) * 1_000_000,
+        "lna_gain_db": 0,
+        "vga_gain_db": 0,
+        "channel": int(bank_start_channel),
+        "body": {"engine": "btcsniffer", "command": cmd, "log": str(BTC_SNIFFER_LOG_PATH)},
+    }
+
+
+def _stop_btcsniffer_engine() -> None:
+    global btc_engine_process, btc_engine_thread
+    proc = btc_engine_process
+    btc_engine_process = None
+    btc_engine_stop.set()
+    if proc is not None and proc.poll() is None:
+        proc.terminate()
+        try:
+            proc.wait(timeout=3)
+        except subprocess.TimeoutExpired:
+            proc.kill()
+            proc.wait(timeout=2)
+    if btc_engine_thread and btc_engine_thread.is_alive():
+        btc_engine_thread.join(timeout=2)
+    btc_engine_thread = None
 
 
 def _gateway_streams() -> list[dict[str, Any]]:
@@ -1236,11 +1936,30 @@ def _stop_duplicate_gateway_streams(device_id: str | None, keep_stream_id: str |
 def _append_detections(events: list[dict[str, Any]], candidates: list[dict[str, Any]]) -> None:
     if not events and not candidates:
         return
+    for item in [*events, *candidates]:
+        if item.get("kind") == "classic_lap" or item.get("lap"):
+            uap_value = item.get("uap")
+            uap_hex = str(item.get("uap_hex") or "")
+            if uap_value in {None, "", "Pending"} and re.fullmatch(r"[0-9A-Fa-f]{2}", uap_hex):
+                uap_value = uap_hex.upper()
+            item.setdefault("nap", "XXXX")
+            item["uap"] = str(uap_value or "XX").upper()
+            item["full_mac"] = _classic_full_mac(item.get("nap"), item.get("uap"), item.get("lap"))
+            item.setdefault("mac", item["full_mac"])
     with state_lock:
         for event in events:
             state.bursts_seen += 1 if event["kind"].endswith("burst") else 0
             state.ble_packets_seen += 1 if event["kind"] == "ble_adv" else 0
             state.classic_bursts_seen += 1 if event["kind"] in {"classic_burst", "classic_lap"} else 0
+            if event["kind"] in {"classic_burst", "classic_lap"}:
+                try:
+                    rssi = float(event.get("rssi_dbfs"))
+                    if rssi > -119.9:
+                        state.rssi_by_mode["classic"] = round(rssi, 1)
+                        state.last_rssi_dbfs = round(rssi, 1)
+                        state.noise_floor_dbfs = round((state.noise_floor_dbfs * 0.92) + (rssi * 0.08), 1)
+                except (TypeError, ValueError):
+                    pass
             if event["kind"] in {"ble_adv", "classic_lap"}:
                 _upsert_discovery_row(event)
             if event["kind"] == "classic_lap":
@@ -1250,6 +1969,16 @@ def _append_detections(events: list[dict[str, Any]], candidates: list[dict[str, 
         state.detections = (events + state.detections)[:240]
         if candidates:
             state.classic_candidates = (candidates + state.classic_candidates)[:64]
+
+
+def _classic_full_mac(nap: Any = None, uap: Any = None, lap: Any = None) -> str:
+    nap_clean = re.sub(r"[^0-9A-Fa-f]", "", str(nap or "")).upper()
+    uap_clean = re.sub(r"[^0-9A-Fa-f]", "", str(uap or "")).upper()
+    lap_clean = re.sub(r"[^0-9A-Fa-f]", "", str(lap or "")).upper()
+    nap_hex = nap_clean[:4] if len(nap_clean) >= 4 else "XXXX"
+    uap_hex = uap_clean[:2] if len(uap_clean) >= 2 else "XX"
+    lap_hex = lap_clean[:6] if len(lap_clean) >= 6 else "XXXXXX"
+    return f"{nap_hex[0:2]}:{nap_hex[2:4]}:{uap_hex}:{lap_hex[0:2]}:{lap_hex[2:4]}:{lap_hex[4:6]}"
 
 
 def _upsert_discovery_row(event: dict[str, Any]) -> None:
@@ -1267,6 +1996,8 @@ def _upsert_discovery_row(event: dict[str, Any]) -> None:
         uuid16 = list(cached.get("uuid16") or uuid16)
         uuid16_names = list(cached.get("uuid16_names") or _uuid16_names(uuid16))
         manufacturer = cached.get("manufacturer") or manufacturer
+        if not manufacturer:
+            manufacturer = _manufacturer_from_uuid16(uuid16)
         manufacturer_name = str((manufacturer or {}).get("company_name") or "")
         identity = name or (uuid16_names[0] if uuid16_names else "") or manufacturer_name or mac
         identity_source = _ble_identity_source(name, uuid16_names, manufacturer)
@@ -1291,18 +2022,24 @@ def _upsert_discovery_row(event: dict[str, Any]) -> None:
         lap = str(event.get("lap") or "").strip()
         if not lap:
             return
-        uap = str(event.get("uap") or "XXX")
+        uap = str(event.get("uap") or "XX")
+        nap = str(event.get("nap") or "XXXX")
+        full_mac = _classic_full_mac(nap, uap, lap)
         target = _classic_test_match(lap, uap)
-        identity = f"LAP {lap} / UAP {uap}"
+        identity = full_mac
         detail = str(event.get("status") or "")
         if target:
             identity = f"TEST DONGLE {identity}"
             detail = "target-match" if not detail else f"target-match · {detail}"
         row = {
-            "key": f"btc:{lap}:{uap if uap != 'XXX' else 'missing'}",
+            "key": f"btc:{lap}:{uap if uap != 'XX' else 'missing'}",
             "protocol": "BTC",
             "identity": identity,
-            "mac": "",
+            "mac": full_mac,
+            "nap": nap,
+            "uap": uap,
+            "lap": lap,
+            "full_mac": full_mac,
             "detail": detail,
             "target": bool(target),
             "detections": 1,
@@ -1325,6 +2062,8 @@ def _upsert_discovery_row(event: dict[str, Any]) -> None:
             row["uuid16_names"] = _uuid16_names(row["uuid16"])
             if not row.get("manufacturer") and existing.get("manufacturer"):
                 row["manufacturer"] = existing["manufacturer"]
+            if not row.get("manufacturer"):
+                row["manufacturer"] = _manufacturer_from_uuid16(row["uuid16"])
             row["identity_source"] = _ble_identity_source(
                 str(row.get("name") or ""),
                 row.get("uuid16_names") or [],
@@ -1347,13 +2086,26 @@ def _upsert_classic_address(event: dict[str, Any]) -> None:
     if not lap:
         return
     now = float(event.get("seen_at", time.time()))
-    target = _classic_test_match(lap, str(event.get("uap") or "XXX"))
+    uap = str(event.get("uap") or "XX")
+    nap = str(event.get("nap") or "XXXX")
+    full_mac = _classic_full_mac(nap, uap, lap)
+    target = _classic_test_match(lap, uap)
     row = {
         "lap": lap,
-        "uap": str(event.get("uap") or "XXX"),
+        "uap": uap,
+        "nap": nap,
+        "full_mac": full_mac,
+        "mac": full_mac,
         "status": "target-match" if target else str(event.get("status") or "observed"),
         "target": bool(target),
         "candidate_count": int(event.get("candidate_count") or 0),
+        "processed_packets": int(event.get("processed_packets") or 0),
+        "broken_packets": int(event.get("broken_packets") or 0),
+        "cannot_init": int(event.get("cannot_init") or 0),
+        "repaired": bool(event.get("repaired", False)),
+        "repair_distance": int(event.get("repair_distance") or 0),
+        "header_perfect_triplets": int(event.get("header_perfect_triplets") or 0),
+        "header_relaxed": bool(event.get("header_relaxed", False)),
         "channel": event.get("channel"),
         "center_freq_hz": event.get("center_freq_hz"),
         "rssi_dbfs": event.get("rssi_dbfs"),
@@ -1366,8 +2118,15 @@ def _upsert_classic_address(event: dict[str, Any]) -> None:
             continue
         row["first_seen_at"] = existing.get("first_seen_at", now)
         row["seen_count"] = int(existing.get("seen_count") or 0) + 1
-        if existing.get("uap") not in {"", None, "XXX"} and row["uap"] == "XXX":
+        if existing.get("uap") not in {"", None, "XX", "XXX"} and row["uap"] in {"XX", "XXX"}:
             row["uap"] = existing["uap"]
+        if existing.get("nap") not in {"", None, "XXXX", "XX:XX"} and row["nap"] == "XXXX":
+            row["nap"] = existing["nap"]
+        row["full_mac"] = _classic_full_mac(row.get("nap"), row.get("uap"), row.get("lap"))
+        row["mac"] = row["full_mac"]
+        row["processed_packets"] = max(int(existing.get("processed_packets") or 0), row["processed_packets"])
+        row["broken_packets"] = max(int(existing.get("broken_packets") or 0), row["broken_packets"])
+        row["cannot_init"] = max(int(existing.get("cannot_init") or 0), row["cannot_init"])
         state.classic_addresses[idx] = row
         break
     else:
@@ -1585,6 +2344,11 @@ def _worker_loop(
                         state.noise_floor_dbfs = round((state.noise_floor_dbfs * 0.92) + (rssi * 0.08), 1)
                         if hasattr(detector, "stats"):
                             for key, value in detector.stats.items():
+                                if key == "target_access_best_distance":
+                                    current = int(state.decoder_stats.get(key, 68))
+                                    state.decoder_stats[key] = min(current, int(value))
+                                    detector.stats[key] = 68
+                                    continue
                                 state.decoder_stats[key] = int(state.decoder_stats.get(key, 0)) + int(value)
                                 detector.stats[key] = 0
                     _append_detections(events, candidates)
@@ -1651,6 +2415,17 @@ def _pick_device(devices: list[dict[str, Any]], preferred: str, fallback: str = 
     return str(devices[0].get("id", "")) if devices else ""
 
 
+def _device_matches(devices: list[dict[str, Any]], device_id: str, pattern: str) -> bool:
+    pattern_l = pattern.lower()
+    for dev in devices:
+        dev_id = str(dev.get("id", ""))
+        label = str(dev.get("label", ""))
+        if dev_id != device_id:
+            continue
+        return pattern_l in f"{dev_id} {label}".lower()
+    return pattern_l in device_id.lower()
+
+
 def _available_devices() -> list[dict[str, Any]]:
     try:
         resp = requests.get(f"{_gateway_base()}/devices", headers=_gateway_headers(), timeout=3)
@@ -1665,6 +2440,7 @@ def _available_devices() -> list[dict[str, Any]]:
 def _stop_scan(stop_gateway: bool = True) -> None:
     global worker_thread, worker_threads, worker_stops
     _stop_bredr_inquiry()
+    _stop_btcsniffer_engine()
     worker_stop.set()
     if worker_thread and worker_thread.is_alive():
         worker_thread.join(timeout=2.0)
@@ -1689,6 +2465,9 @@ def _stop_scan(stop_gateway: bool = True) -> None:
         state.worker_alive = False
         state.worker_alive_by_mode = {}
         state.worker_error = ""
+        state.btc_engine = ""
+        state.btc_engine_command = []
+        state.btc_engine_log = ""
         state.worker_errors = {}
         state.gateway_start_response = None
         state.test_target = None
@@ -1700,6 +2479,12 @@ def _channel_freq(mode: str, channel: int) -> int:
         start_hz = BT_CLASSIC_CHANNELS.get(channel, BT_CLASSIC_CHANNELS[0])
         return int(start_hz + ((BT_CLASSIC_BANK_SIZE - 1) * BT_CLASSIC_LANE_SPACING_HZ / 2.0))
     return BLE_ADV_CHANNELS.get(channel, BLE_ADV_CHANNELS[37])
+
+
+def _btc_bank_start_from_center(center_freq_hz: int, bandwidth_mhz: int = BT_CLASSIC_BANK_SIZE) -> int:
+    center_mhz = float(center_freq_hz) / 1_000_000.0
+    start = int(round(center_mhz - 2402.0 - ((float(bandwidth_mhz) - 1.0) / 2.0)))
+    return max(0, min(78 - (bandwidth_mhz - 1), start))
 
 
 def _start_gateway_stream(
@@ -1760,6 +2545,7 @@ def start_scan():
     btle_device_id = str(payload.get("btle_device_id", "")).strip()
     mode = str(payload.get("mode", "classic")).strip().lower()
     channel = int(payload.get("channel", 37 if mode != "classic" else 0))
+    btc_center_mhz = float(payload.get("btc_center_mhz", 2442.0))
     sample_rate_sps = int(payload.get("sample_rate_sps", 60_000_000 if mode in {"classic", "both"} else BLE_ADV_SAMPLE_RATE_SPS))
     lna_gain_db = int(payload.get("lna_gain_db", 24))
     vga_gain_db = int(payload.get("vga_gain_db", 28))
@@ -1768,20 +2554,21 @@ def start_scan():
     btle_lna_gain_db = int(payload.get("btle_lna_gain_db", lna_gain_db))
     btle_vga_gain_db = int(payload.get("btle_vga_gain_db", vga_gain_db))
     preserve_detections = bool(payload.get("preserve_detections", False))
+    btc_engine = str(payload.get("btc_engine", BTC_ENGINE_DEFAULT) or BTC_ENGINE_DEFAULT).strip().lower()
 
     if mode not in {"ble", "classic", "both"}:
         return jsonify({"error": "mode must be ble, classic, or both"}), 400
+    if btc_engine not in {"btcsniffer", "python"}:
+        return jsonify({"error": "btc_engine must be btcsniffer or python"}), 400
     if mode == "ble" and channel not in BLE_ADV_CHANNELS:
         return jsonify({"error": "BLE channel must be 37, 38, or 39"}), 400
-    max_classic_bank_start = 78 - (BT_CLASSIC_BANK_SIZE - 1)
-    if mode in {"classic", "both"} and (channel < 0 or channel > max_classic_bank_start):
-        return jsonify({"error": f"Classic bank start must be 0 through {max_classic_bank_start}"}), 400
     if mode in {"classic", "both"}:
-        sample_rate_sps = max(sample_rate_sps, 60_000_000)
+        sample_rate_sps = 60_000_000
+        btc_center_mhz = max(2402.0, min(2480.0, btc_center_mhz))
 
     devices_available = _available_devices()
     if mode in {"classic", "both"} and not btc_device_id:
-        btc_device_id = _pick_device(devices_available, "bladerf", device_id or "sidekiq")
+        btc_device_id = _pick_device(devices_available, "bladerf")
     if mode in {"ble", "both"} and not btle_device_id:
         btle_device_id = _pick_device(devices_available, "hackrf", device_id or "sidekiq")
     if mode == "classic" and not btc_device_id:
@@ -1790,8 +2577,12 @@ def start_scan():
         return jsonify({"error": "btle_device_id is required"}), 400
     if mode == "both" and (not btc_device_id or not btle_device_id):
         return jsonify({"error": "both btc_device_id and btle_device_id are required"}), 400
+    if mode in {"classic", "both"} and not _device_matches(devices_available, btc_device_id, "bladerf"):
+        return jsonify({"error": "BTC must use the bladeRF device; HackRF remains visible but is reserved for BTLE/other apps."}), 400
 
-    center_freq_hz = _channel_freq(mode, channel)
+    btc_center_freq_hz = int(round(btc_center_mhz * 1_000_000.0))
+    btc_bank_start_channel = _btc_bank_start_from_center(btc_center_freq_hz)
+    center_freq_hz = btc_center_freq_hz if mode in {"classic", "both"} else _channel_freq(mode, channel)
     if state.running:
         _stop_scan()
     if btc_device_id:
@@ -1812,23 +2603,32 @@ def start_scan():
     try:
         started: dict[str, dict[str, Any]] = {}
         if mode in {"classic", "both"}:
-            body, actual_rate, actual_lna, actual_vga = _start_gateway_stream(
-                btc_device_id,
-                center_freq_hz,
-                sample_rate_sps,
-                btc_lna_gain_db,
-                btc_vga_gain_db,
-            )
-            started["classic"] = {
-                "body": body,
-                "stream_id": body["stream_id"],
-                "device_id": btc_device_id,
-                "center_freq_hz": center_freq_hz,
-                "sample_rate_sps": actual_rate,
-                "lna_gain_db": actual_lna,
-                "vga_gain_db": actual_vga,
-                "channel": channel,
-            }
+            if btc_engine == "btcsniffer":
+                started["classic"] = _start_btcsniffer_engine(
+                    btc_device_id,
+                    center_freq_hz,
+                    BT_CLASSIC_BANK_SIZE,
+                    btc_bank_start_channel,
+                )
+            else:
+                body, actual_rate, actual_lna, actual_vga = _start_gateway_stream(
+                    btc_device_id,
+                    center_freq_hz,
+                    sample_rate_sps,
+                    btc_lna_gain_db,
+                    btc_vga_gain_db,
+                )
+                started["classic"] = {
+                    "engine": "python",
+                    "body": body,
+                    "stream_id": body["stream_id"],
+                    "device_id": btc_device_id,
+                    "center_freq_hz": center_freq_hz,
+                    "sample_rate_sps": actual_rate,
+                    "lna_gain_db": actual_lna,
+                    "vga_gain_db": actual_vga,
+                    "channel": btc_bank_start_channel,
+                }
         if mode in {"ble", "both"}:
             ble_channel = int(payload.get("ble_channel", 37))
             ble_center = BLE_ADV_CHANNELS.get(ble_channel, BLE_ADV_CHANNELS[37])
@@ -1850,9 +2650,11 @@ def start_scan():
                 "channel": ble_channel,
             }
     except requests.RequestException as exc:
+        _stop_btcsniffer_engine()
         return jsonify({"error": "sdr-gateway is unavailable", "detail": str(exc), "gateway_base": _gateway_base()}), 503
     except RuntimeError as exc:
-        return jsonify({"error": "sdr-gateway rejected stream", "detail": str(exc)}), 400
+        _stop_btcsniffer_engine()
+        return jsonify({"error": "scan start failed", "detail": str(exc)}), 400
 
     worker_stop.clear()
     with state_lock:
@@ -1871,9 +2673,12 @@ def start_scan():
         state.sample_rate_sps = int(primary["sample_rate_sps"]) if primary else sample_rate_sps
         state.lna_gain_db = int(primary["lna_gain_db"]) if primary else lna_gain_db
         state.vga_gain_db = int(primary["vga_gain_db"]) if primary else vga_gain_db
-        state.channel = channel
+        state.channel = btc_bank_start_channel if mode in {"classic", "both"} else channel
         state.channels_by_mode = {key: int(value["channel"]) for key, value in started.items()}
         state.gateway_start_response = {key: value["body"] for key, value in started.items()}
+        state.btc_engine = str(started.get("classic", {}).get("engine", "")) if "classic" in started else ""
+        state.btc_engine_command = list(started.get("classic", {}).get("body", {}).get("command", []))
+        state.btc_engine_log = str(started.get("classic", {}).get("body", {}).get("log", ""))
         state.worker_error = ""
         if mode in {"classic", "both"}:
             state.test_target = btc_test_target
@@ -1885,6 +2690,8 @@ def start_scan():
     worker_threads = {}
     worker_stops = {}
     for protocol, cfg in started.items():
+        if cfg.get("engine") == "btcsniffer":
+            continue
         stop = threading.Event()
         worker_stops[protocol] = stop
         worker_mode = "classic" if protocol == "classic" else "ble"
@@ -1966,6 +2773,9 @@ def status():
                 "decoder_stats": state.decoder_stats,
                 "test_target": state.test_target,
                 "test_target_error": state.test_target_error,
+                "btc_engine": state.btc_engine,
+                "btc_engine_command": state.btc_engine_command,
+                "btc_engine_log": state.btc_engine_log,
                 "channel_activity": [
                     state.channel_activity.get(idx, {"channel": idx, "hits": 0, "rssi_dbfs": -120.0})
                     for idx in range(79)

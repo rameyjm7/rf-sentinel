@@ -1119,6 +1119,24 @@
         return data ? `${label} ${data.slice(0, 10)}${data.length > 10 ? "..." : ""}` : label;
       }
 
+      function canonicalBleVendorName(value) {
+        const text = String(value || "").trim();
+        const lower = text.toLowerCase();
+        if (lower.includes("apple")) return "Apple, Inc.";
+        if (lower.includes("microsoft")) return "Microsoft";
+        if (lower.includes("tile")) return "Tile, Inc.";
+        return text;
+      }
+
+      function uuidVendorName(row) {
+        if (!Array.isArray(row.uuid16_names)) return "";
+        for (const name of row.uuid16_names) {
+          const canonical = canonicalBleVendorName(name);
+          if (canonical) return canonical;
+        }
+        return "";
+      }
+
       function sortValue(row, key) {
         if (key === "uuid16") return fmtUuid16(row);
         if (key === "manufacturer") return fmtManufacturer(row);
@@ -1126,8 +1144,12 @@
       }
 
       function manufacturerGroupLabel(row) {
+        const manufacturerName = canonicalBleVendorName(row.manufacturer?.company_name || "");
+        if (manufacturerName) return manufacturerName;
+        const uuidVendor = uuidVendorName(row);
+        if (uuidVendor) return uuidVendor;
         const manufacturer = fmtManufacturer(row).trim();
-        if (manufacturer) return manufacturer;
+        if (manufacturer) return canonicalBleVendorName(manufacturer);
         if (row.protocol === "BTC") return "BT Classic / manufacturer unknown";
         return "Manufacturer unknown";
       }
@@ -1144,6 +1166,7 @@
           groups.get(label).push(row);
           return groups;
         }, new Map());
+        const collapseAll = groupedRows.size > 1;
         const groupCards = [...groupedRows.entries()]
           .sort(([a], [b]) => a.localeCompare(b))
           .map(([label, groupRows], index) => {
@@ -1156,7 +1179,9 @@
             const bestRssi = Math.max(...devices.map((row) => Number(row.last_rssi_dbfs || -120)));
             const lastSeen = Math.max(...devices.map((row) => Number(row.last_seen_at || 0)));
             const groupKey = encodeURIComponent(label);
-            const isOpen = detectionGroupOpen.has(groupKey) ? detectionGroupOpen.get(groupKey) : index < 3;
+            const isOpen = detectionGroupOpen.has(groupKey)
+              ? detectionGroupOpen.get(groupKey)
+              : collapseAll ? false : index < 3;
             return `
               <details class="detection-group" data-group="${groupKey}" ${isOpen ? "open" : ""}>
                 <summary>
