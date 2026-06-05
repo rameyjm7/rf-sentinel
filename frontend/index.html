@@ -1,3 +1,4 @@
+
 <!doctype html>
 <html lang="en">
   <head>
@@ -61,11 +62,11 @@
       .app {
         display: grid;
         grid-template-rows: auto auto 1fr;
-        gap: 10px;
+        gap: 8px;
         width: min(1500px, calc(100vw - 22px));
-        min-height: 100vh;
+        min-height: calc(100vh - 8px);
         margin: 0 auto;
-        padding: 10px 0;
+        padding: 6px 0;
       }
 
       header {
@@ -73,7 +74,7 @@
         align-items: end;
         justify-content: space-between;
         gap: 10px;
-        padding: 4px 2px 0;
+        padding: 2px 2px 0;
       }
 
       h1 {
@@ -95,8 +96,8 @@
         display: inline-flex;
         align-items: center;
         gap: 9px;
-        min-height: 40px;
-        padding: 9px 13px;
+        min-height: 38px;
+        padding: 8px 12px;
         border: 1px solid var(--line);
         border-radius: 999px;
         background: rgba(255, 250, 240, 0.74);
@@ -121,7 +122,7 @@
         grid-template-columns: minmax(170px, 1fr) minmax(170px, 1fr) minmax(150px, 0.75fr) minmax(150px, 0.75fr) minmax(88px, 0.45fr) minmax(190px, 1fr) minmax(76px, 0.35fr) minmax(78px, 0.35fr) auto auto;
         gap: 8px;
         align-items: end;
-        padding: 10px;
+        padding: 8px;
         border: 1px solid var(--line);
         border-radius: 8px;
         background: rgba(255, 250, 240, 0.9);
@@ -140,8 +141,8 @@
       select,
       input {
         width: 100%;
-        min-height: 34px;
-        padding: 6px 9px;
+        min-height: 32px;
+        padding: 5px 8px;
         border: 1px solid var(--line);
         border-radius: 6px;
         color: var(--ink);
@@ -149,10 +150,10 @@
       }
 
       button {
-        min-height: 34px;
+        min-height: 32px;
         border: 0;
         border-radius: 20px;
-        padding: 7px 14px;
+        padding: 6px 12px;
         color: white;
         background: var(--teal);
         cursor: pointer;
@@ -198,7 +199,7 @@
         grid-template-columns: 1fr auto;
         gap: 8px;
         align-items: center;
-        min-height: 34px;
+        min-height: 32px;
         padding: 0 8px;
         border: 1px solid var(--line);
         border-radius: 6px;
@@ -214,7 +215,7 @@
       }
 
       .toggle-label {
-        min-height: 34px;
+        min-height: 32px;
         align-content: center;
       }
 
@@ -222,7 +223,7 @@
         display: inline-flex;
         align-items: center;
         gap: 8px;
-        min-height: 34px;
+        min-height: 32px;
         color: var(--ink);
         text-transform: none;
         font-size: 0.9rem;
@@ -239,7 +240,7 @@
         display: flex;
         align-items: center;
         gap: 10px;
-        min-height: 40px;
+        min-height: 38px;
         padding: 0 10px;
         border: 1px solid var(--line);
         border-radius: 6px;
@@ -266,7 +267,7 @@
 
       .panel h2 {
         margin: 0;
-        padding: 10px 10px 7px;
+        padding: 8px 10px 6px;
         font-size: 0.76rem;
         color: var(--muted);
         text-transform: uppercase;
@@ -277,14 +278,14 @@
         display: grid;
         grid-template-columns: repeat(2, minmax(0, 1fr));
         gap: 6px;
-        padding: 0 10px 10px;
+        padding: 0 10px 8px;
       }
 
       .metric {
         display: grid;
         gap: 3px;
-        min-height: 45px;
-        padding: 7px 8px;
+        min-height: 42px;
+        padding: 6px 7px;
         border: 1px solid var(--line);
         border-radius: 6px;
         background: #fffdf8;
@@ -301,13 +302,17 @@
         line-height: 1;
       }
 
+      .hidden {
+        display: none !important;
+      }
+
       .spectrum {
         display: none;
         grid-template-columns: repeat(40, 1fr);
         align-items: end;
         gap: 3px;
-        height: 138px;
-        padding: 14px;
+        height: 132px;
+        padding: 12px;
         border-top: 1px solid var(--line);
       }
 
@@ -326,7 +331,7 @@
       }
 
       .rssi-viewer {
-        padding: 10px;
+        padding: 8px;
       }
 
       .rssi-title {
@@ -335,14 +340,14 @@
         color: #9aa3a0;
         font-size: 0.76rem;
         font-weight: 800;
-        margin-bottom: 5px;
+        margin-bottom: 4px;
       }
 
       .channel-chart {
         display: grid;
         grid-template-columns: 38px minmax(0, 1fr);
         gap: 6px;
-        min-height: 168px;
+        min-height: 160px;
         overflow-x: hidden;
         overflow-y: hidden;
         padding-bottom: 2px;
@@ -352,8 +357,8 @@
         display: grid;
         grid-template-rows: repeat(10, 1fr);
         align-items: start;
-        padding-top: 18px;
-        padding-bottom: 25px;
+        padding-top: 16px;
+        padding-bottom: 20px;
         color: #98a19c;
         font-size: 0.72rem;
         text-align: right;
@@ -403,7 +408,7 @@
         display: flex;
         align-items: end;
         justify-content: center;
-        min-height: 92px;
+        min-height: 86px;
         background:
           repeating-linear-gradient(180deg, rgba(151, 162, 158, 0.28) 0 1px, transparent 1px 28px),
           linear-gradient(90deg, rgba(151, 162, 158, 0.2) 0 1px, transparent 1px),
@@ -448,21 +453,21 @@
       .events {
         display: grid;
         gap: 7px;
-        max-height: calc(100vh - 176px);
+        max-height: calc(100vh - 170px);
         overflow: auto;
-        padding: 10px;
+        padding: 8px;
       }
 
       .identity-table-wrap {
-        max-height: calc(100vh - 274px);
+        max-height: calc(100vh - 268px);
         overflow: auto;
-        padding: 0 10px 10px;
+        padding: 0 10px 8px;
       }
 
       .tabs {
         display: inline-flex;
         gap: 5px;
-        padding: 0 10px 8px;
+        padding: 0 10px 6px;
       }
 
       .tab-btn {
@@ -646,9 +651,9 @@
       .candidate-list {
         display: grid;
         gap: 7px;
-        max-height: calc(100vh - 148px);
+        max-height: calc(100vh - 142px);
         overflow: auto;
-        padding: 10px;
+        padding: 8px;
       }
 
       .candidate {
@@ -773,6 +778,10 @@
           BTC Center MHz
           <input id="btcCenterInput" type="number" min="2402" max="2480" step="0.5" value="2442" />
         </label>
+        <label>
+          BTC Target MAC
+          <input id="btcTargetMacInput" type="text" inputmode="latin" placeholder="34:C9:F0:88:B5:97" />
+        </label>
         <label class="toggle-label">
           BTC Sweep
           <span class="toggle"><input id="btcSweepInput" type="checkbox" checked /> auto</span>
@@ -826,8 +835,8 @@
             <div class="metric"><span>Barker</span><strong id="barkerMetric">0</strong></div>
             <div class="metric"><span>Access</span><strong id="accessMetric">0</strong></div>
             <div class="metric"><span>Access Rejects</span><strong id="accessRejectMetric">0</strong></div>
-            <div class="metric"><span>Target Near</span><strong id="targetNearMetric">0</strong></div>
-            <div class="metric"><span>Best Dist</span><strong id="targetBestMetric">68</strong></div>
+            <div class="metric btc-target-metric"><span>Target Near</span><strong id="targetNearMetric">0</strong></div>
+            <div class="metric btc-target-metric"><span>Best Dist</span><strong id="targetBestMetric">68</strong></div>
             <div class="metric"><span>LAP</span><strong id="lapMetric">0</strong></div>
           </div>
           <div class="spectrum" id="spectrum"></div>
@@ -877,6 +886,7 @@
       const btleDeviceSelect = document.getElementById("btleDeviceSelect");
       const btcEngineSelect = document.getElementById("btcEngineSelect");
       const btcCenterInput = document.getElementById("btcCenterInput");
+      const btcTargetMacInput = document.getElementById("btcTargetMacInput");
       const btcSweepInput = document.getElementById("btcSweepInput");
       const btcInput = document.getElementById("btcInput");
       const btleInput = document.getElementById("btleInput");
@@ -902,6 +912,7 @@
       let activeDetectionTab = "BTC";
       let tableSort = { key: "last_seen_at", direction: "desc" };
       const detectionGroupOpen = new Map();
+      const btcTargetMetrics = Array.from(document.querySelectorAll(".btc-target-metric"));
       const metrics = {
         rssi: document.getElementById("rssiMetric"),
         btcRssi: document.getElementById("btcRssiMetric"),
@@ -1001,6 +1012,19 @@
         return "classic";
       }
 
+      function syncModeCheckboxes(mode) {
+        if (mode === "both") {
+          btcInput.checked = true;
+          btleInput.checked = true;
+        } else if (mode === "ble") {
+          btcInput.checked = false;
+          btleInput.checked = true;
+        } else {
+          btcInput.checked = true;
+          btleInput.checked = false;
+        }
+      }
+
       function nextChannelValue() {
         const options = Array.from(channelSelect.options);
         if (!options.length) return Number(channelSelect.value || 0);
@@ -1098,6 +1122,10 @@
       function updateGainLabel(input, label) {
         const { lna, vga } = splitGain(input.value);
         label.textContent = `L${lna} V${vga}`;
+      }
+
+      function updateBtcTargetVisibility(active) {
+        btcTargetMetrics.forEach((el) => el.classList.toggle("hidden", !active));
       }
 
       function fmtUuid16(row) {
@@ -1504,6 +1532,7 @@
           runToggleBtn.classList.toggle("danger", Boolean(status.running));
           runToggleText.textContent = status.running ? "Stop" : "Start";
           runToggleBtn.querySelector(".material-symbols-rounded").textContent = status.running ? "stop" : "play_arrow";
+          if (status.running) syncModeCheckboxes(status.mode);
           metrics.rssi.textContent = fmtDb(status.last_rssi_dbfs);
           metrics.btcRssi.textContent = fmtDb(status.rssi_by_mode?.classic);
           metrics.btleRssi.textContent = fmtDb(status.rssi_by_mode?.ble);
@@ -1522,6 +1551,7 @@
           metrics.targetNear.textContent = Number(status.decoder_stats?.target_access_near_hits || 0).toLocaleString();
           metrics.targetBest.textContent = Number(status.decoder_stats?.target_access_best_distance ?? 68).toLocaleString();
           metrics.lap.textContent = Number(status.decoder_stats?.lap_hits || 0).toLocaleString();
+          updateBtcTargetVisibility(Boolean((btcTargetMacInput.value || "").trim() || status.test_target));
           renderIdentityTable(status.discovery_table || []);
           renderCandidates(status.classic_candidates || [], status.classic_addresses || [], status.discovery_table || []);
           renderBars(status);
@@ -1552,6 +1582,7 @@
             btle_device_id: btleDeviceSelect.value,
             btc_engine: btcEngineSelect.value,
             btc_center_mhz: btcCenterMhz,
+            btc_target_mac: btcTargetMacInput.value.trim(),
             mode,
             channel: Number(channelSelect.value),
             ble_channel: Number(channelSelect.value || [37, 38, 39][(window.bleHopIndex || 0) % 3]),

@@ -78,16 +78,18 @@ def _gateway_headers() -> dict[str, str]:
     return {"Authorization": f"Bearer {token}"} if token else {}
 
 
-def _configured_btc_target() -> dict[str, Any] | None:
-    mac = (os.getenv("BTC_TARGET_MAC", "") or "").strip()
+def _configured_btc_target(mac_override: str | None = None) -> dict[str, Any] | None:
+    mac = str(mac_override or "").strip()
     if not mac:
-        mac = "34:C9:F0:88:B5:97"
+        mac = (os.getenv("BTC_TARGET_MAC", "") or "").strip()
+    if not mac:
+        return None
     try:
         target = _classic_target_from_mac(mac)
     except ValueError:
         return None
     target["inquiry_status"] = "manual traffic generation"
-    target["source"] = "env BTC_TARGET_MAC" if os.getenv("BTC_TARGET_MAC") else "default target MAC"
+    target["source"] = "scan form BTC target MAC" if mac_override else "env BTC_TARGET_MAC"
     return target
 
 
@@ -2553,6 +2555,7 @@ def start_scan():
     btc_vga_gain_db = int(payload.get("btc_vga_gain_db", vga_gain_db))
     btle_lna_gain_db = int(payload.get("btle_lna_gain_db", lna_gain_db))
     btle_vga_gain_db = int(payload.get("btle_vga_gain_db", vga_gain_db))
+    btc_target_mac = str(payload.get("btc_target_mac", "")).strip()
     preserve_detections = bool(payload.get("preserve_detections", False))
     btc_engine = str(payload.get("btc_engine", BTC_ENGINE_DEFAULT) or BTC_ENGINE_DEFAULT).strip().lower()
 
@@ -2593,8 +2596,8 @@ def start_scan():
     btc_test_target: dict[str, Any] | None = None
     btc_test_error = ""
     if mode in {"classic", "both"}:
-        btc_test_target = _configured_btc_target()
-        if btc_test_target is None:
+        btc_test_target = _configured_btc_target(btc_target_mac)
+        if btc_target_mac and btc_test_target is None:
             btc_test_error = "BTC target MAC is invalid; set BTC_TARGET_MAC if needed"
         _stop_bredr_inquiry()
     else:
