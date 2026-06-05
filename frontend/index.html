@@ -61,34 +61,34 @@
       .app {
         display: grid;
         grid-template-rows: auto auto 1fr;
-        gap: 16px;
-        width: min(1480px, calc(100vw - 28px));
+        gap: 10px;
+        width: min(1500px, calc(100vw - 22px));
         min-height: 100vh;
         margin: 0 auto;
-        padding: 18px 0;
+        padding: 10px 0;
       }
 
       header {
         display: flex;
         align-items: end;
         justify-content: space-between;
-        gap: 16px;
-        padding: 10px 2px 0;
+        gap: 10px;
+        padding: 4px 2px 0;
       }
 
       h1 {
         margin: 0;
         font-family: Georgia, "Times New Roman", serif;
-        font-size: clamp(2rem, 4vw, 4.8rem);
+        font-size: clamp(1.35rem, 2.4vw, 3rem);
         font-weight: 700;
         line-height: 0.95;
         letter-spacing: 0;
       }
 
       .subtitle {
-        margin-top: 8px;
+        margin-top: 4px;
         color: var(--muted);
-        font-size: 0.98rem;
+        font-size: 0.82rem;
       }
 
       .status-pill {
@@ -119,9 +119,9 @@
       .toolbar {
         display: grid;
         grid-template-columns: minmax(170px, 1fr) minmax(170px, 1fr) minmax(150px, 0.75fr) minmax(150px, 0.75fr) minmax(88px, 0.45fr) minmax(190px, 1fr) minmax(76px, 0.35fr) minmax(78px, 0.35fr) auto auto;
-        gap: 12px;
+        gap: 8px;
         align-items: end;
-        padding: 14px;
+        padding: 10px;
         border: 1px solid var(--line);
         border-radius: 8px;
         background: rgba(255, 250, 240, 0.9);
@@ -130,9 +130,9 @@
 
       label {
         display: grid;
-        gap: 6px;
+        gap: 4px;
         color: var(--muted);
-        font-size: 0.76rem;
+        font-size: 0.68rem;
         font-weight: 700;
         text-transform: uppercase;
       }
@@ -140,8 +140,8 @@
       select,
       input {
         width: 100%;
-        min-height: 40px;
-        padding: 8px 10px;
+        min-height: 34px;
+        padding: 6px 9px;
         border: 1px solid var(--line);
         border-radius: 6px;
         color: var(--ink);
@@ -149,10 +149,10 @@
       }
 
       button {
-        min-height: 40px;
+        min-height: 34px;
         border: 0;
         border-radius: 20px;
-        padding: 9px 16px;
+        padding: 7px 14px;
         color: white;
         background: var(--teal);
         cursor: pointer;
@@ -198,8 +198,8 @@
         grid-template-columns: 1fr auto;
         gap: 8px;
         align-items: center;
-        min-height: 40px;
-        padding: 0 10px;
+        min-height: 34px;
+        padding: 0 8px;
         border: 1px solid var(--line);
         border-radius: 6px;
         background: #fffdf8;
@@ -214,7 +214,7 @@
       }
 
       .toggle-label {
-        min-height: 40px;
+        min-height: 34px;
         align-content: center;
       }
 
@@ -222,7 +222,7 @@
         display: inline-flex;
         align-items: center;
         gap: 8px;
-        min-height: 40px;
+        min-height: 34px;
         color: var(--ink);
         text-transform: none;
         font-size: 0.9rem;
@@ -248,8 +248,8 @@
 
       main {
         display: grid;
-        grid-template-columns: 320px minmax(0, 1fr) 360px;
-        gap: 16px;
+        grid-template-columns: 270px minmax(0, 1fr) 346px;
+        gap: 10px;
         min-height: 0;
       }
 
@@ -266,8 +266,8 @@
 
       .panel h2 {
         margin: 0;
-        padding: 14px 14px 10px;
-        font-size: 0.83rem;
+        padding: 10px 10px 7px;
+        font-size: 0.76rem;
         color: var(--muted);
         text-transform: uppercase;
         letter-spacing: 0;
@@ -275,16 +275,16 @@
 
       .metrics {
         display: grid;
-        gap: 10px;
-        padding: 0 14px 14px;
+        grid-template-columns: repeat(2, minmax(0, 1fr));
+        gap: 6px;
+        padding: 0 10px 10px;
       }
 
       .metric {
-        display: flex;
-        align-items: baseline;
-        justify-content: space-between;
-        gap: 12px;
-        padding: 12px;
+        display: grid;
+        gap: 3px;
+        min-height: 45px;
+        padding: 7px 8px;
         border: 1px solid var(--line);
         border-radius: 6px;
         background: #fffdf8;
@@ -292,12 +292,13 @@
 
       .metric span {
         color: var(--muted);
-        font-size: 0.82rem;
+        font-size: 0.68rem;
       }
 
       .metric strong {
-        font-size: 1.35rem;
+        font-size: 1.05rem;
         font-variant-numeric: tabular-nums;
+        line-height: 1;
       }
 
       .spectrum {
@@ -320,39 +321,39 @@
 
       .center-stack {
         display: grid;
-        gap: 16px;
+        gap: 10px;
         min-width: 0;
       }
 
       .rssi-viewer {
-        padding: 14px;
+        padding: 10px;
       }
 
       .rssi-title {
         display: flex;
         justify-content: center;
         color: #9aa3a0;
-        font-size: 0.82rem;
+        font-size: 0.76rem;
         font-weight: 800;
-        margin-bottom: 8px;
+        margin-bottom: 5px;
       }
 
       .channel-chart {
         display: grid;
-        grid-template-columns: 46px minmax(0, 1fr);
-        gap: 8px;
-        min-height: 360px;
+        grid-template-columns: 38px minmax(0, 1fr);
+        gap: 6px;
+        min-height: 168px;
         overflow-x: hidden;
         overflow-y: hidden;
-        padding-bottom: 6px;
+        padding-bottom: 2px;
       }
 
       .db-axis {
         display: grid;
         grid-template-rows: repeat(10, 1fr);
         align-items: start;
-        padding-top: 24px;
-        padding-bottom: 38px;
+        padding-top: 18px;
+        padding-bottom: 25px;
         color: #98a19c;
         font-size: 0.72rem;
         text-align: right;
@@ -372,14 +373,14 @@
         display: grid;
         grid-template-columns: repeat(79, minmax(0, 1fr));
         align-items: stretch;
-        gap: 3px;
+        gap: 2px;
         min-width: 0;
         padding-bottom: 4px;
       }
 
       .channel-cell {
         display: grid;
-        grid-template-rows: 18px minmax(230px, 1fr) 34px;
+        grid-template-rows: 14px minmax(92px, 1fr) 20px;
         min-width: 0;
       }
 
@@ -402,7 +403,7 @@
         display: flex;
         align-items: end;
         justify-content: center;
-        min-height: 230px;
+        min-height: 92px;
         background:
           repeating-linear-gradient(180deg, rgba(151, 162, 158, 0.28) 0 1px, transparent 1px 28px),
           linear-gradient(90deg, rgba(151, 162, 158, 0.2) 0 1px, transparent 1px),
@@ -446,22 +447,22 @@
 
       .events {
         display: grid;
-        gap: 10px;
-        max-height: calc(100vh - 222px);
+        gap: 7px;
+        max-height: calc(100vh - 176px);
         overflow: auto;
-        padding: 14px;
+        padding: 10px;
       }
 
       .identity-table-wrap {
-        max-height: 280px;
+        max-height: calc(100vh - 274px);
         overflow: auto;
-        padding: 0 14px 14px;
+        padding: 0 10px 10px;
       }
 
       .tabs {
         display: inline-flex;
-        gap: 6px;
-        padding: 0 14px 12px;
+        gap: 5px;
+        padding: 0 10px 8px;
       }
 
       .tab-btn {
@@ -482,12 +483,12 @@
       .identity-table {
         width: 100%;
         border-collapse: collapse;
-        font-size: 0.86rem;
+        font-size: 0.78rem;
       }
 
       .identity-table th,
       .identity-table td {
-        padding: 9px 8px;
+        padding: 6px 6px;
         border-bottom: 1px solid rgba(215, 208, 191, 0.75);
         text-align: left;
         white-space: nowrap;
@@ -499,6 +500,15 @@
         text-transform: uppercase;
         cursor: pointer;
         user-select: none;
+      }
+
+      .identity-group-row td {
+        padding: 7px 8px;
+        color: var(--muted);
+        background: rgba(213, 191, 112, 0.16);
+        font-size: 0.72rem;
+        font-weight: 800;
+        text-transform: uppercase;
       }
 
       .identity-table td:nth-child(2),
@@ -528,11 +538,59 @@
         font-size: 0.8rem;
       }
 
+      .detection-groups {
+        display: grid;
+        gap: 8px;
+      }
+
+      .detection-group {
+        border: 1px solid var(--line);
+        border-radius: 8px;
+        background: #fffdf8;
+        overflow: hidden;
+      }
+
+      .detection-group summary {
+        display: flex;
+        align-items: center;
+        justify-content: space-between;
+        gap: 10px;
+        padding: 9px 10px;
+        cursor: pointer;
+        color: var(--ink);
+        font-weight: 800;
+        list-style: none;
+      }
+
+      .detection-group summary::-webkit-details-marker {
+        display: none;
+      }
+
+      .detection-grid {
+        display: grid;
+        grid-template-columns: repeat(auto-fill, minmax(250px, 1fr));
+        gap: 7px;
+        padding: 0 8px 8px;
+      }
+
+      .detection-card {
+        padding: 8px;
+        border: 1px solid rgba(215, 208, 191, 0.8);
+        border-radius: 7px;
+        background: rgba(255, 250, 240, 0.82);
+      }
+
+      .detection-card h3 {
+        margin: 0 0 6px;
+        font-size: 0.92rem;
+        font-variant-numeric: tabular-nums;
+      }
+
       .event {
         display: grid;
         grid-template-columns: minmax(0, 1fr) auto;
-        gap: 12px;
-        padding: 12px;
+        gap: 8px;
+        padding: 8px;
         border: 1px solid var(--line);
         border-left: 4px solid var(--teal);
         border-radius: 6px;
@@ -544,30 +602,30 @@
       }
 
       .event h3 {
-        margin: 0 0 8px;
-        font-size: 1rem;
+        margin: 0 0 5px;
+        font-size: 0.9rem;
         letter-spacing: 0;
       }
 
       .chips {
         display: flex;
         flex-wrap: wrap;
-        gap: 6px;
+        gap: 4px;
       }
 
       .chip {
-        padding: 4px 7px;
+        padding: 3px 6px;
         border-radius: 999px;
         color: var(--ink);
         background: var(--chip);
-        font-size: 0.78rem;
+        font-size: 0.7rem;
         font-variant-numeric: tabular-nums;
       }
 
       .score {
         align-self: start;
         min-width: 58px;
-        padding: 8px;
+        padding: 6px;
         border-radius: 6px;
         color: #fff;
         background: var(--teal);
@@ -587,24 +645,33 @@
 
       .candidate-list {
         display: grid;
-        gap: 10px;
-        max-height: calc(100vh - 222px);
+        gap: 7px;
+        max-height: calc(100vh - 148px);
         overflow: auto;
-        padding: 14px;
+        padding: 10px;
       }
 
       .candidate {
-        padding: 12px;
+        padding: 8px 10px;
         border: 1px solid var(--line);
         border-radius: 6px;
         background: #fffdf8;
       }
 
+      .candidate.soft {
+        opacity: 0.72;
+      }
+
+      .candidate.good {
+        border-color: rgba(31, 143, 98, 0.35);
+        box-shadow: inset 0 0 0 1px rgba(31, 143, 98, 0.08);
+      }
+
       .candidate-top {
         display: flex;
         justify-content: space-between;
-        gap: 10px;
-        margin-bottom: 8px;
+        gap: 8px;
+        margin-bottom: 5px;
       }
 
       .candidate strong {
@@ -613,8 +680,13 @@
 
       .small {
         color: var(--muted);
-        font-size: 0.83rem;
-        line-height: 1.45;
+        font-size: 0.74rem;
+        line-height: 1.25;
+        margin: 6px 0 0;
+        display: -webkit-box;
+        -webkit-line-clamp: 2;
+        -webkit-box-orient: vertical;
+        overflow: hidden;
       }
 
       @media (max-width: 1120px) {
@@ -632,7 +704,7 @@
         }
 
         .channel-chart {
-          min-height: 300px;
+          min-height: 210px;
         }
       }
 
@@ -684,6 +756,13 @@
           <select id="btleDeviceSelect"></select>
         </label>
         <label>
+          BTC Engine
+          <select id="btcEngineSelect">
+            <option value="btcsniffer">btcsniffer C++</option>
+            <option value="python">Python C++-style</option>
+          </select>
+        </label>
+        <label>
           Protocol
           <span class="protocol-toggles">
             <span class="toggle"><input id="btcInput" type="checkbox" checked /> BTC</span>
@@ -691,7 +770,15 @@
           </span>
         </label>
         <label>
-          Bank
+          BTC Center MHz
+          <input id="btcCenterInput" type="number" min="2402" max="2480" step="0.5" value="2442" />
+        </label>
+        <label class="toggle-label">
+          BTC Sweep
+          <span class="toggle"><input id="btcSweepInput" type="checkbox" checked /> auto</span>
+        </label>
+        <label>
+          BTLE Adv CH
           <select id="channelSelect"></select>
         </label>
         <label>
@@ -747,6 +834,15 @@
         </section>
 
         <div class="center-stack">
+          <section class="panel">
+            <h2>Detections</h2>
+            <div class="tabs">
+              <button class="tab-btn active" id="btcTabBtn" type="button">BTC</button>
+              <button class="tab-btn" id="btleTabBtn" type="button">BTLE</button>
+            </div>
+            <div class="identity-table-wrap" id="identityTableWrap"></div>
+          </section>
+
           <section class="panel rssi-viewer">
             <h2>Classic Channels</h2>
             <div class="rssi-title">BT Classic channel</div>
@@ -767,19 +863,10 @@
             </div>
             <div class="db-axis-title">dBFS</div>
           </section>
-
-          <section class="panel">
-            <h2>Detections</h2>
-            <div class="tabs">
-              <button class="tab-btn active" id="btcTabBtn" type="button">BTC</button>
-              <button class="tab-btn" id="btleTabBtn" type="button">BTLE</button>
-            </div>
-            <div class="identity-table-wrap" id="identityTableWrap"></div>
-          </section>
         </div>
 
         <section class="panel">
-          <h2>UAP Candidates</h2>
+          <h2 id="candidatePanelTitle">UAP Candidates</h2>
           <div class="candidate-list" id="candidates"></div>
         </section>
       </main>
@@ -788,6 +875,9 @@
     <script>
       const btcDeviceSelect = document.getElementById("btcDeviceSelect");
       const btleDeviceSelect = document.getElementById("btleDeviceSelect");
+      const btcEngineSelect = document.getElementById("btcEngineSelect");
+      const btcCenterInput = document.getElementById("btcCenterInput");
+      const btcSweepInput = document.getElementById("btcSweepInput");
       const btcInput = document.getElementById("btcInput");
       const btleInput = document.getElementById("btleInput");
       const channelSelect = document.getElementById("channelSelect");
@@ -807,9 +897,11 @@
       const identityTableWrap = document.getElementById("identityTableWrap");
       const btcTabBtn = document.getElementById("btcTabBtn");
       const btleTabBtn = document.getElementById("btleTabBtn");
+      const candidatePanelTitle = document.getElementById("candidatePanelTitle");
       const candidatesEl = document.getElementById("candidates");
       let activeDetectionTab = "BTC";
       let tableSort = { key: "last_seen_at", direction: "desc" };
+      const detectionGroupOpen = new Map();
       const metrics = {
         rssi: document.getElementById("rssiMetric"),
         btcRssi: document.getElementById("btcRssiMetric"),
@@ -880,10 +972,10 @@
         channelSelect.innerHTML = "";
         if (mode === "classic" || mode === "both") {
           document.getElementById("sampleRateInput").value = "60";
-          [0, 19].forEach((idx) => {
+          [[37, 2402], [38, 2426], [39, 2480]].forEach(([ch, mhz]) => {
             const opt = document.createElement("option");
-            opt.value = String(idx);
-            opt.textContent = `${idx}-${idx + 59} · ${(2402 + idx + 29.5).toFixed(1)} MHz`;
+            opt.value = String(ch);
+            opt.textContent = `${ch} · ${mhz} MHz`;
             channelSelect.appendChild(opt);
           });
         } else {
@@ -919,6 +1011,33 @@
         return Number(next.value);
       }
 
+      function btcSweepCenters() {
+        const seed = Math.max(2432, Math.min(2452, Number(btcCenterInput.value || 2442)));
+        const offsets = [0, 10, -10, 20, -20];
+        const centers = [];
+        offsets.forEach((offset) => {
+          const center = Math.max(2432, Math.min(2452, seed + offset));
+          if (!centers.includes(center)) centers.push(center);
+        });
+        return centers;
+      }
+
+      function nextBtcCenterValue() {
+        if (!btcSweepInput.checked) return Number(btcCenterInput.value || 2442);
+        const centers = btcSweepCenters();
+        const current = Number(btcCenterInput.value || centers[0]);
+        const currentIndex = centers.findIndex((center) => Math.abs(center - current) < 0.01);
+        const next = centers[(currentIndex + 1 + centers.length) % centers.length];
+        btcCenterInput.value = String(next);
+        return next;
+      }
+
+      function advanceSweepValues() {
+        const mode = selectedMode();
+        if (["classic", "both"].includes(mode)) nextBtcCenterValue();
+        if (["ble", "both"].includes(mode)) nextChannelValue();
+      }
+
       async function loadDevices() {
         btcDeviceSelect.innerHTML = "<option>Loading...</option>";
         btleDeviceSelect.innerHTML = "<option>Loading...</option>";
@@ -933,6 +1052,11 @@
               const opt = document.createElement("option");
               opt.value = dev.id;
               opt.textContent = `${dev.label || dev.id} (${dev.id})`;
+              const isBladeRf = `${dev.id} ${dev.label || ""}`.toLowerCase().includes("bladerf");
+              if (select === btcDeviceSelect && !isBladeRf) {
+                opt.disabled = true;
+                opt.textContent += " - not used for BTC";
+              }
               select.appendChild(opt);
             });
           });
@@ -1001,133 +1125,301 @@
         return row[key];
       }
 
+      function manufacturerGroupLabel(row) {
+        const manufacturer = fmtManufacturer(row).trim();
+        if (manufacturer) return manufacturer;
+        if (row.protocol === "BTC") return "BT Classic / manufacturer unknown";
+        return "Manufacturer unknown";
+      }
+
       function renderIdentityTable(rows) {
         const filtered = rows.filter((row) => row.protocol === activeDetectionTab);
-        const sorted = [...filtered].sort((a, b) => {
-          const dir = tableSort.direction === "asc" ? 1 : -1;
-          const av = sortValue(a, tableSort.key);
-          const bv = sortValue(b, tableSort.key);
-          if (typeof av === "number" || typeof bv === "number") return ((Number(av) || 0) - (Number(bv) || 0)) * dir;
-          return String(av || "").localeCompare(String(bv || "")) * dir;
-        });
         if (!filtered.length) {
           identityTableWrap.innerHTML = `<div class="empty">No detections yet</div>`;
           return;
         }
-        identityTableWrap.innerHTML = `
-          <table class="identity-table">
-            <thead>
-              <tr>
-                <th data-sort="protocol">Proto</th>
-                <th data-sort="identity">Identity</th>
-                <th data-sort="identity_source">Source</th>
-                <th data-sort="mac">MAC</th>
-                <th data-sort="uuid16">UUID16</th>
-                <th data-sort="manufacturer">Manufacturer</th>
-                <th data-sort="detections">Count</th>
-                <th data-sort="last_seen_at">Last</th>
-                <th data-sort="last_rssi_dbfs">RSSI</th>
-                <th data-sort="channel">CH</th>
-              </tr>
-            </thead>
-            <tbody>
-              ${sorted
-                .map(
-                  (row) => `
-                    <tr>
-                      <td>${row.protocol || ""}</td>
-                      <td>${row.identity || row.name || row.mac || ""}</td>
-                      <td>${row.identity_source || ""}</td>
-                      <td>${row.mac || ""}</td>
-                      <td>${fmtUuid16(row)}</td>
-                      <td title="${row.manufacturer?.company_id || ""} ${row.manufacturer?.data || ""}">${fmtManufacturer(row)}</td>
-                      <td>${Number(row.detections || 0).toLocaleString()}</td>
-                      <td>${age(row.last_seen_at)}</td>
-                      <td>${fmtDb(row.last_rssi_dbfs)}</td>
-                      <td>${row.channel ?? ""}</td>
-                    </tr>
-                  `,
-                )
-                .join("")}
-            </tbody>
-          </table>
-        `;
-        identityTableWrap.querySelectorAll("th[data-sort]").forEach((th) => {
-          th.addEventListener("click", () => {
-            const key = th.dataset.sort;
-            tableSort = {
-              key,
-              direction: tableSort.key === key && tableSort.direction === "desc" ? "asc" : "desc",
-            };
-            renderIdentityTable(rows);
+        const groupedRows = filtered.reduce((groups, row) => {
+          const label = manufacturerGroupLabel(row);
+          if (!groups.has(label)) groups.set(label, []);
+          groups.get(label).push(row);
+          return groups;
+        }, new Map());
+        const groupCards = [...groupedRows.entries()]
+          .sort(([a], [b]) => a.localeCompare(b))
+          .map(([label, groupRows], index) => {
+            const devices = [...groupRows].sort((a, b) => {
+              const ai = String(a.identity || a.name || a.mac || "");
+              const bi = String(b.identity || b.name || b.mac || "");
+              return ai.localeCompare(bi);
+            });
+            const detections = devices.reduce((sum, row) => sum + Number(row.detections || 0), 0);
+            const bestRssi = Math.max(...devices.map((row) => Number(row.last_rssi_dbfs || -120)));
+            const lastSeen = Math.max(...devices.map((row) => Number(row.last_seen_at || 0)));
+            const groupKey = encodeURIComponent(label);
+            const isOpen = detectionGroupOpen.has(groupKey) ? detectionGroupOpen.get(groupKey) : index < 3;
+            return `
+              <details class="detection-group" data-group="${groupKey}" ${isOpen ? "open" : ""}>
+                <summary>
+                  <span>${label}</span>
+                  <span class="chips">
+                    <span class="chip">${devices.length} device${devices.length === 1 ? "" : "s"}</span>
+                    <span class="chip">${Number(detections || 0).toLocaleString()} detections</span>
+                    <span class="chip">${fmtDb(bestRssi)} dBFS</span>
+                    <span class="chip">${age(lastSeen)}</span>
+                  </span>
+                </summary>
+                <div class="detection-grid">
+                  ${devices
+                    .map((row) => {
+                      const uuid = fmtUuid16(row);
+                      const manufacturer = fmtManufacturer(row);
+                      return `
+                        <article class="detection-card">
+                          <h3>${row.identity || row.name || row.mac || "Unknown device"}</h3>
+                          <div class="chips">
+                            <span class="chip">${row.protocol || ""}</span>
+                            <span class="chip">${Number(row.detections || 0).toLocaleString()} hits</span>
+                            <span class="chip">${age(row.last_seen_at)}</span>
+                            <span class="chip">${fmtDb(row.last_rssi_dbfs)} dBFS</span>
+                            <span class="chip">CH ${row.channel ?? ""}</span>
+                            ${row.mac ? `<span class="chip">${row.mac}</span>` : ""}
+                            ${uuid ? `<span class="chip">UUID ${uuid}</span>` : ""}
+                            ${manufacturer ? `<span class="chip">${manufacturer}</span>` : ""}
+                          </div>
+                          <p class="small">${row.identity_source || "Observed from SDR packet evidence."}</p>
+                        </article>
+                      `;
+                    })
+                    .join("")}
+                </div>
+              </details>
+            `;
+          })
+          .join("");
+        identityTableWrap.innerHTML = `<div class="detection-groups">${groupCards}</div>`;
+        identityTableWrap.querySelectorAll(".detection-group").forEach((group) => {
+          group.addEventListener("toggle", () => {
+            detectionGroupOpen.set(group.dataset.group || "", group.open);
           });
         });
       }
 
-      function renderCandidates(candidates, addresses = [], target = null, targetError = "") {
-        if (!candidates.length && !addresses.length && !target && !targetError) {
-          candidatesEl.innerHTML = `<div class="empty">No LAPs yet</div>`;
+      function formatClassicStatus(status, candidateCount = 0) {
+        const value = String(status || "").trim();
+        if (value === "initialized") return "collecting follow-up packets";
+        if (value === "brute_forcing") return candidateCount <= 2 ? "nearly resolved" : "brute forcing UAP";
+        if (value === "resolved") return "resolved";
+        if (value.startsWith("init_found_")) return `partial init (${value.split("_").pop()} candidates)`;
+        if (value === "target-match") return "target match";
+        if (!value) return "observed";
+        return value.replaceAll("_", " ");
+      }
+
+      function classicStrengthClass(row) {
+        const hits = Number(row.seen_count || row.processed_packets || 0);
+        const left = Number(row.candidate_count || 0);
+        if (left > 0 && left < 32) return "candidate good";
+        if (hits >= 2) return "candidate good";
+        return "candidate soft";
+      }
+
+      function normalizeUap(value) {
+        const text = String(value ?? "").trim().toUpperCase();
+        if (!text || text === "PENDING" || text === "XX" || text === "XXX") return "";
+        return /^[0-9A-F]{2}$/.test(text) ? text : "";
+      }
+
+      function candidateMac(row) {
+        const lap = String(row.lap || "").toUpperCase();
+        const uap = normalizeUap(row.uap || row.uap_hex);
+        if (row.full_mac || row.mac) return row.full_mac || row.mac;
+        if (/^[0-9A-F]{6}$/.test(lap)) return `XX:XX:${uap || "XX"}:${lap.slice(0, 2)}:${lap.slice(2, 4)}:${lap.slice(4, 6)}`;
+        return "XX:XX:XX:XX:XX:XX";
+      }
+
+      function candidateGroupKey(row) {
+        const lap = String(row.lap || "").toUpperCase();
+        if (/^[0-9A-F]{6}$/.test(lap)) return `lap:${lap}`;
+        return `mac:${candidateMac(row)}`;
+      }
+
+      function candidatePriority(row) {
+        const status = String(row.status || "");
+        const left = Number(row.candidate_count || 0);
+        const hasUap = normalizeUap(row.uap || row.uap_hex) ? 5000 : 0;
+        const resolved = status === "resolved" || status === "target-match" ? 10000 : 0;
+        const narrowed = left > 0 && left < 32 ? 2000 - left : 0;
+        const packets = Number(row.processed_packets || row.seen_count || 0) * 5;
+        return resolved + hasUap + narrowed + packets + Number(row.score || 0);
+      }
+
+      function groupedClassicCandidates(addresses, candidates) {
+        const groups = new Map();
+        [...addresses, ...candidates].forEach((row) => {
+          const key = candidateGroupKey(row);
+          if (!groups.has(key)) {
+            groups.set(key, {
+              rows: [],
+              uaps: new Set(),
+              packets: 0,
+              sightings: 0,
+              best: row,
+              bestPriority: candidatePriority(row),
+              bestLeft: Number(row.candidate_count || 0),
+            });
+          }
+          const group = groups.get(key);
+          group.rows.push(row);
+          const uap = normalizeUap(row.uap || row.uap_hex);
+          if (uap) group.uaps.add(uap);
+          group.packets += Number(row.processed_packets || 0);
+          group.sightings += Number(row.seen_count || 0);
+          const left = Number(row.candidate_count || 0);
+          if (left > 0) group.bestLeft = group.bestLeft > 0 ? Math.min(group.bestLeft, left) : left;
+          const priority = candidatePriority(row);
+          if (priority > group.bestPriority || (priority === group.bestPriority && Number(row.last_seen_at || 0) > Number(group.best.last_seen_at || 0))) {
+            group.best = row;
+            group.bestPriority = priority;
+          }
+        });
+        return [...groups.values()]
+          .map((group) => {
+            const best = { ...group.best };
+            const latest = group.rows.reduce((winner, row) => Number(row.last_seen_at || 0) > Number(winner.last_seen_at || 0) ? row : winner, best);
+            best.channel = latest.channel ?? best.channel;
+            best.rssi_dbfs = latest.rssi_dbfs ?? best.rssi_dbfs;
+            best.last_seen_at = latest.last_seen_at ?? best.last_seen_at;
+            best.candidate_count = group.bestLeft || best.candidate_count || 0;
+            best.processed_packets = group.packets || Number(best.processed_packets || 0);
+            best.seen_count = group.sightings || Number(best.seen_count || 0);
+            best.group_count = group.rows.length;
+            best.uap_options = [...group.uaps].sort();
+            best.full_mac = candidateMac(best);
+            return best;
+          })
+          .sort((a, b) => candidatePriority(b) - candidatePriority(a) || Number(b.last_seen_at || 0) - Number(a.last_seen_at || 0));
+      }
+
+      function groupedBleManufacturers(rows) {
+        const groups = new Map();
+        rows
+          .filter((row) => row.protocol === "BTLE")
+          .forEach((row) => {
+            const label = manufacturerGroupLabel(row);
+            if (!groups.has(label)) {
+              groups.set(label, {
+                label,
+                rows: [],
+                detections: 0,
+                uuids: new Set(),
+                names: new Set(),
+                macs: new Set(),
+                channels: new Set(),
+                bestRssi: -120,
+                lastSeen: 0,
+              });
+            }
+            const group = groups.get(label);
+            group.rows.push(row);
+            group.detections += Number(row.detections || 0);
+            fmtUuid16(row).split(", ").filter(Boolean).forEach((uuid) => group.uuids.add(uuid));
+            if (row.name || row.identity) group.names.add(row.name || row.identity);
+            if (row.mac) group.macs.add(row.mac);
+            if (row.channel !== undefined && row.channel !== null && row.channel !== "") group.channels.add(row.channel);
+            group.bestRssi = Math.max(group.bestRssi, Number(row.last_rssi_dbfs || -120));
+            group.lastSeen = Math.max(group.lastSeen, Number(row.last_seen_at || 0));
+          });
+        return [...groups.values()].sort((a, b) => b.detections - a.detections || b.lastSeen - a.lastSeen);
+      }
+
+      function renderBleGroups(rows) {
+        const groups = groupedBleManufacturers(rows).slice(0, 24);
+        if (!groups.length) {
+          candidatesEl.innerHTML = `<div class="empty">No BTLE manufacturers yet</div>`;
           return;
         }
-        const inquiryStatus = target?.inquiry_status || "";
-        const inquiryHelper = target?.inquiry_helper?.mac || "";
-        const targetRow = target || targetError
-          ? `
-            <article class="candidate">
-              <div class="candidate-top">
-                <strong>${target ? `BTC target ${target.mac}` : "BTC target not armed"}</strong>
-                <span class="chip">${targetError ? "warning" : inquiryHelper ? "inquiry active" : "discoverable only"}</span>
-              </div>
-              <div class="chips">
-                ${target ? `<span class="chip">LAP ${target.lap}</span>` : ""}
-                ${target ? `<span class="chip">UAP ${target.uap}</span>` : ""}
-                ${target ? `<span class="chip">NAP ${target.nap}</span>` : ""}
-                ${inquiryHelper ? `<span class="chip">helper ${inquiryHelper}</span>` : ""}
-              </div>
-              <p class="small">${targetError || inquiryStatus || "Discoverable mode is on, but no second Bluetooth controller is actively performing BR/EDR inquiry."}</p>
-            </article>
-          `
-          : "";
-        const addressRows = addresses
-          .map((address) => `
-            <article class="candidate">
-              <div class="candidate-top">
-                <strong>LAP ${address.lap} · UAP ${address.uap || "XXX"}</strong>
-                <span class="chip">${address.status || "observed"}</span>
-              </div>
-              <div class="chips">
-                <span class="chip">CH ${address.channel}</span>
-                <span class="chip">${address.candidate_count || 0} candidates</span>
-                <span class="chip">${Number(address.seen_count || 1)} hits</span>
-                <span class="chip">${fmtDb(address.rssi_dbfs)} dBFS</span>
-              </div>
-              <p class="small">Holding UAP as XXX until header/HEC brute force resolves it.</p>
-            </article>
-          `)
-          .join("");
-        const candidateRows = candidates
-          .map((candidate) => {
-            const uap = candidate.uap_hex || (candidate.uap === null || candidate.uap === undefined ? "Pending" : candidate.uap);
-            const note = Array.isArray(candidate.notes) ? candidate.notes[0] : candidate.status || "";
+        candidatesEl.innerHTML = groups
+          .map((group) => {
+            const names = [...group.names].slice(0, 3);
+            const macs = [...group.macs].slice(0, 3);
+            const uuids = [...group.uuids].slice(0, 5);
+            const channels = [...group.channels].sort((a, b) => Number(a) - Number(b));
+            const noteBits = [
+              names.length ? `Names: ${names.join(", ")}` : "",
+              macs.length ? `MACs: ${macs.join(", ")}` : "",
+            ].filter(Boolean);
             return `
-              <article class="candidate">
+              <article class="${group.detections > 1 ? "candidate good" : "candidate soft"}">
                 <div class="candidate-top">
-                  <strong>${candidate.lap ? `LAP ${candidate.lap} · ` : ""}UAP ${uap}</strong>
-                  <span class="chip">${Math.round(Number(candidate.score || 0) * 100)}%</span>
+                  <strong>${group.label}</strong>
+                  <span class="chip">${group.rows.length} device${group.rows.length === 1 ? "" : "s"}</span>
                 </div>
                 <div class="chips">
-                  <span class="chip">CH ${candidate.channel}</span>
-                  <span class="chip">${candidate.status || "candidate"}</span>
-                  <span class="chip">${candidate.candidate_count || 0} left</span>
-                  <span class="chip">${fmtFreq(candidate.center_freq_hz)}</span>
-                  <span class="chip">${fmtDb(candidate.rssi_dbfs)} dBFS</span>
+                  <span class="chip">${Number(group.detections || 0).toLocaleString()} detections</span>
+                  <span class="chip">${fmtDb(group.bestRssi)} dBFS</span>
+                  <span class="chip">${age(group.lastSeen)}</span>
+                  ${channels.length ? `<span class="chip">CH ${channels.join(" ")}</span>` : ""}
+                  ${uuids.length ? `<span class="chip">UUID ${uuids.join(" ")}</span>` : ""}
                 </div>
-                <p class="small">${note}</p>
+                <p class="small">${noteBits.join(" · ") || "No manufacturer/name detail beyond the advertisement address yet."}</p>
               </article>
             `;
           })
           .join("");
-        candidatesEl.innerHTML = targetRow + addressRows + candidateRows;
+      }
+
+      function renderCandidates(candidates, addresses = [], rows = []) {
+        if (activeDetectionTab === "BTLE") {
+          candidatePanelTitle.textContent = "BTLE Manufacturers";
+          renderBleGroups(rows);
+          return;
+        }
+        candidatePanelTitle.textContent = "UAP Candidates";
+        if (!candidates.length && !addresses.length) {
+          candidatesEl.innerHTML = `<div class="empty">No LAPs yet</div>`;
+          return;
+        }
+        const candidateRows = groupedClassicCandidates(addresses, candidates)
+          .slice(0, 24)
+          .map((candidate) => {
+            const statusText = formatClassicStatus(candidate.status, candidate.candidate_count);
+            const packets = Number(candidate.processed_packets || candidate.seen_count || 1);
+            const sightings = Number(candidate.seen_count || 1);
+            const left = Number(candidate.candidate_count || 0);
+            const uaps = Array.isArray(candidate.uap_options) && candidate.uap_options.length ? candidate.uap_options : [];
+            const uapLabel = uaps.length === 1 ? uaps[0] : normalizeUap(candidate.uap || candidate.uap_hex) || "XX";
+            const note = left <= 2
+              ? "Very close. One or two UAP candidates remain."
+              : left < 32
+                ? "Converging. Follow-up packets are pruning UAP candidates."
+                : "Initialized cleanly. Waiting for more packets from this LAP to prune UAP candidates.";
+            return `
+            <article class="${classicStrengthClass(candidate)}">
+              <div class="candidate-top">
+                <strong>${candidate.full_mac || candidate.mac || "XX:XX:XX:XX:XX:XX"}</strong>
+                <span class="chip">${statusText}</span>
+              </div>
+              <div class="chips">
+                <span class="chip">NAP ${candidate.nap || "XXXX"}</span>
+                <span class="chip">UAP ${uapLabel}</span>
+                <span class="chip">LAP ${candidate.lap || "XXXXXX"}</span>
+                <span class="chip">CH ${candidate.channel}</span>
+                <span class="chip">${left || 0} UAP candidates</span>
+                <span class="chip">${packets} packets</span>
+                <span class="chip">${sightings} sightings</span>
+                ${uaps.length > 1 ? `<span class="chip">UAPs ${uaps.slice(0, 6).join(" ")}</span>` : ""}
+                ${candidate.group_count > 1 ? `<span class="chip">${candidate.group_count} merged</span>` : ""}
+                <span class="chip">${fmtFreq(candidate.center_freq_hz)}</span>
+                <span class="chip">${fmtDb(candidate.rssi_dbfs)} dBFS</span>
+                ${candidate.header_relaxed ? `<span class="chip">header ${candidate.header_perfect_triplets || 0}/18</span>` : ""}
+                ${candidate.repaired ? `<span class="chip">repair ${candidate.repair_distance || 0}</span>` : ""}
+              </div>
+              <p class="small">${note}</p>
+            </article>
+          `;
+          })
+          .join("");
+        candidatesEl.innerHTML = candidateRows;
       }
 
       function renderBars(status) {
@@ -1142,15 +1434,15 @@
 
       function currentBankChannels(status) {
         if (!["classic", "both"].includes(status.mode) || !status.running) return new Set();
-        const start = Number(status.channel || 0);
+        const centerMhz = Number(status.center_freq_hz || 0) / 1_000_000;
+        const start = Math.max(0, Math.min(19, Math.round(centerMhz - 2402 - 29.5)));
         return new Set(Array.from({ length: 60 }, (_, idx) => start + idx).filter((ch) => ch >= 0 && ch < 79));
       }
 
       function statusLabel(status) {
         if (!status.running) return "Idle";
         if (status.mode === "classic" || status.mode === "both") {
-          const start = Number(status.channel || 0);
-          return `${status.mode === "both" ? "BTC+BTLE" : "CLASSIC"} BANK ${start}-${Math.min(78, start + 59)}`;
+          return `${status.mode === "both" ? "BTC+BTLE" : "CLASSIC"} ${fmtFreq(status.center_freq_hz)} / 60 MHz`;
         }
         return `BTLE CH ${status.channel}`;
       }
@@ -1171,7 +1463,7 @@
           bar.classList.toggle("active", hits > 0);
           bar.classList.toggle("ble-adv", Boolean(bleAdv));
           bar.classList.toggle("current", bank.has(idx) && hits === 0 && !bleAdv);
-          bar.style.height = `${3 + level * 224}px`;
+          bar.style.height = `${3 + level * 90}px`;
           bar.title = bleAdv
             ? `BLE adv CH ${bleAdv.channel} / BTC CH ${idx}: ${hits} BTC hits, ${fmtDb(rssi)} dBFS`
             : `BTC CH ${idx}: ${hits} hits, ${fmtDb(rssi)} dBFS`;
@@ -1206,7 +1498,7 @@
           metrics.targetBest.textContent = Number(status.decoder_stats?.target_access_best_distance ?? 68).toLocaleString();
           metrics.lap.textContent = Number(status.decoder_stats?.lap_hits || 0).toLocaleString();
           renderIdentityTable(status.discovery_table || []);
-          renderCandidates(status.classic_candidates || [], status.classic_addresses || [], status.test_target, status.test_target_error || "");
+          renderCandidates(status.classic_candidates || [], status.classic_addresses || [], status.discovery_table || []);
           renderBars(status);
           renderChannelActivity(status);
         } catch {
@@ -1216,20 +1508,29 @@
       }
 
       async function startScan({ preserve = false, hop = false } = {}) {
+        const mode = selectedMode();
         const rateMhz = Math.max(1, Math.min(60, Number(document.getElementById("sampleRateInput").value || 60)));
+        const btcEnabled = ["classic", "both"].includes(mode);
+        if (btcEnabled) document.getElementById("sampleRateInput").value = "60";
+        const btcCenterMhz = Math.max(2402, Math.min(2480, Number(btcCenterInput.value || 2442)));
+        if (btcEnabled && !`${btcDeviceSelect.value} ${btcDeviceSelect.selectedOptions[0]?.textContent || ""}`.toLowerCase().includes("bladerf")) {
+          throw new Error("BTC requires the bladeRF SDR. HackRF is visible but reserved for BTLE/other apps.");
+        }
         const btcGain = splitGain(btcGainInput.value || 72);
         const btleGain = splitGain(btleGainInput.value || 56);
-        await fetch("/api/scan/start", {
+        const resp = await fetch("/api/scan/start", {
           method: "POST",
           headers: { "Content-Type": "application/json" },
           body: JSON.stringify({
             device_id: btcDeviceSelect.value || btleDeviceSelect.value,
             btc_device_id: btcDeviceSelect.value,
             btle_device_id: btleDeviceSelect.value,
-            mode: selectedMode(),
+            btc_engine: btcEngineSelect.value,
+            btc_center_mhz: btcCenterMhz,
+            mode,
             channel: Number(channelSelect.value),
-            ble_channel: [37, 38, 39][(window.bleHopIndex || 0) % 3],
-            sample_rate_sps: Math.round(rateMhz * 1_000_000),
+            ble_channel: Number(channelSelect.value || [37, 38, 39][(window.bleHopIndex || 0) % 3]),
+            sample_rate_sps: Math.round((btcEnabled ? 60 : rateMhz) * 1_000_000),
             lna_gain_db: btcGain.lna,
             vga_gain_db: btcGain.vga,
             btc_lna_gain_db: btcGain.lna,
@@ -1239,17 +1540,29 @@
             preserve_detections: preserve,
           }),
         });
-        if (!hop) scheduleAutoHop();
-        pollStatus();
+        if (!resp.ok) {
+          const data = await resp.json().catch(() => ({}));
+          throw new Error(data.error || data.detail || "Failed to start scan");
+        }
+        if (!hop) {
+          await pollStatus();
+          scheduleAutoHop();
+        } else {
+          pollStatus();
+        }
       }
 
       function scheduleAutoHop() {
         clearTimeout(window.autoHopTimer);
         if (runToggleText.textContent !== "Stop") return;
+        const mode = selectedMode();
+        const btcSweepActive = ["classic", "both"].includes(mode) && btcSweepInput.checked;
+        const bleSweepActive = ["ble", "both"].includes(mode);
+        if (!btcSweepActive && !bleSweepActive) return;
         const dwellMs = Math.max(0.25, Math.min(30, Number(hopDwellInput.value || 0.25))) * 1000;
         window.autoHopTimer = setTimeout(async () => {
           if (runToggleText.textContent !== "Stop") return;
-          nextChannelValue();
+          advanceSweepValues();
           await startScan({ preserve: true, hop: true });
           scheduleAutoHop();
         }, dwellMs);
@@ -1262,7 +1575,11 @@
           await fetch("/api/scan/stop", { method: "POST" });
           pollStatus();
         } else {
-          await startScan();
+          try {
+            await startScan();
+          } catch (err) {
+            runState.textContent = err.message || "Start failed";
+          }
         }
       });
 
