@@ -1,5 +1,6 @@
 import os
 import json
+import logging
 import re
 import subprocess
 import threading
@@ -12,6 +13,7 @@ import numpy as np
 import requests
 import websocket
 from flask import Flask, jsonify, request, send_from_directory
+from werkzeug.exceptions import BadRequest
 from websocket import WebSocketConnectionClosedException
 
 
@@ -316,6 +318,7 @@ class BluetoothDetector:
             local_name = self._ble_local_name_from_fields(ad_fields)
             uuid16 = self._ble_uuid16s_from_fields(ad_fields)
             manufacturer = self._ble_manufacturer_from_fields(ad_fields)
+            appearance = self._ble_appearance_from_fields(ad_fields)
             key = f"own-crc:{self.channel}:{pdu_type}:{advertiser}:{packet.hex()}"
             now = time.time()
             if now - self._seen_packet_keys.get(key, 0.0) < 1.0:
@@ -335,6 +338,7 @@ class BluetoothDetector:
                     "name": local_name,
                     "uuid16": uuid16,
                     "manufacturer": manufacturer,
+                    "appearance": appearance,
                     "payload_len": length,
                     "confidence": 0.94,
                     "decoder": "own-crc",
@@ -459,6 +463,18 @@ class BluetoothDetector:
                 "company_id": company_hex,
                 "company_name": _company_name(company_hex),
                 "data": value[2:].hex().upper(),
+            }
+        return None
+
+    @staticmethod
+    def _ble_appearance_from_fields(fields: list[tuple[int, bytes]]) -> dict[str, Any] | None:
+        for ad_type, value in fields:
+            if ad_type != 0x19 or len(value) < 2:
+                continue
+            code = int.from_bytes(value[:2], "little")
+            return {
+                "code": f"0x{code:04X}",
+                "label": BLE_APPEARANCE_LABELS.get(code, f"Appearance {code:#06x}"),
             }
         return None
 
@@ -1306,6 +1322,7 @@ class CombinedBluetoothDetector:
 
 
 app = Flask(__name__, static_folder="../frontend", static_url_path="")
+app.logger.setLevel(logging.INFO)
 state = ExplorerState()
 state_lock = threading.Lock()
 identity_cache_lock = threading.Lock()
@@ -1324,6 +1341,92 @@ UUID16_VENDOR_OVERRIDES = {
     "0xFCB2": "Apple, Inc.",
     "0xFEED": "Tile, Inc.",
 }
+
+BLE_APPEARANCE_LABELS = {
+    0x0000: "Unknown",
+    0x0040: "Phone",
+    0x0080: "Computer",
+    0x00C0: "Watch",
+    0x00C1: "Sports Watch",
+    0x0100: "Clock",
+    0x0140: "Display",
+    0x0180: "Remote",
+    0x01C0: "Eye-glasses",
+    0x0200: "Tag",
+    0x0240: "Keyring",
+    0x0280: "Media Player",
+    0x02C0: "Barcode Scanner",
+    0x0300: "Thermometer",
+    0x0340: "Heart Rate Sensor",
+    0x0380: "Blood Pressure",
+    0x03C0: "HID",
+    0x03C1: "Keyboard",
+    0x03C2: "Mouse",
+    0x03C3: "Joystick",
+    0x03C4: "Gamepad",
+    0x03C5: "Digitizer Tablet",
+    0x03C6: "Card Reader",
+    0x03C7: "Digital Pen",
+    0x03C8: "Barcode Scanner",
+    0x0400: "Glucose Meter",
+    0x0440: "Running Sensor",
+    0x0441: "Running Sensor Pod",
+    0x0442: "Running Sensor Shoe",
+    0x0480: "Cycling",
+    0x0481: "Cycling Computer",
+    0x0482: "Cycling Speed Sensor",
+    0x0483: "Cycling Cadence Sensor",
+    0x0484: "Cycling Power Sensor",
+    0x0485: "Cycling Speed/Cadence Sensor",
+    0x04C0: "Pulse Oximeter",
+    0x0500: "Weight Scale",
+    0x0540: "Personal Mobility",
+    0x0580: "Continuous Glucose Monitor",
+    0x05C0: "Insulin Pump",
+    0x0600: "Medication Delivery",
+    0x0640: "Outdoor Sports",
+    0x0641: "Location Display Device",
+    0x0642: "Location Navigation Device",
+    0x0643: "Location Pod",
+    0x0644: "Location Beacon",
+}
+
+
+def _btc_log(message: str, *args: Any, level: int = logging.INFO) -> None:
+    try:
+        app.logger.log(level, f"[BTC] {message}", *args)
+    except Exception:
+        pass
+
+
+def _log_http_error(status_code: int, handler_name: str, payload: dict[str, Any], exc: Exception | None = None) -> None:
+    path = request.path if request else "?"
+    method = request.method if request else "?"
+    detail = payload.get("detail") or payload.get("error") or ""
+    if exc is not None:
+        app.logger.warning(
+            "[HTTP %d] handler=%s method=%s path=%s error=%s exc=%s",
+            status_code,
+            handler_name,
+            method,
+            path,
+            detail,
+            exc,
+        )
+    else:
+        app.logger.warning(
+            "[HTTP %d] handler=%s method=%s path=%s error=%s",
+            status_code,
+            handler_name,
+            method,
+            path,
+            detail,
+        )
+
+
+def _json_error(status_code: int, handler_name: str, **payload: Any):
+    _log_http_error(status_code, handler_name, payload)
+    return jsonify(payload), status_code
 
 
 def _normalize_mac(mac: str) -> str:
@@ -1401,15 +1504,57 @@ def _manufacturer_from_uuid16(uuid16_values: list[str]) -> dict[str, Any] | None
     return None
 
 
+def _ble_identity_label(name: str, uuid16_names: list[str], manufacturer: dict[str, Any] | None, mac: str) -> str:
+    local_name = str(name or "").strip()
+    if local_name:
+        return local_name
+    manufacturer_name = _canonical_ble_vendor(str((manufacturer or {}).get("company_name") or ""))
+    manufacturer_source = str((manufacturer or {}).get("source") or "")
+    if uuid16_names:
+        first_uuid_name = str(uuid16_names[0] or "").strip()
+        if manufacturer_name == "Apple, Inc." and manufacturer_source == "uuid16":
+            return "AirTag"
+        return first_uuid_name
+    if manufacturer_name:
+        if manufacturer_name == "Apple, Inc." and manufacturer_source == "uuid16":
+            return "AirTag"
+        return manufacturer_name
+    return mac
+
+
+def _ble_device_type_label(
+    name: str,
+    uuid16_names: list[str],
+    manufacturer: dict[str, Any] | None,
+    appearance: dict[str, Any] | None,
+) -> str:
+    local_name = str(name or "").strip()
+    if local_name:
+        return ""
+    manufacturer_name = _canonical_ble_vendor(str((manufacturer or {}).get("company_name") or ""))
+    manufacturer_source = str((manufacturer or {}).get("source") or "")
+    if manufacturer_name == "Apple, Inc." and manufacturer_source == "uuid16":
+        return "AirTag"
+    if appearance and str(appearance.get("label") or "").strip():
+        return str(appearance.get("label") or "").strip()
+    if manufacturer_name == "Tile, Inc.":
+        return "Tracker"
+    return ""
+
+
 def _ble_identity_source(name: str, uuid16_names: list[str], manufacturer: dict[str, Any] | None) -> str:
     manufacturer_name = str((manufacturer or {}).get("company_name") or "")
     if name:
         return "Local name"
     if uuid16_names:
         label = uuid16_names[0]
+        if _canonical_ble_vendor(label) == "Apple, Inc.":
+            return "AirTag inferred from UUID16 service"
         return f"{label} UUID16 service"
     if manufacturer_name:
         if (manufacturer or {}).get("source") == "uuid16":
+            if _canonical_ble_vendor(manufacturer_name) == "Apple, Inc.":
+                return "AirTag inferred from UUID16 service"
             return f"{manufacturer_name} inferred from UUID16 service"
         return f"{manufacturer_name} manufacturer data"
     return "MAC only"
@@ -1434,6 +1579,7 @@ def _load_ble_identity_cache() -> dict[str, dict[str, Any]]:
         if not mac:
             continue
         manufacturer = value.get("manufacturer") if isinstance(value.get("manufacturer"), dict) else None
+        appearance = value.get("appearance") if isinstance(value.get("appearance"), dict) else None
         if manufacturer and manufacturer.get("company_id") and not manufacturer.get("company_name"):
             manufacturer = dict(manufacturer)
             manufacturer["company_name"] = _company_name(str(manufacturer.get("company_id")))
@@ -1447,7 +1593,9 @@ def _load_ble_identity_cache() -> dict[str, dict[str, Any]]:
             "uuid16": uuid16,
             "uuid16_names": _uuid16_names(uuid16),
             "manufacturer": manufacturer,
+            "appearance": appearance,
             "identity_source": str(value.get("identity_source") or ""),
+            "device_type": str(value.get("device_type") or ""),
             "first_seen_at": float(value.get("first_seen_at") or value.get("last_seen_at") or time.time()),
             "last_seen_at": float(value.get("last_seen_at") or time.time()),
             "seen_count": int(value.get("seen_count") or 0),
@@ -1476,6 +1624,7 @@ def _remember_ble_identity(
     seen_at: float,
     uuid16: list[str] | None = None,
     manufacturer: dict[str, Any] | None = None,
+    appearance: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     normalized = _normalize_mac(mac)
     with identity_cache_lock:
@@ -1496,7 +1645,17 @@ def _remember_ble_identity(
             row["manufacturer"] = manufacturer
         else:
             row["manufacturer"] = row.get("manufacturer") or _manufacturer_from_uuid16(merged_uuid16)
+        if appearance:
+            row["appearance"] = appearance
+        else:
+            row.setdefault("appearance", row.get("appearance") if isinstance(row.get("appearance"), dict) else None)
         row["identity_source"] = _ble_identity_source(str(row.get("name") or ""), row["uuid16_names"], row.get("manufacturer"))
+        row["device_type"] = _ble_device_type_label(
+            str(row.get("name") or ""),
+            row["uuid16_names"],
+            row.get("manufacturer") if isinstance(row.get("manufacturer"), dict) else None,
+            row.get("appearance") if isinstance(row.get("appearance"), dict) else None,
+        )
         row["first_seen_at"] = float(row.get("first_seen_at") or seen_at)
         row["last_seen_at"] = seen_at
         row["seen_count"] = int(row.get("seen_count") or 0) + 1
@@ -1528,6 +1687,17 @@ def _btcsniffer_driver_from_device(device_id: str) -> str:
     return "bladerf"
 
 
+def _btc_max_bandwidth_mhz_for_device(device_id: str) -> int:
+    driver = _btcsniffer_driver_from_device(device_id)
+    if driver == "hackrf":
+        return 20
+    if driver == "bladerf":
+        return 60
+    if driver == "sidekiq":
+        return 60
+    return 20
+
+
 def _tail_text(path: Path, max_lines: int = 20) -> str:
     try:
         lines = path.read_text(errors="replace").splitlines()
@@ -1555,7 +1725,10 @@ def _btcsniffer_event_from_line(line: str, center_freq_hz: int, bank_start_chann
     msg = prefix.group("msg").strip()
     freq_hz = _classic_center_for_channel(channel)
 
-    resolved = re.search(r"RESOLVED UAP:LAP\s+(?P<uap>[0-9A-Fa-f]{2}):(?P<lap>[0-9A-Fa-f]{6}).*tracking for\s+(?P<tracking>\d+)\s+us", msg)
+    resolved = re.search(
+        r"RESOLVED UAP:LAP\s+(?P<uap>[0-9A-Fa-f]{2}):(?P<lap>[0-9A-Fa-f]{6})(?:.*tracking(?:\s+for)?\s+(?P<tracking>\d+)\s+us)?",
+        msg,
+    )
     if resolved:
         event = {
             "kind": "classic_lap",
@@ -1573,7 +1746,7 @@ def _btcsniffer_event_from_line(line: str, center_freq_hz: int, bank_start_chann
             "candidate_count": 1,
             "processed_packets": 1,
             "ts_us": ts_us,
-            "tracking_us": int(resolved.group("tracking")),
+            "tracking_us": int(resolved.group("tracking") or 0),
         }
         events.append(event)
         candidates.append({**event, "uap_hex": event["uap"], "score": 0.99})
@@ -1654,6 +1827,29 @@ def _btcsniffer_event_from_line(line: str, center_freq_hz: int, bank_start_chann
             "candidate_count": 32,
             "processed_packets": 1,
             "ts_us": ts_us,
+        }
+        events.append(event)
+        return events, candidates
+
+    init_failed = re.search(r"lap init failed lap=(?P<lap>[0-9A-Fa-f]{6}) channel=(?P<channel>\d+) ts_us=(?P<ts>\d+) valid_uaps=(?P<valid>\d+)", msg)
+    if init_failed:
+        event = {
+            "kind": "classic_lap",
+            "protocol": "BTC",
+            "source": "btcsniffer",
+            "seen_at": now,
+            "channel": channel,
+            "btcsniffer_bin": bin_index,
+            "center_freq_hz": freq_hz,
+            "bank_center_freq_hz": center_freq_hz,
+            "rssi_dbfs": -120.0,
+            "lap": init_failed.group("lap").upper(),
+            "uap": None,
+            "status": "init_failed",
+            "candidate_count": int(init_failed.group("valid")),
+            "processed_packets": 1,
+            "cannot_init": 1,
+            "ts_us": int(init_failed.group("ts")),
         }
         events.append(event)
         return events, candidates
@@ -1798,6 +1994,12 @@ def _btcsniffer_event_from_json(payload: dict[str, Any], center_freq_hz: int, ba
 
 
 def _btcsniffer_loop(proc: subprocess.Popen[str], center_freq_hz: int, bank_start_channel: int) -> None:
+    _btc_log(
+        "sniffer loop attached center=%.3f MHz bank_start=%d pid=%s",
+        float(center_freq_hz) / 1_000_000.0,
+        bank_start_channel,
+        proc.pid,
+    )
     with state_lock:
         state.worker_alive_by_mode["classic"] = True
         state.worker_alive = True
@@ -1811,7 +2013,24 @@ def _btcsniffer_loop(proc: subprocess.Popen[str], center_freq_hz: int, bank_star
             line = raw_line.strip()
             if not line:
                 continue
-            if line.startswith("{"):
+            _btc_log("%s", line)
+            events: list[dict[str, Any]] = []
+            candidates: list[dict[str, Any]] = []
+            json_start = line.find("{")
+            if json_start > 0:
+                text_part = line[:json_start].strip()
+                json_part = line[json_start:].strip()
+                if text_part:
+                    text_events, text_candidates = _btcsniffer_event_from_line(text_part, center_freq_hz, bank_start_channel)
+                    events.extend(text_events)
+                    candidates.extend(text_candidates)
+                try:
+                    json_events, json_candidates = _btcsniffer_event_from_json(json.loads(json_part), center_freq_hz, bank_start_channel)
+                    events.extend(json_events)
+                    candidates.extend(json_candidates)
+                except (json.JSONDecodeError, TypeError, ValueError):
+                    pass
+            elif line.startswith("{"):
                 try:
                     events, candidates = _btcsniffer_event_from_json(json.loads(line), center_freq_hz, bank_start_channel)
                 except (json.JSONDecodeError, TypeError, ValueError):
@@ -1825,11 +2044,13 @@ def _btcsniffer_loop(proc: subprocess.Popen[str], center_freq_hz: int, bank_star
                 state.decoder_stats["btcsniffer_lines"] = int(state.decoder_stats.get("btcsniffer_lines", 0)) + 1
             _append_detections(events, candidates)
     except Exception as exc:
+        _btc_log("sniffer loop error: %s", exc, level=logging.ERROR)
         with state_lock:
             state.worker_errors["classic"] = f"btcsniffer error: {exc}"
             state.worker_error = f"btcsniffer error: {exc}"
     finally:
         rc = proc.poll()
+        _btc_log("sniffer loop exiting pid=%s rc=%s stop=%s", proc.pid, rc, int(btc_engine_stop.is_set()))
         with state_lock:
             state.worker_alive_by_mode["classic"] = False
             state.worker_alive = any(state.worker_alive_by_mode.values())
@@ -1856,6 +2077,16 @@ def _start_btcsniffer_engine(device_id: str, center_freq_hz: int, bandwidth_mhz:
         str(BTC_SNIFFER_LOG_PATH),
         "--jsonl-stdout",
     ]
+    _btc_log(
+        "launch device=%s driver=%s center=%.3f MHz bandwidth=%d MHz bank_start=%d binary=%s",
+        device_id,
+        _btcsniffer_driver_from_device(device_id),
+        float(center_freq_hz) / 1_000_000.0,
+        int(bandwidth_mhz),
+        int(bank_start_channel),
+        binary,
+    )
+    _btc_log("command: %s", " ".join(cmd))
     btc_engine_stop.clear()
     proc = subprocess.Popen(
         cmd,
@@ -1874,6 +2105,7 @@ def _start_btcsniffer_engine(device_id: str, center_freq_hz: int, bandwidth_mhz:
         detail = f"btcsniffer exited immediately with code {proc.returncode}"
         if log_tail:
             detail = f"{detail}\n{log_tail}"
+        _btc_log("launch failed: %s", detail, level=logging.ERROR)
         raise RuntimeError(detail)
     return {
         "engine": "btcsniffer",
@@ -1893,6 +2125,8 @@ def _stop_btcsniffer_engine() -> None:
     proc = btc_engine_process
     btc_engine_process = None
     btc_engine_stop.set()
+    if proc is not None:
+        _btc_log("stop requested pid=%s", proc.pid)
     if proc is not None and proc.poll() is None:
         proc.terminate()
         try:
@@ -1902,6 +2136,7 @@ def _stop_btcsniffer_engine() -> None:
             proc.wait(timeout=2)
     if btc_engine_thread and btc_engine_thread.is_alive():
         btc_engine_thread.join(timeout=2)
+    _btc_log("stop complete")
     btc_engine_thread = None
 
 
@@ -1993,16 +2228,18 @@ def _upsert_discovery_row(event: dict[str, Any]) -> None:
         address_type = str(event.get("address_type") or "")
         uuid16 = event.get("uuid16") if isinstance(event.get("uuid16"), list) else []
         manufacturer = event.get("manufacturer") if isinstance(event.get("manufacturer"), dict) else None
-        cached = _remember_ble_identity(mac, name, address_type, now, uuid16, manufacturer)
+        appearance = event.get("appearance") if isinstance(event.get("appearance"), dict) else None
+        cached = _remember_ble_identity(mac, name, address_type, now, uuid16, manufacturer, appearance)
         name = name or str(cached.get("name") or "").strip()
         uuid16 = list(cached.get("uuid16") or uuid16)
         uuid16_names = list(cached.get("uuid16_names") or _uuid16_names(uuid16))
         manufacturer = cached.get("manufacturer") or manufacturer
+        appearance = cached.get("appearance") if isinstance(cached.get("appearance"), dict) else appearance
         if not manufacturer:
             manufacturer = _manufacturer_from_uuid16(uuid16)
-        manufacturer_name = str((manufacturer or {}).get("company_name") or "")
-        identity = name or (uuid16_names[0] if uuid16_names else "") or manufacturer_name or mac
+        identity = _ble_identity_label(name, uuid16_names, manufacturer, mac)
         identity_source = _ble_identity_source(name, uuid16_names, manufacturer)
+        device_type = _ble_device_type_label(name, uuid16_names, manufacturer, appearance)
         row = {
             "key": f"ble:{mac}",
             "protocol": "BTLE",
@@ -2012,6 +2249,8 @@ def _upsert_discovery_row(event: dict[str, Any]) -> None:
             "uuid16": uuid16,
             "uuid16_names": uuid16_names,
             "manufacturer": manufacturer,
+            "appearance": appearance,
+            "device_type": device_type,
             "identity_source": identity_source,
             "detail": address_type,
             "detections": 1,
@@ -2066,15 +2305,28 @@ def _upsert_discovery_row(event: dict[str, Any]) -> None:
                 row["manufacturer"] = existing["manufacturer"]
             if not row.get("manufacturer"):
                 row["manufacturer"] = _manufacturer_from_uuid16(row["uuid16"])
+            if not row.get("appearance") and existing.get("appearance"):
+                row["appearance"] = existing["appearance"]
             row["identity_source"] = _ble_identity_source(
                 str(row.get("name") or ""),
                 row.get("uuid16_names") or [],
                 row.get("manufacturer") if isinstance(row.get("manufacturer"), dict) else None,
             )
+            row["device_type"] = _ble_device_type_label(
+                str(row.get("name") or ""),
+                row.get("uuid16_names") or [],
+                row.get("manufacturer") if isinstance(row.get("manufacturer"), dict) else None,
+                row.get("appearance") if isinstance(row.get("appearance"), dict) else None,
+            )
         if row.get("protocol") == "BTLE" and row.get("name"):
             row["identity"] = row["name"]
-        elif row.get("protocol") == "BTLE" and row.get("uuid16_names"):
-            row["identity"] = row["uuid16_names"][0]
+        elif row.get("protocol") == "BTLE":
+            row["identity"] = _ble_identity_label(
+                str(row.get("name") or ""),
+                row.get("uuid16_names") or [],
+                row.get("manufacturer") if isinstance(row.get("manufacturer"), dict) else None,
+                str(row.get("mac") or ""),
+            )
         state.discovery_table[idx] = row
         break
     else:
@@ -2538,10 +2790,20 @@ def devices():
         return jsonify({"error": "sdr-gateway is unavailable", "detail": str(exc), "gateway_base": _gateway_base()}), 503
 
 
+@app.errorhandler(BadRequest)
+def handle_bad_request(exc: BadRequest):
+    payload = {"error": "bad request", "detail": str(exc)}
+    _log_http_error(400, request.endpoint or "unknown", payload, exc)
+    return jsonify(payload), 400
+
+
 @app.post("/api/scan/start")
 def start_scan():
     global worker_thread, worker_threads, worker_stops
-    payload = request.get_json(force=True) or {}
+    try:
+        payload = request.get_json(force=True) or {}
+    except BadRequest as exc:
+        return _json_error(400, "start_scan", error="invalid JSON payload", detail=str(exc))
     device_id = str(payload.get("device_id", "")).strip()
     btc_device_id = str(payload.get("btc_device_id", "")).strip()
     btle_device_id = str(payload.get("btle_device_id", "")).strip()
@@ -2560,13 +2822,13 @@ def start_scan():
     btc_engine = str(payload.get("btc_engine", BTC_ENGINE_DEFAULT) or BTC_ENGINE_DEFAULT).strip().lower()
 
     if mode not in {"ble", "classic", "both"}:
-        return jsonify({"error": "mode must be ble, classic, or both"}), 400
+        return _json_error(400, "start_scan", error="mode must be ble, classic, or both")
     if btc_engine not in {"btcsniffer", "python"}:
-        return jsonify({"error": "btc_engine must be btcsniffer or python"}), 400
+        return _json_error(400, "start_scan", error="btc_engine must be btcsniffer or python")
     if mode == "ble" and channel not in BLE_ADV_CHANNELS:
-        return jsonify({"error": "BLE channel must be 37, 38, or 39"}), 400
+        return _json_error(400, "start_scan", error="BLE channel must be 37, 38, or 39")
     if mode in {"classic", "both"}:
-        sample_rate_sps = 60_000_000
+        sample_rate_sps = max(1_000_000, min(60_000_000, sample_rate_sps))
         btc_center_mhz = max(2402.0, min(2480.0, btc_center_mhz))
 
     devices_available = _available_devices()
@@ -2575,16 +2837,19 @@ def start_scan():
     if mode in {"ble", "both"} and not btle_device_id:
         btle_device_id = _pick_device(devices_available, "hackrf", device_id or "sidekiq")
     if mode == "classic" and not btc_device_id:
-        return jsonify({"error": "btc_device_id is required"}), 400
+        return _json_error(400, "start_scan", error="btc_device_id is required")
     if mode == "ble" and not btle_device_id:
-        return jsonify({"error": "btle_device_id is required"}), 400
+        return _json_error(400, "start_scan", error="btle_device_id is required")
     if mode == "both" and (not btc_device_id or not btle_device_id):
-        return jsonify({"error": "both btc_device_id and btle_device_id are required"}), 400
-    if mode in {"classic", "both"} and not _device_matches(devices_available, btc_device_id, "bladerf"):
-        return jsonify({"error": "BTC must use the bladeRF device; HackRF remains visible but is reserved for BTLE/other apps."}), 400
+        return _json_error(400, "start_scan", error="both btc_device_id and btle_device_id are required")
+
+    btc_bandwidth_mhz = max(1, min(BT_CLASSIC_BANK_SIZE, int(round(sample_rate_sps / 1_000_000.0))))
+    if mode in {"classic", "both"} and btc_device_id:
+        btc_bandwidth_mhz = min(btc_bandwidth_mhz, _btc_max_bandwidth_mhz_for_device(btc_device_id))
+        sample_rate_sps = btc_bandwidth_mhz * 1_000_000
 
     btc_center_freq_hz = int(round(btc_center_mhz * 1_000_000.0))
-    btc_bank_start_channel = _btc_bank_start_from_center(btc_center_freq_hz)
+    btc_bank_start_channel = _btc_bank_start_from_center(btc_center_freq_hz, btc_bandwidth_mhz)
     center_freq_hz = btc_center_freq_hz if mode in {"classic", "both"} else _channel_freq(mode, channel)
     if state.running:
         _stop_scan()
@@ -2610,7 +2875,7 @@ def start_scan():
                 started["classic"] = _start_btcsniffer_engine(
                     btc_device_id,
                     center_freq_hz,
-                    BT_CLASSIC_BANK_SIZE,
+                    btc_bandwidth_mhz,
                     btc_bank_start_channel,
                 )
             else:
@@ -2657,7 +2922,7 @@ def start_scan():
         return jsonify({"error": "sdr-gateway is unavailable", "detail": str(exc), "gateway_base": _gateway_base()}), 503
     except RuntimeError as exc:
         _stop_btcsniffer_engine()
-        return jsonify({"error": "scan start failed", "detail": str(exc)}), 400
+        return _json_error(400, "start_scan", error="scan start failed", detail=str(exc))
 
     worker_stop.clear()
     with state_lock:

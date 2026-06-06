@@ -97,12 +97,19 @@
         align-items: center;
         gap: 9px;
         min-height: 38px;
+        max-width: min(42vw, 420px);
         padding: 8px 12px;
         border: 1px solid var(--line);
         border-radius: 999px;
         background: rgba(255, 250, 240, 0.74);
         box-shadow: var(--shadow);
         white-space: nowrap;
+      }
+
+      .status-pill strong {
+        overflow: hidden;
+        text-overflow: ellipsis;
+        font-size: 0.95rem;
       }
 
       .dot {
@@ -119,7 +126,7 @@
 
       .toolbar {
         display: grid;
-        grid-template-columns: minmax(170px, 1fr) minmax(170px, 1fr) minmax(150px, 0.75fr) minmax(150px, 0.75fr) minmax(88px, 0.45fr) minmax(190px, 1fr) minmax(76px, 0.35fr) minmax(78px, 0.35fr) auto auto;
+        grid-template-columns: repeat(12, minmax(0, 1fr));
         gap: 8px;
         align-items: end;
         padding: 8px;
@@ -132,10 +139,34 @@
       label {
         display: grid;
         gap: 4px;
+        min-width: 0;
         color: var(--muted);
         font-size: 0.68rem;
         font-weight: 700;
         text-transform: uppercase;
+      }
+
+      .span-1 {
+        grid-column: span 1;
+      }
+
+      .span-2 {
+        grid-column: span 2;
+      }
+
+      .span-3 {
+        grid-column: span 3;
+      }
+
+      .toolbar-actions {
+        grid-column: span 3;
+        display: flex;
+        align-items: end;
+        gap: 8px;
+      }
+
+      .toolbar-actions button {
+        flex: 1 1 0;
       }
 
       select,
@@ -239,12 +270,17 @@
       .protocol-toggles {
         display: flex;
         align-items: center;
+        flex-wrap: wrap;
         gap: 10px;
         min-height: 38px;
         padding: 0 10px;
         border: 1px solid var(--line);
         border-radius: 6px;
         background: #fffdf8;
+      }
+
+      .compact-input {
+        min-width: 0;
       }
 
       main {
@@ -627,6 +663,12 @@
         font-variant-numeric: tabular-nums;
       }
 
+      .chip.inferred {
+        color: #0f5f6c;
+        background: rgba(8, 123, 131, 0.14);
+        border: 1px solid rgba(8, 123, 131, 0.26);
+      }
+
       .score {
         align-self: start;
         min-width: 58px;
@@ -728,6 +770,10 @@
           grid-template-columns: 1fr;
         }
 
+        .toolbar-actions {
+          grid-column: auto;
+        }
+
         .event {
           grid-template-columns: 1fr;
         }
@@ -752,68 +798,70 @@
       </header>
 
       <form class="toolbar" id="scanForm">
-        <label>
+        <label class="span-2">
           BTC SDR
           <select id="btcDeviceSelect"></select>
         </label>
-        <label>
+        <label class="span-2">
           BTLE SDR
           <select id="btleDeviceSelect"></select>
         </label>
-        <label>
+        <label class="span-2">
           BTC Engine
           <select id="btcEngineSelect">
             <option value="btcsniffer">btcsniffer C++</option>
             <option value="python">Python C++-style</option>
           </select>
         </label>
-        <label>
+        <label class="span-2">
           Protocol
           <span class="protocol-toggles">
             <span class="toggle"><input id="btcInput" type="checkbox" checked /> BTC</span>
             <span class="toggle"><input id="btleInput" type="checkbox" /> BTLE</span>
           </span>
         </label>
-        <label>
+        <label class="span-1 compact-input">
           BTC Center MHz
           <input id="btcCenterInput" type="number" min="2402" max="2480" step="0.5" value="2442" />
         </label>
-        <label>
+        <label class="span-2">
           BTC Target MAC
           <input id="btcTargetMacInput" type="text" inputmode="latin" placeholder="34:C9:F0:88:B5:97" />
         </label>
-        <label class="toggle-label">
+        <label class="span-1 toggle-label">
           BTC Sweep
           <span class="toggle"><input id="btcSweepInput" type="checkbox" checked /> auto</span>
         </label>
-        <label>
-          BTLE Adv CH
-          <select id="channelSelect"></select>
-        </label>
-        <label>
-          Rate MHz
-          <input id="sampleRateInput" type="number" min="1" max="60" step="1" value="60" />
-        </label>
-        <label>
+        <label class="span-2">
           BTC Gain
           <span class="slider-control">
             <input id="btcGainInput" type="range" min="0" max="102" step="1" value="72" />
             <span class="control-value" id="btcGainValue">L32 V40</span>
           </span>
         </label>
-        <label>
+        <label class="span-2">
           BTLE Gain
           <span class="slider-control">
             <input id="btleGainInput" type="range" min="0" max="102" step="1" value="56" />
             <span class="control-value" id="btleGainValue">L40 V16</span>
           </span>
         </label>
-        <label>
+        <label class="span-1 compact-input">
           Dwell
           <input id="hopDwellInput" type="number" min="0.25" max="30" step="0.05" value="0.25" />
         </label>
-        <button id="runToggleBtn" type="submit"><span class="material-symbols-rounded">play_arrow</span><span id="runToggleText">Start</span></button>
-        <button id="clearBtn" class="secondary" type="button"><span class="material-symbols-rounded">delete_sweep</span>Clear</button>
+        <label class="span-2">
+          BTLE Adv CH
+          <select id="channelSelect"></select>
+        </label>
+        <label class="span-1 compact-input">
+          Rate MHz
+          <input id="sampleRateInput" type="number" min="1" max="60" step="1" value="60" />
+        </label>
+        <div class="toolbar-actions">
+          <button id="runToggleBtn" type="submit"><span class="material-symbols-rounded">play_arrow</span><span id="runToggleText">Start</span></button>
+          <button id="clearBtn" class="secondary" type="button"><span class="material-symbols-rounded">delete_sweep</span>Clear</button>
+        </div>
       </form>
 
       <main>
@@ -900,6 +948,7 @@
       const btcGainValue = document.getElementById("btcGainValue");
       const btleGainInput = document.getElementById("btleGainInput");
       const btleGainValue = document.getElementById("btleGainValue");
+      const sampleRateInput = document.getElementById("sampleRateInput");
       const liveDot = document.getElementById("liveDot");
       const runState = document.getElementById("runState");
       const spectrum = document.getElementById("spectrum");
@@ -978,11 +1027,33 @@
         return bar;
       });
 
+      function btcMaxRateMhzForDevice(deviceId) {
+        const lowered = String(deviceId || "").toLowerCase();
+        if (lowered.includes("hackrf")) return 20;
+        if (lowered.includes("bladerf")) return 60;
+        if (lowered.includes("sidekiq")) return 60;
+        return 20;
+      }
+
+      function syncRateInputToSelection() {
+        const mode = selectedMode();
+        const current = Math.max(1, Number(sampleRateInput.value || 1));
+        if (mode === "ble") {
+          sampleRateInput.value = "2";
+          sampleRateInput.max = "2";
+          refreshPlannedStatusLabel();
+          return;
+        }
+        const cap = btcMaxRateMhzForDevice(btcDeviceSelect.value);
+        sampleRateInput.max = String(cap);
+        sampleRateInput.value = String(Math.max(1, Math.min(cap, current || cap)));
+        refreshPlannedStatusLabel();
+      }
+
       function setChannels() {
         const mode = selectedMode();
         channelSelect.innerHTML = "";
         if (mode === "classic" || mode === "both") {
-          document.getElementById("sampleRateInput").value = "60";
           [[37, 2402], [38, 2426], [39, 2480]].forEach(([ch, mhz]) => {
             const opt = document.createElement("option");
             opt.value = String(ch);
@@ -990,7 +1061,6 @@
             channelSelect.appendChild(opt);
           });
         } else {
-          document.getElementById("sampleRateInput").value = "2";
           [
             [37, 2402],
             [38, 2426],
@@ -1002,6 +1072,8 @@
             channelSelect.appendChild(opt);
           });
         }
+        syncRateInputToSelection();
+        refreshPlannedStatusLabel();
       }
 
       function selectedMode() {
@@ -1035,30 +1107,8 @@
         return Number(next.value);
       }
 
-      function btcSweepCenters() {
-        const seed = Math.max(2432, Math.min(2452, Number(btcCenterInput.value || 2442)));
-        const offsets = [0, 10, -10, 20, -20];
-        const centers = [];
-        offsets.forEach((offset) => {
-          const center = Math.max(2432, Math.min(2452, seed + offset));
-          if (!centers.includes(center)) centers.push(center);
-        });
-        return centers;
-      }
-
-      function nextBtcCenterValue() {
-        if (!btcSweepInput.checked) return Number(btcCenterInput.value || 2442);
-        const centers = btcSweepCenters();
-        const current = Number(btcCenterInput.value || centers[0]);
-        const currentIndex = centers.findIndex((center) => Math.abs(center - current) < 0.01);
-        const next = centers[(currentIndex + 1 + centers.length) % centers.length];
-        btcCenterInput.value = String(next);
-        return next;
-      }
-
       function advanceSweepValues() {
         const mode = selectedMode();
-        if (["classic", "both"].includes(mode)) nextBtcCenterValue();
         if (["ble", "both"].includes(mode)) nextChannelValue();
       }
 
@@ -1076,11 +1126,6 @@
               const opt = document.createElement("option");
               opt.value = dev.id;
               opt.textContent = `${dev.label || dev.id} (${dev.id})`;
-              const isBladeRf = `${dev.id} ${dev.label || ""}`.toLowerCase().includes("bladerf");
-              if (select === btcDeviceSelect && !isBladeRf) {
-                opt.disabled = true;
-                opt.textContent += " - not used for BTC";
-              }
               select.appendChild(opt);
             });
           });
@@ -1090,6 +1135,7 @@
           };
           selectMatch(btcDeviceSelect, "bladerf");
           selectMatch(btleDeviceSelect, "hackrf");
+          syncRateInputToSelection();
           if (!data.length) {
             btcDeviceSelect.innerHTML = "<option>No SDR devices</option>";
             btleDeviceSelect.innerHTML = "<option>No SDR devices</option>";
@@ -1106,6 +1152,10 @@
 
       function fmtFreq(hz) {
         return `${(Number(hz || 0) / 1e6).toFixed(3)} MHz`;
+      }
+
+      function fmtFreqCompact(hz) {
+        return `${(Number(hz || 0) / 1e6).toFixed(1)}`;
       }
 
       function age(ts) {
@@ -1147,6 +1197,11 @@
         return data ? `${label} ${data.slice(0, 10)}${data.length > 10 ? "..." : ""}` : label;
       }
 
+      function fmtDeviceType(row) {
+        const text = String(row.device_type || row.appearance?.label || "").trim();
+        return text && text !== "Unknown" ? text : "";
+      }
+
       function canonicalBleVendorName(value) {
         const text = String(value || "").trim();
         const lower = text.toLowerCase();
@@ -1182,13 +1237,54 @@
         return "Manufacturer unknown";
       }
 
+      function mergeBtcRows(rows) {
+        const groups = new Map();
+        rows
+          .filter((row) => row.protocol === "BTC")
+          .forEach((row) => {
+            const lap = String(row.lap || "").toUpperCase();
+            const key = /^[0-9A-F]{6}$/.test(lap) ? `lap:${lap}` : `mac:${row.mac || row.identity || Math.random()}`;
+            if (!groups.has(key)) groups.set(key, []);
+            groups.get(key).push(row);
+          });
+
+        return [...groups.values()].map((groupRows) => {
+          const resolvedRows = groupRows.filter((row) => /^[0-9A-F]{2}$/.test(String(row.uap || "").toUpperCase()) && !["XX", "XXX"].includes(String(row.uap || "").toUpperCase()));
+          const base = { ...(resolvedRows[0] || groupRows[0]) };
+          const latest = groupRows.reduce((winner, row) => Number(row.last_seen_at || 0) > Number(winner.last_seen_at || 0) ? row : winner, groupRows[0]);
+          const unresolvedCount = groupRows.filter((row) => !/^[0-9A-F]{2}$/.test(String(row.uap || "").toUpperCase()) || ["XX", "XXX"].includes(String(row.uap || "").toUpperCase())).length;
+          const totalDetections = groupRows.reduce((sum, row) => sum + Number(row.detections || 0), 0);
+          const details = [...new Set(groupRows.map((row) => String(row.detail || "").trim()).filter(Boolean))];
+          base.detections = totalDetections;
+          base.last_seen_at = latest.last_seen_at ?? base.last_seen_at;
+          base.last_rssi_dbfs = latest.last_rssi_dbfs ?? base.last_rssi_dbfs;
+          base.channel = latest.channel ?? base.channel;
+          base.center_freq_hz = latest.center_freq_hz ?? base.center_freq_hz;
+          base.detail = details.join(" · ");
+          if (resolvedRows.length) {
+            base.identity = base.mac || base.identity;
+            base.inferred_merge = unresolvedCount > 0;
+            base.inferred_merge_count = unresolvedCount;
+            base.identity_source = unresolvedCount
+              ? `Resolved UAP from SDR packet evidence; merged ${unresolvedCount} same-LAP sighting${unresolvedCount === 1 ? "" : "s"} that had missing UAP.`
+              : (base.identity_source || "Resolved from SDR packet evidence.");
+          } else {
+            base.inferred_merge = false;
+            base.inferred_merge_count = 0;
+            base.identity_source = base.identity_source || "Observed from SDR packet evidence.";
+          }
+          return base;
+        });
+      }
+
       function renderIdentityTable(rows) {
         const filtered = rows.filter((row) => row.protocol === activeDetectionTab);
-        if (!filtered.length) {
+        const displayRows = activeDetectionTab === "BTC" ? mergeBtcRows(filtered) : filtered;
+        if (!displayRows.length) {
           identityTableWrap.innerHTML = `<div class="empty">No detections yet</div>`;
           return;
         }
-        const groupedRows = filtered.reduce((groups, row) => {
+        const groupedRows = displayRows.reduce((groups, row) => {
           const label = manufacturerGroupLabel(row);
           if (!groups.has(label)) groups.set(label, []);
           groups.get(label).push(row);
@@ -1226,11 +1322,14 @@
                     .map((row) => {
                       const uuid = fmtUuid16(row);
                       const manufacturer = fmtManufacturer(row);
+                      const deviceType = fmtDeviceType(row);
                       return `
                         <article class="detection-card">
                           <h3>${row.identity || row.name || row.mac || "Unknown device"}</h3>
                           <div class="chips">
                             <span class="chip">${row.protocol || ""}</span>
+                            ${row.inferred_merge ? `<span class="chip inferred">inferred merge${Number(row.inferred_merge_count || 0) > 1 ? ` · ${Number(row.inferred_merge_count || 0)} linked` : ""}</span>` : ""}
+                            ${deviceType ? `<span class="chip">Type ${deviceType}</span>` : ""}
                             <span class="chip">${Number(row.detections || 0).toLocaleString()} hits</span>
                             <span class="chip">${age(row.last_seen_at)}</span>
                             <span class="chip">${fmtDb(row.last_rssi_dbfs)} dBFS</span>
@@ -1261,6 +1360,7 @@
         const value = String(status || "").trim();
         if (value === "initialized") return "collecting follow-up packets";
         if (value === "brute_forcing") return candidateCount <= 2 ? "nearly resolved" : "brute forcing UAP";
+        if (value === "init_failed") return "init failed";
         if (value === "resolved") return "resolved";
         if (value.startsWith("init_found_")) return `partial init (${value.split("_").pop()} candidates)`;
         if (value === "target-match") return "target match";
@@ -1441,11 +1541,13 @@
             const left = Number(candidate.candidate_count || 0);
             const uaps = Array.isArray(candidate.uap_options) && candidate.uap_options.length ? candidate.uap_options : [];
             const uapLabel = uaps.length === 1 ? uaps[0] : normalizeUap(candidate.uap || candidate.uap_hex) || "XX";
-            const note = left <= 2
-              ? "Very close. One or two UAP candidates remain."
-              : left < 32
-                ? "Converging. Follow-up packets are pruning UAP candidates."
-                : "Initialized cleanly. Waiting for more packets from this LAP to prune UAP candidates.";
+            const note = candidate.status === "init_failed"
+              ? "The LAP was detected, but this packet could not initialize a valid UAP set yet."
+              : left <= 2
+                ? "Very close. One or two UAP candidates remain."
+                : left < 32
+                  ? "Converging. Follow-up packets are pruning UAP candidates."
+                  : "Initialized cleanly. Waiting for more packets from this LAP to prune UAP candidates.";
             return `
             <article class="${classicStrengthClass(candidate)}">
               <div class="candidate-top">
@@ -1488,16 +1590,35 @@
       function currentBankChannels(status) {
         if (!["classic", "both"].includes(status.mode) || !status.running) return new Set();
         const centerMhz = Number(status.center_freq_hz || 0) / 1_000_000;
-        const start = Math.max(0, Math.min(19, Math.round(centerMhz - 2402 - 29.5)));
-        return new Set(Array.from({ length: 60 }, (_, idx) => start + idx).filter((ch) => ch >= 0 && ch < 79));
+        const bandwidthMhz = Math.max(1, Math.round(Number(status.sample_rate_sps || 0) / 1_000_000) || 60);
+        const halfSpan = (bandwidthMhz - 1) / 2;
+        const start = Math.max(0, Math.min(78 - (bandwidthMhz - 1), Math.round(centerMhz - 2402 - halfSpan)));
+        return new Set(Array.from({ length: bandwidthMhz }, (_, idx) => start + idx).filter((ch) => ch >= 0 && ch < 79));
+      }
+
+      function plannedStatusLabel() {
+        const mode = selectedMode();
+        if (mode === "ble") {
+          return `BTLE CH ${channelSelect.value || 37} / 2 MHz`;
+        }
+        const rate = Math.max(1, Number(sampleRateInput.value || 1));
+        const center = Number(btcCenterInput.value || 2442) * 1_000_000;
+        return `${mode === "both" ? "BTC+BTLE" : "CLASSIC"} ${fmtFreqCompact(center)} / ${rate} MHz`;
       }
 
       function statusLabel(status) {
-        if (!status.running) return "Idle";
+        if (!status.running) return plannedStatusLabel();
         if (status.mode === "classic" || status.mode === "both") {
-          return `${status.mode === "both" ? "BTC+BTLE" : "CLASSIC"} ${fmtFreq(status.center_freq_hz)} / 60 MHz`;
+          const rateMhz = Math.max(1, Math.round(Number(status.sample_rate_sps || 0) / 1_000_000) || 60);
+          return `${status.mode === "both" ? "BTC+BTLE" : "CLASSIC"} ${fmtFreqCompact(status.center_freq_hz)} / ${rateMhz} MHz`;
         }
-        return `BTLE CH ${status.channel}`;
+        return `BTLE CH ${status.channel} / 2 MHz`;
+      }
+
+      function refreshPlannedStatusLabel() {
+        if (runToggleText.textContent === "Start") {
+          runState.textContent = plannedStatusLabel();
+        }
       }
 
       function renderChannelActivity(status) {
@@ -1566,11 +1687,7 @@
         const mode = selectedMode();
         const rateMhz = Math.max(1, Math.min(60, Number(document.getElementById("sampleRateInput").value || 60)));
         const btcEnabled = ["classic", "both"].includes(mode);
-        if (btcEnabled) document.getElementById("sampleRateInput").value = "60";
         const btcCenterMhz = Math.max(2402, Math.min(2480, Number(btcCenterInput.value || 2442)));
-        if (btcEnabled && !`${btcDeviceSelect.value} ${btcDeviceSelect.selectedOptions[0]?.textContent || ""}`.toLowerCase().includes("bladerf")) {
-          throw new Error("BTC requires the bladeRF SDR. HackRF is visible but reserved for BTLE/other apps.");
-        }
         const btcGain = splitGain(btcGainInput.value || 72);
         const btleGain = splitGain(btleGainInput.value || 56);
         const resp = await fetch("/api/scan/start", {
@@ -1586,7 +1703,7 @@
             mode,
             channel: Number(channelSelect.value),
             ble_channel: Number(channelSelect.value || [37, 38, 39][(window.bleHopIndex || 0) % 3]),
-            sample_rate_sps: Math.round((btcEnabled ? 60 : rateMhz) * 1_000_000),
+            sample_rate_sps: Math.round(rateMhz * 1_000_000),
             lna_gain_db: btcGain.lna,
             vga_gain_db: btcGain.vga,
             btc_lna_gain_db: btcGain.lna,
@@ -1612,9 +1729,8 @@
         clearTimeout(window.autoHopTimer);
         if (runToggleText.textContent !== "Stop") return;
         const mode = selectedMode();
-        const btcSweepActive = ["classic", "both"].includes(mode) && btcSweepInput.checked;
         const bleSweepActive = ["ble", "both"].includes(mode);
-        if (!btcSweepActive && !bleSweepActive) return;
+        if (!bleSweepActive) return;
         const dwellMs = Math.max(0.25, Math.min(30, Number(hopDwellInput.value || 0.25))) * 1000;
         window.autoHopTimer = setTimeout(async () => {
           if (runToggleText.textContent !== "Stop") return;
@@ -1647,6 +1763,12 @@
 
       btcGainInput.addEventListener("input", () => updateGainLabel(btcGainInput, btcGainValue));
       btleGainInput.addEventListener("input", () => updateGainLabel(btleGainInput, btleGainValue));
+      btcDeviceSelect.addEventListener("change", syncRateInputToSelection);
+      btleDeviceSelect.addEventListener("change", refreshPlannedStatusLabel);
+      btcCenterInput.addEventListener("input", refreshPlannedStatusLabel);
+      btcTargetMacInput.addEventListener("input", refreshPlannedStatusLabel);
+      channelSelect.addEventListener("change", refreshPlannedStatusLabel);
+      sampleRateInput.addEventListener("input", refreshPlannedStatusLabel);
       hopDwellInput.addEventListener("change", scheduleAutoHop);
       btcTabBtn.addEventListener("click", () => {
         activeDetectionTab = "BTC";
