@@ -1542,6 +1542,39 @@ def _ble_device_type_label(
     return ""
 
 
+def _ble_device_type_detail(
+    uuid16_names: list[str],
+    manufacturer: dict[str, Any] | None,
+    appearance: dict[str, Any] | None,
+) -> str:
+    manufacturer_name = _canonical_ble_vendor(str((manufacturer or {}).get("company_name") or ""))
+    manufacturer_source = str((manufacturer or {}).get("source") or "")
+    manufacturer_data = str((manufacturer or {}).get("data") or "").upper()
+    if manufacturer_name == "Apple, Inc." and manufacturer_source == "uuid16":
+        return "Find My UUID16"
+    if manufacturer_name == "Apple, Inc." and manufacturer_data:
+        prefix = manufacturer_data[:4]
+        if prefix == "1202":
+            return "Find My manufacturer frame"
+        if prefix in {"1005", "1003", "1001"}:
+            return "Continuity frame"
+        return f"Apple manufacturer frame {prefix}" if prefix else "Apple manufacturer frame"
+    if manufacturer_name == "Microsoft" and manufacturer_data:
+        prefix = manufacturer_data[:2]
+        if prefix == "03":
+            return "Swift Pair frame"
+        return f"Microsoft manufacturer frame {manufacturer_data[:4]}" if manufacturer_data else "Microsoft manufacturer frame"
+    if manufacturer_name == "Tile, Inc.":
+        if uuid16_names:
+            return "Tile UUID16 service"
+        if manufacturer_data:
+            return "Tile manufacturer frame"
+        return "Tile tracker"
+    if appearance and str(appearance.get("code") or "").strip():
+        return str(appearance.get("code") or "").strip()
+    return ""
+
+
 def _ble_identity_source(name: str, uuid16_names: list[str], manufacturer: dict[str, Any] | None) -> str:
     manufacturer_name = str((manufacturer or {}).get("company_name") or "")
     if name:
@@ -1596,6 +1629,7 @@ def _load_ble_identity_cache() -> dict[str, dict[str, Any]]:
             "appearance": appearance,
             "identity_source": str(value.get("identity_source") or ""),
             "device_type": str(value.get("device_type") or ""),
+            "device_type_detail": str(value.get("device_type_detail") or ""),
             "first_seen_at": float(value.get("first_seen_at") or value.get("last_seen_at") or time.time()),
             "last_seen_at": float(value.get("last_seen_at") or time.time()),
             "seen_count": int(value.get("seen_count") or 0),
@@ -1652,6 +1686,11 @@ def _remember_ble_identity(
         row["identity_source"] = _ble_identity_source(str(row.get("name") or ""), row["uuid16_names"], row.get("manufacturer"))
         row["device_type"] = _ble_device_type_label(
             str(row.get("name") or ""),
+            row["uuid16_names"],
+            row.get("manufacturer") if isinstance(row.get("manufacturer"), dict) else None,
+            row.get("appearance") if isinstance(row.get("appearance"), dict) else None,
+        )
+        row["device_type_detail"] = _ble_device_type_detail(
             row["uuid16_names"],
             row.get("manufacturer") if isinstance(row.get("manufacturer"), dict) else None,
             row.get("appearance") if isinstance(row.get("appearance"), dict) else None,
@@ -2240,6 +2279,7 @@ def _upsert_discovery_row(event: dict[str, Any]) -> None:
         identity = _ble_identity_label(name, uuid16_names, manufacturer, mac)
         identity_source = _ble_identity_source(name, uuid16_names, manufacturer)
         device_type = _ble_device_type_label(name, uuid16_names, manufacturer, appearance)
+        device_type_detail = _ble_device_type_detail(uuid16_names, manufacturer, appearance)
         row = {
             "key": f"ble:{mac}",
             "protocol": "BTLE",
@@ -2251,6 +2291,7 @@ def _upsert_discovery_row(event: dict[str, Any]) -> None:
             "manufacturer": manufacturer,
             "appearance": appearance,
             "device_type": device_type,
+            "device_type_detail": device_type_detail,
             "identity_source": identity_source,
             "detail": address_type,
             "detections": 1,
@@ -2314,6 +2355,11 @@ def _upsert_discovery_row(event: dict[str, Any]) -> None:
             )
             row["device_type"] = _ble_device_type_label(
                 str(row.get("name") or ""),
+                row.get("uuid16_names") or [],
+                row.get("manufacturer") if isinstance(row.get("manufacturer"), dict) else None,
+                row.get("appearance") if isinstance(row.get("appearance"), dict) else None,
+            )
+            row["device_type_detail"] = _ble_device_type_detail(
                 row.get("uuid16_names") or [],
                 row.get("manufacturer") if isinstance(row.get("manufacturer"), dict) else None,
                 row.get("appearance") if isinstance(row.get("appearance"), dict) else None,

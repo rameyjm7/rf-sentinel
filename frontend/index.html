@@ -506,6 +506,23 @@
         padding: 0 10px 6px;
       }
 
+      .section-tools {
+        display: flex;
+        align-items: center;
+        justify-content: space-between;
+        gap: 8px;
+        padding: 0 10px 6px;
+      }
+
+      .section-tools .tabs {
+        padding: 0;
+      }
+
+      .view-select {
+        min-width: 116px;
+        width: auto;
+      }
+
       .tab-btn {
         min-height: 32px;
         padding: 6px 12px;
@@ -893,9 +910,15 @@
         <div class="center-stack">
           <section class="panel">
             <h2>Detections</h2>
-            <div class="tabs">
-              <button class="tab-btn active" id="btcTabBtn" type="button">BTC</button>
-              <button class="tab-btn" id="btleTabBtn" type="button">BTLE</button>
+            <div class="section-tools">
+              <div class="tabs">
+                <button class="tab-btn active" id="btcTabBtn" type="button">BTC</button>
+                <button class="tab-btn" id="btleTabBtn" type="button">BTLE</button>
+              </div>
+              <select class="view-select" id="detectionViewSelect">
+                <option value="cards">Cards</option>
+                <option value="table">Table</option>
+              </select>
             </div>
             <div class="identity-table-wrap" id="identityTableWrap"></div>
           </section>
@@ -958,6 +981,7 @@
       const btleTabBtn = document.getElementById("btleTabBtn");
       const candidatePanelTitle = document.getElementById("candidatePanelTitle");
       const candidatesEl = document.getElementById("candidates");
+      const detectionViewSelect = document.getElementById("detectionViewSelect");
       let activeDetectionTab = "BTC";
       let tableSort = { key: "last_seen_at", direction: "desc" };
       const detectionGroupOpen = new Map();
@@ -1035,7 +1059,7 @@
         return 20;
       }
 
-      function syncRateInputToSelection() {
+      function syncRateInputToSelection(forceCap = false) {
         const mode = selectedMode();
         const current = Math.max(1, Number(sampleRateInput.value || 1));
         if (mode === "ble") {
@@ -1046,7 +1070,7 @@
         }
         const cap = btcMaxRateMhzForDevice(btcDeviceSelect.value);
         sampleRateInput.max = String(cap);
-        sampleRateInput.value = String(Math.max(1, Math.min(cap, current || cap)));
+        sampleRateInput.value = String(forceCap ? cap : Math.max(1, Math.min(cap, current || cap)));
         refreshPlannedStatusLabel();
       }
 
@@ -1202,6 +1226,12 @@
         return text && text !== "Unknown" ? text : "";
       }
 
+      function fmtDeviceTypeDetail(row) {
+        const detail = String(row.device_type_detail || "").trim();
+        const type = fmtDeviceType(row);
+        return detail && detail !== type ? detail : "";
+      }
+
       function canonicalBleVendorName(value) {
         const text = String(value || "").trim();
         const lower = text.toLowerCase();
@@ -1223,7 +1253,87 @@
       function sortValue(row, key) {
         if (key === "uuid16") return fmtUuid16(row);
         if (key === "manufacturer") return fmtManufacturer(row);
+        if (key === "device_type") return `${fmtDeviceType(row)} ${fmtDeviceTypeDetail(row)}`.trim();
         return row[key];
+      }
+
+      function sortRows(rows) {
+        const { key, direction } = tableSort;
+        const sign = direction === "asc" ? 1 : -1;
+        return [...rows].sort((a, b) => {
+          const av = sortValue(a, key);
+          const bv = sortValue(b, key);
+          const an = Number(av);
+          const bn = Number(bv);
+          if (!Number.isNaN(an) && !Number.isNaN(bn) && `${av}` !== "" && `${bv}` !== "") {
+            return (an - bn) * sign;
+          }
+          return String(av ?? "").localeCompare(String(bv ?? ""), undefined, { numeric: true, sensitivity: "base" }) * sign;
+        });
+      }
+
+      function setTableSort(key) {
+        if (tableSort.key === key) {
+          tableSort = { key, direction: tableSort.direction === "asc" ? "desc" : "asc" };
+        } else {
+          tableSort = { key, direction: key === "identity" || key === "device_type" || key === "manufacturer" || key === "mac" ? "asc" : "desc" };
+        }
+      }
+
+      function renderDetectionTable(rows) {
+        const sorted = sortRows(rows);
+        const header = (label, key) => {
+          const active = tableSort.key === key;
+          const arrow = active ? (tableSort.direction === "asc" ? " ↑" : " ↓") : "";
+          return `<th data-sort="${key}">${label}${arrow}</th>`;
+        };
+        const body = sorted
+          .map((row) => {
+            const uuid = fmtUuid16(row);
+            const manufacturer = fmtManufacturer(row);
+            const deviceType = fmtDeviceType(row);
+            const deviceTypeDetail = fmtDeviceTypeDetail(row);
+            return `
+              <tr>
+                <td>${row.protocol || ""}</td>
+                <td>${row.identity || row.name || row.mac || "Unknown device"}</td>
+                <td>${deviceType || ""}${deviceTypeDetail ? `<br><span class="small">${deviceTypeDetail}</span>` : ""}</td>
+                <td>${row.mac || ""}</td>
+                <td>${uuid || ""}</td>
+                <td>${manufacturer || ""}</td>
+                <td>${Number(row.detections || 0).toLocaleString()}</td>
+                <td>${age(row.last_seen_at)}</td>
+                <td>${fmtDb(row.last_rssi_dbfs)}</td>
+                <td>${row.channel ?? ""}</td>
+              </tr>
+            `;
+          })
+          .join("");
+        identityTableWrap.innerHTML = `
+          <table class="identity-table">
+            <thead>
+              <tr>
+                ${header("Proto", "protocol")}
+                ${header("Identity", "identity")}
+                ${header("Type", "device_type")}
+                ${header("MAC", "mac")}
+                ${header("UUID16", "uuid16")}
+                ${header("Manufacturer", "manufacturer")}
+                ${header("Count", "detections")}
+                ${header("Last", "last_seen_at")}
+                ${header("RSSI", "last_rssi_dbfs")}
+                ${header("CH", "channel")}
+              </tr>
+            </thead>
+            <tbody>${body}</tbody>
+          </table>
+        `;
+        identityTableWrap.querySelectorAll("th[data-sort]").forEach((th) => {
+          th.addEventListener("click", () => {
+            setTableSort(th.dataset.sort || "last_seen_at");
+            renderIdentityTable(rows);
+          });
+        });
       }
 
       function manufacturerGroupLabel(row) {
@@ -1284,6 +1394,10 @@
           identityTableWrap.innerHTML = `<div class="empty">No detections yet</div>`;
           return;
         }
+        if (detectionViewSelect.value === "table") {
+          renderDetectionTable(displayRows);
+          return;
+        }
         const groupedRows = displayRows.reduce((groups, row) => {
           const label = manufacturerGroupLabel(row);
           if (!groups.has(label)) groups.set(label, []);
@@ -1323,6 +1437,7 @@
                       const uuid = fmtUuid16(row);
                       const manufacturer = fmtManufacturer(row);
                       const deviceType = fmtDeviceType(row);
+                      const deviceTypeDetail = fmtDeviceTypeDetail(row);
                       return `
                         <article class="detection-card">
                           <h3>${row.identity || row.name || row.mac || "Unknown device"}</h3>
@@ -1330,6 +1445,7 @@
                             <span class="chip">${row.protocol || ""}</span>
                             ${row.inferred_merge ? `<span class="chip inferred">inferred merge${Number(row.inferred_merge_count || 0) > 1 ? ` · ${Number(row.inferred_merge_count || 0)} linked` : ""}</span>` : ""}
                             ${deviceType ? `<span class="chip">Type ${deviceType}</span>` : ""}
+                            ${deviceTypeDetail ? `<span class="chip">${deviceTypeDetail}</span>` : ""}
                             <span class="chip">${Number(row.detections || 0).toLocaleString()} hits</span>
                             <span class="chip">${age(row.last_seen_at)}</span>
                             <span class="chip">${fmtDb(row.last_rssi_dbfs)} dBFS</span>
@@ -1763,12 +1879,13 @@
 
       btcGainInput.addEventListener("input", () => updateGainLabel(btcGainInput, btcGainValue));
       btleGainInput.addEventListener("input", () => updateGainLabel(btleGainInput, btleGainValue));
-      btcDeviceSelect.addEventListener("change", syncRateInputToSelection);
+      btcDeviceSelect.addEventListener("change", () => syncRateInputToSelection(true));
       btleDeviceSelect.addEventListener("change", refreshPlannedStatusLabel);
       btcCenterInput.addEventListener("input", refreshPlannedStatusLabel);
       btcTargetMacInput.addEventListener("input", refreshPlannedStatusLabel);
       channelSelect.addEventListener("change", refreshPlannedStatusLabel);
       sampleRateInput.addEventListener("input", refreshPlannedStatusLabel);
+      detectionViewSelect.addEventListener("change", pollStatus);
       hopDwellInput.addEventListener("change", scheduleAutoHop);
       btcTabBtn.addEventListener("click", () => {
         activeDetectionTab = "BTC";
