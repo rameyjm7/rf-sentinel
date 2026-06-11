@@ -1,8 +1,14 @@
-# Bluetooth Explorer
+# RF Sentinel
 
-Bluetooth Explorer is a sibling app to AetherCast that uses `sdr-gateway` IQ streams to explore Bluetooth activity.
+RF Sentinel is a passive multi-protocol RF intelligence platform. The current app is the first live dashboard and capture front end; it already uses `sdr-gateway` IQ streams for BLE and Bluetooth Classic discovery, and now hosts protocol plugins for additional RF families.
 
-It currently supports:
+Product sentence:
+
+> A multi-protocol RF intelligence platform that passively discovers and tracks nearby wireless devices across Bluetooth, WiFi, TPMS, Zigbee/802.15.4, drone/UAS, and SDR-observed signals, with optional authorized test/effects modules for defense and lab environments.
+
+The core product stays passive: RF discovery, protocol intelligence, entity resolution, pattern-of-life analytics, dashboards, alerts, and reports. Active replay/simulation/effects work belongs in a separate authorized lab module with explicit controls.
+
+## Current Capabilities
 
 - BLE advertising-channel scanning on channels 37, 38, and 39.
 - BT Classic single-channel scanning across channels 0 through 78.
@@ -14,12 +20,36 @@ It currently supports:
 - 60 MHz BT Classic bank capture on bladeRF that splits the stream into Classic channel lanes and decodes them together.
 - Separate BTC and BTLE SDR selection, so BTC can use `bladerf:0` while BTLE uses `hackrf:0`.
 - A 79-channel Classic activity chart with one vertical bar per channel.
+- Zigbee / IEEE 802.15.4 receiver plugin under `rf_platform/plugins/zigbee-802154`.
 
 ## Project Layout
 
-- `backend/app.py`: Flask API, gateway stream control, BLE detector, BT Classic LAP/UAP tracker.
-- `frontend/index.html`: browser UI for SDR controls, RF health, discoveries, and UAP candidates.
+- `ui/backend/app.py`: Flask API, gateway stream control, BLE detector, BT Classic LAP/UAP tracker.
+- `ui/frontend/index.html`: browser UI for SDR controls, RF health, discoveries, and UAP candidates.
+- `rf_platform/`: shared normalized event and entity primitives for the broader platform.
+- `rf_platform/plugins/bluetooth-classic/`: Bluetooth Classic sniffer plugin.
+- `rf_platform/plugins/zigbee-802154/`: Zigbee / IEEE 802.15.4 receiver plugin.
+- `docs/`: product strategy, architecture, and milestone roadmap.
 - `research/`: the referenced paper and corresponding `btsniffer` code.
+
+## Platform Roadmap
+
+The milestone plan lives in:
+
+- `docs/product_strategy.md`
+- `docs/architecture.md`
+- `docs/milestones.md`
+- `/home/jake/workspace/SDR/RF_Intelligence_Platform_Milestone_Plan.docx`
+
+Near-term build order:
+
+1. Normalize all observations into `rf_platform.RFEvent`.
+2. Add a SQLite event store and replay/export mode.
+3. Feed BLE and Bluetooth Classic detections into the event store.
+4. Feed Zigbee / 802.15.4 plugin frames into the event store.
+5. Add WiFi monitor-mode ingestion.
+6. Add TPMS ingestion.
+7. Build entity resolution and pattern-of-life dashboard views.
 
 ## Requirements
 
@@ -30,11 +60,18 @@ It currently supports:
 ## Setup
 
 ```bash
-cd /home/jake/workspace/SDR/BluetoothExplorer
-python3 -m venv .venv
-source .venv/bin/activate
-pip install -r requirements.txt
+cd /home/jake/workspace/SDR/RF_Sentinel
+./install.sh
 ```
+
+`install.sh` creates/updates the Python venv and rebuilds the native Bluetooth
+Classic sniffer plugin for the current machine architecture. This matters when
+deploying between `x86_64` and `aarch64`; copied binaries are not portable.
+
+At runtime, `ui/backend/app.py` also checks the Bluetooth Classic sniffer binary
+before launch. If it is missing, stale, points at an old CMake source directory,
+or has the wrong architecture, it will rebuild automatically unless
+`BTC_SNIFFER_AUTO_BUILD=0` is set.
 
 If `sdr-gateway` auth is enabled:
 
@@ -51,9 +88,9 @@ export SDR_GATEWAY_BASE_URL="http://127.0.0.1:8080"
 ## Run
 
 ```bash
-cd /home/jake/workspace/SDR/BluetoothExplorer
+cd /home/jake/workspace/SDR/RF_Sentinel
 source .venv/bin/activate
-python3 backend/app.py
+python3 ui/backend/app.py
 ```
 
 Open:

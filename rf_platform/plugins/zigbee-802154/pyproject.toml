@@ -1,0 +1,25 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "zigbee-802154"
+version = "0.1.0"
+description = "CLI-first Zigbee / IEEE 802.15.4 receive stack scaffold"
+requires-python = ">=3.10"
+dependencies = [
+  "numpy>=1.24",
+  "requests>=2.31",
+  "websocket-client>=1.6",
+]
+
+[project.scripts]
+zigbee-802154 = "zigbee_802154.cli:main"
+zigbee_802154 = "zigbee_802154.cli:main"
+sdr-802154 = "zigbee_802154.cli:main"
+
+[tool.setuptools]
+package-dir = {"" = "src"}
+
+[tool.setuptools.packages.find]
+where = ["src"]

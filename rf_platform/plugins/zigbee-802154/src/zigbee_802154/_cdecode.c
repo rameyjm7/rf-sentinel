@@ -1,0 +1,179 @@
+#define PY_SSIZE_T_CLEAN
+#include <Python.h>
+#include <math.h>
+#include <stdint.h>
+#include <string.h>
+
+#ifndef M_PI
+#define M_PI 3.14159265358979323846
+#endif
+
+#define SYMBOL_CHIPS 32
+
+static const char *PRIMARY_TABLE[16] = {
+    "11011001110000110101001000101110",
+    "11101101100111000011010100100010",
+    "00101110110110011100001101010010",
+    "00100010111011011001110000110101",
+    "01010010001011101101100111000011",
+    "00110101001000101110110110011100",
+    "11000011010100100010111011011001",
+    "10011100001101010010001011101101",
+    "10001100100101100000011101111011",
+    "10111000110010010110000001110111",
+    "01111011100011001001011000000111",
+    "01110111101110001100100101100000",
+    "00000111011110111000110010010110",
+    "01100000011101111011100011001001",
+    "10010110000001110111101110001100",
+    "11001001011000000111011110111000",
+};
+
+static char REVERSED_TABLE[16][SYMBOL_CHIPS + 1];
+static char INVERTED_TABLE[16][SYMBOL_CHIPS + 1];
+static char REVERSED_INVERTED_TABLE[16][SYMBOL_CHIPS + 1];
+static int tables_ready = 0;
+
+static void build_tables(void) {
+    if (tables_ready) {
+        return;
+    }
+    for (int symbol = 0; symbol < 16; symbol++) {
+        for (int i = 0; i < SYMBOL_CHIPS; i++) {
+            char bit = PRIMARY_TABLE[symbol][i];
+            REVERSED_TABLE[symbol][i] = PRIMARY_TABLE[symbol][SYMBOL_CHIPS - 1 - i];
+            INVERTED_TABLE[symbol][i] = bit == '1' ? '0' : '1';
+            char reversed_bit = PRIMARY_TABLE[symbol][SYMBOL_CHIPS - 1 - i];
+            REVERSED_INVERTED_TABLE[symbol][i] = reversed_bit == '1' ? '0' : '1';
+        }
+        REVERSED_TABLE[symbol][SYMBOL_CHIPS] = '\0';
+        INVERTED_TABLE[symbol][SYMBOL_CHIPS] = '\0';
+        REVERSED_INVERTED_TABLE[symbol][SYMBOL_CHIPS] = '\0';
+    }
+    tables_ready = 1;
+}
+
+static const char *symbol_bits(const char *table_name, int symbol) {
+    build_tables();
+    if (strcmp(table_name, "primary") == 0) {
+        return PRIMARY_TABLE[symbol];
+    }
+    if (strcmp(table_name, "reversed") == 0) {
+        return REVERSED_TABLE[symbol];
+    }
+    if (strcmp(table_name, "inverted") == 0) {
+        return INVERTED_TABLE[symbol];
+    }
+    if (strcmp(table_name, "reversed_inverted") == 0) {
+        return REVERSED_INVERTED_TABLE[symbol];
+    }
+    return NULL;
+}
+
+static PyObject *nearest_symbol_iq(PyObject *self, PyObject *args) {
+    PyObject *iq_object = NULL;
+    int chip_samples = 0;
+    const char *table_name = NULL;
+    if (!PyArg_ParseTuple(args, "Ois", &iq_object, &chip_samples, &table_name)) {
+        return NULL;
+    }
+    if (chip_samples <= 0) {
+        Py_RETURN_NONE;
+    }
+
+    Py_buffer iq_view;
+    if (PyObject_GetBuffer(iq_object, &iq_view, PyBUF_CONTIG_RO) != 0) {
+        return NULL;
+    }
+
+    const Py_ssize_t expected_samples = (SYMBOL_CHIPS + 1) * (Py_ssize_t)chip_samples;
+    const Py_ssize_t expected_bytes = expected_samples * 2 * (Py_ssize_t)sizeof(float);
+    if (iq_view.len != expected_bytes) {
+        PyBuffer_Release(&iq_view);
+        Py_RETURN_NONE;
+    }
+
+    const float *iq = (const float *)iq_view.buf;
+    double iq_power = 0.0;
+    for (Py_ssize_t sample = 0; sample < expected_samples; sample++) {
+        const double real = (double)iq[2 * sample];
+        const double imag = (double)iq[(2 * sample) + 1];
+        iq_power += (real * real) + (imag * imag);
+    }
+    const double iq_norm = sqrt(iq_power) + 1e-9;
+    const int pulse_samples = 2 * chip_samples;
+
+    const char *table[16];
+    for (int symbol = 0; symbol < 16; symbol++) {
+        table[symbol] = symbol_bits(table_name, symbol);
+        if (table[symbol] == NULL) {
+            PyBuffer_Release(&iq_view);
+            PyErr_SetString(PyExc_ValueError, "unknown symbol table");
+            return NULL;
+        }
+    }
+
+    int best_symbol = -1;
+    double best_score = -1.0e300;
+    Py_BEGIN_ALLOW_THREADS
+    for (int symbol = 0; symbol < 16; symbol++) {
+        const char *bits = table[symbol];
+        double dot = 0.0;
+        double ref_power = 0.0;
+        for (int chip = 0; chip < SYMBOL_CHIPS; chip++) {
+            const double sign = bits[chip] == '1' ? 1.0 : -1.0;
+            const Py_ssize_t start = (Py_ssize_t)chip * chip_samples;
+            for (int offset = 0; offset < pulse_samples; offset++) {
+                const Py_ssize_t sample = start + offset;
+                if (sample >= expected_samples) {
+                    break;
+                }
+                const double pulse = sin(M_PI * (((double)offset + 0.5) / (double)pulse_samples));
+                const double ref = sign * pulse;
+                ref_power += ref * ref;
+                if ((chip & 1) == 0) {
+                    dot += ref * (double)iq[2 * sample];
+                } else {
+                    dot += ref * (double)iq[(2 * sample) + 1];
+                }
+            }
+        }
+        const double score = dot / ((sqrt(ref_power) + 1e-9) * iq_norm);
+        if (score > best_score) {
+            best_score = score;
+            best_symbol = symbol;
+        }
+    }
+    Py_END_ALLOW_THREADS
+
+    PyBuffer_Release(&iq_view);
+    if (best_symbol < 0) {
+        Py_RETURN_NONE;
+    }
+    double quality = best_score;
+    if (quality < -1.0) {
+        quality = -1.0;
+    } else if (quality > 1.0) {
+        quality = 1.0;
+    }
+    const double positive_quality = quality > 0.0 ? quality : 0.0;
+    const int pseudo_distance = (int)llround((1.0 - positive_quality) * (double)SYMBOL_CHIPS);
+    return Py_BuildValue("iis", best_symbol, pseudo_distance, table[best_symbol]);
+}
+
+static PyMethodDef methods[] = {
+    {"nearest_symbol_iq", nearest_symbol_iq, METH_VARARGS, "Return the nearest 802.15.4 waveform symbol."},
+    {NULL, NULL, 0, NULL},
+};
+
+static struct PyModuleDef module = {
+    PyModuleDef_HEAD_INIT,
+    "_cdecode",
+    "Native accelerators for zigbee_802154 decoding.",
+    -1,
+    methods,
+};
+
+PyMODINIT_FUNC PyInit__cdecode(void) {
+    return PyModule_Create(&module);
+}

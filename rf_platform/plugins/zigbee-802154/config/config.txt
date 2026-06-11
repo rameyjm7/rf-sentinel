@@ -1,0 +1,3 @@
+# Optional local defaults for the Zigbee / IEEE 802.15.4 stack.
+# Environment variables still win when set.
+SDR_GATEWAY_BASE_URL=http://127.0.0.1:8080

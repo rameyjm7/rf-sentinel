@@ -2,9 +2,18 @@
 __pycache__/
 *.py[cod]
 
-# Local capture/cache data. The public LUTs in backend/data are intentionally tracked.
-backend/data/ble_identities.json
-backend/data/ble_identities.json.tmp
+# Local capture/cache data. The public LUTs in ui/backend/data are intentionally tracked.
+ui/backend/data/ble_identities.json
+ui/backend/data/ble_identities.json.tmp
+ui/backend/data/btcexplorer-sniffer.log
 
 # Research checkouts/PDFs are local references, not app runtime code.
 research/
+
+# Native plugin build products and local reference tool checkouts.
+rf_platform/plugins/*/build/
+rf_platform/plugins/*/resources/
+rf_platform/plugins/*/.git*/
+rf_platform/plugins/*/captures/
+rf_platform/plugins/*/src/*.egg-info/
+rf_platform/plugins/*/src/**/*.so

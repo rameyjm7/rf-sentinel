@@ -1,7 +1,9 @@
 import os
 import json
 import logging
+import platform
 import re
+import shutil
 import subprocess
 import threading
 import time
@@ -32,13 +34,15 @@ BT_CLASSIC_LANE_SPACING_HZ = 1_000_000
 BLE_ADV_CHANNEL_BW_HZ = 2_000_000
 BLE_ADV_SAMPLE_RATE_SPS = 2_000_000
 BLE_ADV_ACCESS_BYTES = bytes.fromhex("d6be898e")
+PROJECT_ROOT = Path(__file__).resolve().parents[2]
 DATA_DIR = Path(__file__).resolve().parent / "data"
 BLE_IDENTITY_CACHE_PATH = DATA_DIR / "ble_identities.json"
 COMPANY_IDENTIFIERS_PATH = DATA_DIR / "company_identifiers.json"
 UUID16_IDENTIFIERS_PATH = DATA_DIR / "uuid16_identifiers.json"
-BTC_SNIFFER_ROOT = Path(os.getenv("BTC_SNIFFER_ROOT", str(Path(__file__).resolve().parents[1] / "plugins" / "btcexplorer-sniffer")))
+BTC_SNIFFER_ROOT = Path(os.getenv("BTC_SNIFFER_ROOT", str(PROJECT_ROOT / "rf_platform" / "plugins" / "bluetooth-classic")))
 BTC_SNIFFER_BINARY = Path(os.getenv("BTC_SNIFFER_BINARY", str(BTC_SNIFFER_ROOT / "build" / "btcexplorer-sniffer")))
 BTC_SNIFFER_LOG_PATH = Path(os.getenv("BTC_SNIFFER_LOG", str(DATA_DIR / "btcexplorer-sniffer.log")))
+BTC_SNIFFER_AUTO_BUILD = os.getenv("BTC_SNIFFER_AUTO_BUILD", "1").strip().lower() not in {"0", "false", "no"}
 BTC_ENGINE_DEFAULT = os.getenv("BTC_ENGINE", "btcsniffer").strip().lower()
 INVALID_CLK_INDEX = -1
 DELTA_TS_SAME_THRESHOLD_US = 40
@@ -48,6 +52,7 @@ SLOT_ERROR_THRESHOLD = 0.05
 BT_CLASSIC_ACCESS_REPAIR_MAX_DISTANCE = 0
 BT_CLASSIC_HEADER_MIN_PERFECT_TRIPLETS = 18
 BT_CLASSIC_USE_CPP_FFT = os.getenv("BT_CLASSIC_USE_CPP_FFT", "1").strip().lower() not in {"0", "false", "no"}
+btcsniffer_build_lock = threading.Lock()
 
 
 def _design_lowpass_taps(sample_rate_hz: int, cutoff_hz: float, num_taps: int) -> np.ndarray:
@@ -1321,7 +1326,7 @@ class CombinedBluetoothDetector:
         return z[:usable].reshape(-1, decim).mean(axis=1).astype(np.complex64)
 
 
-app = Flask(__name__, static_folder="../frontend", static_url_path="")
+app = Flask(__name__, static_folder=str(PROJECT_ROOT / "ui" / "frontend"), static_url_path="")
 app.logger.setLevel(logging.INFO)
 state = ExplorerState()
 state_lock = threading.Lock()
@@ -1715,6 +1720,148 @@ def _btcsniffer_binary() -> Path:
     return fallback if fallback.exists() else BTC_SNIFFER_BINARY
 
 
+def _native_arch_tokens() -> tuple[str, ...]:
+    machine = platform.machine().lower()
+    if machine in {"x86_64", "amd64"}:
+        return ("x86-64", "x86_64", "amd64")
+    if machine in {"aarch64", "arm64"}:
+        return ("aarch64", "arm64")
+    if machine.startswith("arm"):
+        return ("arm",)
+    return (machine,)
+
+
+def _binary_arch_matches_host(binary: Path) -> tuple[bool, str]:
+    if not binary.exists():
+        return False, "missing"
+    file_tool = shutil.which("file")
+    if not file_tool:
+        return True, "file tool unavailable"
+    try:
+        result = subprocess.run(
+            [file_tool, "-b", str(binary)],
+            check=False,
+            capture_output=True,
+            text=True,
+            timeout=5,
+        )
+    except Exception as exc:
+        return True, f"file check failed: {exc}"
+    description = f"{result.stdout} {result.stderr}".strip().lower()
+    if result.returncode != 0 or not description:
+        return True, description or f"file returned {result.returncode}"
+    if "elf" not in description:
+        return True, description
+    expected = _native_arch_tokens()
+    if any(token in description for token in expected):
+        return True, description
+    return False, description
+
+
+def _btcsniffer_build_inputs() -> list[Path]:
+    inputs = [BTC_SNIFFER_ROOT / "CMakeLists.txt"]
+    inputs.extend(sorted((BTC_SNIFFER_ROOT / "src").glob("*.cpp")))
+    inputs.extend(sorted((BTC_SNIFFER_ROOT / "src").glob("*.hpp")))
+    return [path for path in inputs if path.exists()]
+
+
+def _btcsniffer_cache_matches_source(build_dir: Path) -> bool:
+    cache = build_dir / "CMakeCache.txt"
+    if not cache.exists():
+        return True
+    try:
+        text = cache.read_text(encoding="utf-8", errors="replace")
+    except OSError:
+        return False
+    source_line = f"btcexplorer-sniffer_SOURCE_DIR:STATIC={BTC_SNIFFER_ROOT}"
+    home_line = f"CMAKE_HOME_DIRECTORY:INTERNAL={BTC_SNIFFER_ROOT}"
+    return source_line in text or home_line in text
+
+
+def _btcsniffer_rebuild_reason(binary: Path) -> str | None:
+    if not binary.exists():
+        return "binary missing"
+    if not os.access(binary, os.X_OK):
+        return "binary is not executable"
+    arch_ok, arch_detail = _binary_arch_matches_host(binary)
+    if not arch_ok:
+        return f"binary architecture does not match host ({arch_detail})"
+    build_dir = BTC_SNIFFER_ROOT / "build"
+    if not _btcsniffer_cache_matches_source(build_dir):
+        return "CMake cache points at a different source directory"
+    try:
+        binary_mtime = binary.stat().st_mtime
+    except OSError:
+        return "binary stat failed"
+    newest_input = max((path.stat().st_mtime for path in _btcsniffer_build_inputs()), default=0.0)
+    if newest_input > binary_mtime:
+        return "source is newer than binary"
+    return None
+
+
+def _build_btcsniffer_binary(reason: str) -> Path:
+    if not BTC_SNIFFER_AUTO_BUILD:
+        raise RuntimeError(f"btcsniffer rebuild required but BTC_SNIFFER_AUTO_BUILD is disabled: {reason}")
+    cmake = shutil.which("cmake")
+    if not cmake:
+        raise RuntimeError(f"btcsniffer rebuild required ({reason}) but cmake was not found")
+    build_dir = BTC_SNIFFER_ROOT / "build"
+    with btcsniffer_build_lock:
+        binary = _btcsniffer_binary()
+        second_reason = _btcsniffer_rebuild_reason(binary)
+        if second_reason is None:
+            return binary
+        _btc_log("rebuilding btcsniffer: %s", second_reason)
+        if build_dir.exists() and not _btcsniffer_cache_matches_source(build_dir):
+            _btc_log("removing stale btcsniffer build directory: %s", build_dir)
+            shutil.rmtree(build_dir)
+        build_dir.mkdir(parents=True, exist_ok=True)
+        configure = subprocess.run(
+            [cmake, "-S", str(BTC_SNIFFER_ROOT), "-B", str(build_dir)],
+            check=False,
+            capture_output=True,
+            text=True,
+            timeout=120,
+        )
+        if configure.returncode != 0:
+            raise RuntimeError(
+                "btcsniffer cmake configure failed\n"
+                f"stdout:\n{configure.stdout[-4000:]}\n"
+                f"stderr:\n{configure.stderr[-4000:]}"
+            )
+        jobs = os.getenv("BTC_SNIFFER_BUILD_JOBS", str(max(1, min(4, os.cpu_count() or 1))))
+        build = subprocess.run(
+            [cmake, "--build", str(build_dir), "--parallel", jobs],
+            check=False,
+            capture_output=True,
+            text=True,
+            timeout=300,
+        )
+        if build.returncode != 0:
+            raise RuntimeError(
+                "btcsniffer build failed\n"
+                f"stdout:\n{build.stdout[-4000:]}\n"
+                f"stderr:\n{build.stderr[-4000:]}"
+            )
+        built_binary = BTC_SNIFFER_ROOT / "build" / "btcexplorer-sniffer"
+        if not built_binary.exists():
+            raise RuntimeError(f"btcsniffer build completed but binary is missing: {built_binary}")
+        built_binary.chmod(built_binary.stat().st_mode | 0o111)
+        arch_ok, arch_detail = _binary_arch_matches_host(built_binary)
+        if not arch_ok:
+            raise RuntimeError(f"btcsniffer rebuilt but architecture still mismatches host: {arch_detail}")
+        _btc_log("btcsniffer rebuild complete: %s", built_binary)
+        return built_binary
+
+
+def _ensure_btcsniffer_binary() -> Path:
+    binary = _btcsniffer_binary()
+    reason = _btcsniffer_rebuild_reason(binary)
+    if reason is None:
+        return binary
+    return _build_btcsniffer_binary(reason)
+
+
 def _btcsniffer_driver_from_device(device_id: str) -> str:
     lowered = device_id.lower()
     if lowered.startswith("bladerf"):
@@ -1945,6 +2092,16 @@ def _btcsniffer_event_from_json(payload: dict[str, Any], center_freq_hz: int, ba
             state.decoder_stats["btcsniffer_solved_laps"] = int(payload.get("solved_laps") or 0)
             state.decoder_stats["btcsniffer_active_laps"] = int(payload.get("active_laps") or 0)
             state.decoder_stats["btcsniffer_bins"] = int(payload.get("bins") or 0)
+            state.decoder_stats["fhs_attempts"] = int(payload.get("fhs_attempts") or 0)
+            state.decoder_stats["fhs_inquiry_attempts"] = int(payload.get("fhs_inquiry_attempts") or 0)
+            state.decoder_stats["fhs_solved_lap_attempts"] = int(payload.get("fhs_solved_lap_attempts") or 0)
+            state.decoder_stats["fhs_truncated"] = int(payload.get("fhs_truncated") or 0)
+            state.decoder_stats["fhs_header_matches"] = int(payload.get("fhs_header_matches") or 0)
+            state.decoder_stats["fhs_type_matches"] = int(payload.get("fhs_type_matches") or 0)
+            state.decoder_stats["fhs_payload_decodes"] = int(payload.get("fhs_payload_decodes") or 0)
+            state.decoder_stats["fhs_fec_rejects"] = int(payload.get("fhs_fec_rejects") or 0)
+            state.decoder_stats["fhs_address_rejects"] = int(payload.get("fhs_address_rejects") or 0)
+            state.decoder_stats["fhs_packet_types"] = list(payload.get("fhs_packet_types") or [])
             state.classic_bursts_seen = max(state.classic_bursts_seen, lap_events + resolved_events + fhs_events)
         return events, candidates
 
@@ -2100,7 +2257,7 @@ def _btcsniffer_loop(proc: subprocess.Popen[str], center_freq_hz: int, bank_star
 
 def _start_btcsniffer_engine(device_id: str, center_freq_hz: int, bandwidth_mhz: int, bank_start_channel: int) -> dict[str, Any]:
     global btc_engine_process, btc_engine_thread
-    binary = _btcsniffer_binary()
+    binary = _ensure_btcsniffer_binary()
     if not binary.exists():
         raise RuntimeError(f"btcsniffer binary not found: {binary}")
     BTC_SNIFFER_LOG_PATH.parent.mkdir(parents=True, exist_ok=True)
