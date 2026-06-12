@@ -1403,6 +1403,9 @@ int SAFE_MAIN(int argc, char *argv[])
     std::string fifo_path = "";
     std::string log_path = "btsniffer.log";
     std::string events_path = "";
+    double lna_gain_db = 40.0;
+    double vga_gain_db = 40.0;
+    double amp_gain_db = 0.0;
 
     po::options_description desc("Allowed options");
     desc.add_options()
@@ -1417,6 +1420,9 @@ int SAFE_MAIN(int argc, char *argv[])
             ("fifo", po::value<std::string>(&fifo_path)->default_value(fifo_path), "optional path for raw CF32 IQ output")
             ("log", po::value<std::string>(&log_path)->default_value(log_path), "diagnostic log path, overwritten each run")
             ("events", po::value<std::string>(&events_path)->default_value(events_path), "optional JSONL event path, overwritten each run")
+            ("lna-gain-db", po::value<double>(&lna_gain_db)->default_value(lna_gain_db), "RX LNA gain in dB when the SDR exposes an LNA gain element")
+            ("vga-gain-db", po::value<double>(&vga_gain_db)->default_value(vga_gain_db), "RX VGA gain in dB when the SDR exposes a VGA gain element")
+            ("amp-gain-db", po::value<double>(&amp_gain_db)->default_value(amp_gain_db), "RX AMP gain/enable value when the SDR exposes an AMP gain element")
             ("jsonl-stdout", po::bool_switch(&g_jsonl_stdout)->default_value(false), "write JSONL events to stdout for Python supervisors")
             ("show-init-failed", po::bool_switch(&g_show_init_failed)->default_value(false), "show init-failed LAP messages on stdout; always logged to file")
             ("record-only", po::bool_switch(&g_record_only)->default_value(false), "record raw IQ continuously and skip Bluetooth packet processing")
@@ -1469,13 +1475,15 @@ int SAFE_MAIN(int argc, char *argv[])
         }
     }
     log_event("btsniffer run started");
-    log_event(boost::format("config driver=%s center_mhz=%.3f bandwidth_mhz=%u rate=%.0f bins=%u seconds=%.3f fifo=%s show_init_failed=%u record_only=%u")
+    log_event(boost::format("config driver=%s center_mhz=%.3f bandwidth_mhz=%u rate=%.0f bins=%u seconds=%.3f fifo=%s lna=%.1f vga=%.1f amp=%.1f show_init_failed=%u record_only=%u")
               % driver % freq_mhz % bins % rate % bins % seconds
               % (fifo_path.empty() ? "(disabled)" : fifo_path)
+              % lna_gain_db % vga_gain_db % amp_gain_db
               % (g_show_init_failed ? 1 : 0)
               % (g_record_only ? 1 : 0));
-    emit_json_event((boost::format("{\"time_us\":%lld,\"type\":\"config\",\"driver\":%s,\"center_mhz\":%.3f,\"bandwidth_mhz\":%u,\"sample_rate\":%.0f,\"bins\":%u,\"record_only\":%s}")
-                     % now_us() % json_quote(driver) % freq_mhz % bins % rate % bins % (g_record_only ? "true" : "false")).str());
+    emit_json_event((boost::format("{\"time_us\":%lld,\"type\":\"config\",\"driver\":%s,\"center_mhz\":%.3f,\"bandwidth_mhz\":%u,\"sample_rate\":%.0f,\"bins\":%u,\"lna_gain_db\":%.1f,\"vga_gain_db\":%.1f,\"amp_gain_db\":%.1f,\"record_only\":%s}")
+                     % now_us() % json_quote(driver) % freq_mhz % bins % rate % bins
+                     % lna_gain_db % vga_gain_db % amp_gain_db % (g_record_only ? "true" : "false")).str());
     fec23_init();
     log_event("fec23 decoder initialized");
     if (legacy_rate_set) {
@@ -1568,11 +1576,11 @@ int SAFE_MAIN(int argc, char *argv[])
     sdr->setBandwidth( SOAPY_SDR_RX, 0, rate);
     str_list = sdr->listGains(SOAPY_SDR_RX, 0);
     if (std::find(str_list.begin(), str_list.end(), "LNA") != str_list.end())
-        sdr->setGain(SOAPY_SDR_RX, 0, "LNA", 40);
+        sdr->setGain(SOAPY_SDR_RX, 0, "LNA", lna_gain_db);
     if (std::find(str_list.begin(), str_list.end(), "VGA") != str_list.end())
-        sdr->setGain(SOAPY_SDR_RX, 0, "VGA", 36);
+        sdr->setGain(SOAPY_SDR_RX, 0, "VGA", vga_gain_db);
     if (std::find(str_list.begin(), str_list.end(), "AMP") != str_list.end())
-        sdr->setGain(SOAPY_SDR_RX, 0, "AMP", 0);
+        sdr->setGain(SOAPY_SDR_RX, 0, "AMP", amp_gain_db);
 
     // 4. setup a stream matching iqsamp_t.
     SoapySDR::Stream *rx_stream = sdr->setupStream( SOAPY_SDR_RX, SOAPY_SDR_CF32);
