@@ -22,7 +22,7 @@ from .wideband import (
 )
 
 
-DEFAULT_CHANNEL = 11
+DEFAULT_CHANNEL = 25
 DEFAULT_WIDEBAND_CHANNEL = 25
 DEFAULT_SAMPLE_RATE_SPS = 4_000_000
 DEFAULT_LISTEN_SAMPLE_RATE_SPS = 8_000_000
@@ -92,7 +92,7 @@ def build_parser() -> argparse.ArgumentParser:
     listen.add_argument("--max-burst-ms", type=float, default=DEFAULT_MAX_BURST_MS)
     listen.add_argument("--decode-min-burst-ms", type=float, default=DEFAULT_DECODE_MIN_BURST_MS)
     listen.add_argument("--decode-min-peak-dbfs", type=float, default=DEFAULT_DECODE_MIN_PEAK_DBFS)
-    listen.add_argument("--debug-bursts", action="store_true")
+    listen.add_argument("--debug-bursts", action=argparse.BooleanOptionalAction, default=True)
     listen.add_argument("--debug-skips", action="store_true", help="print every burst rejected by the live prefilter")
     listen.add_argument("--json", action="store_true")
     listen.add_argument("--max-frames", type=int, default=0, help="stop after this many decoded frames; 0 means run forever")

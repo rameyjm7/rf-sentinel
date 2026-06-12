@@ -21,6 +21,7 @@ The core product stays passive: RF discovery, protocol intelligence, entity reso
 - Separate BTC and BTLE SDR selection, so BTC can use `bladerf:0` while BTLE uses `hackrf:0`.
 - A 79-channel Classic activity chart with one vertical bar per channel.
 - Zigbee / IEEE 802.15.4 receiver plugin under `rf_platform/plugins/zigbee-802154`.
+- Sub-GHz / TPMS receiver plugin under `rf_platform/plugins/subghz-stack`.
 
 ## Project Layout
 
@@ -30,6 +31,7 @@ The core product stays passive: RF discovery, protocol intelligence, entity reso
 - `rf_platform/plugins/bluetooth-classic/`: Bluetooth Classic sniffer plugin.
 - `rf_platform/plugins/bluetooth-lowenergy/`: BLE advertising receiver plugin.
 - `rf_platform/plugins/zigbee-802154/`: Zigbee / IEEE 802.15.4 receiver plugin.
+- `rf_platform/plugins/subghz-stack/`: Sub-GHz / TPMS receiver plugin.
 - `docs/`: product strategy, architecture, and milestone roadmap.
 - `research/`: the referenced paper and corresponding `btsniffer` code.
 

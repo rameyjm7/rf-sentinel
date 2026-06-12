@@ -1,0 +1,27 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "subghz-stack"
+version = "0.1.0"
+description = "CLI-first Sub-GHz protocol analyzer built on sdr-gateway"
+requires-python = ">=3.10"
+dependencies = [
+  "numpy>=1.24",
+  "requests>=2.31",
+  "textual>=0.72",
+  "websocket-client>=1.6",
+]
+
+[project.scripts]
+subghz-stack = "subghz_stack.cli:main"
+subghz_stack = "subghz_stack.cli:main"
+tpms-stack = "subghz_stack.cli:main"
+tpms_stack = "subghz_stack.cli:main"
+
+[tool.setuptools]
+package-dir = {"" = "src"}
+
+[tool.setuptools.packages.find]
+where = ["src"]

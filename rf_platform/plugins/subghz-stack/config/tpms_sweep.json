@@ -1,0 +1,6 @@
+{
+  "dwell_ms": 1500,
+  "start_freq_hz": 433500000,
+  "end_freq_hz": 434500000,
+  "step_hz": 250000
+}
