@@ -268,7 +268,18 @@ def iq_sweep_chunk(base_url: str | None, token: str | None, iq_sweep_id: str, nb
         params={"nbytes": int(nbytes)},
         timeout=12,
     )
-    resp.raise_for_status()
+    try:
+        resp.raise_for_status()
+    except requests.HTTPError as exc:
+        detail = ""
+        try:
+            body = resp.json()
+            detail = str(body.get("detail") or body.get("error") or "")
+        except (ValueError, AttributeError):
+            detail = resp.text.strip()
+        if detail:
+            raise RuntimeError(f"sdr-gateway IQ sweep chunk failed: HTTP {resp.status_code}: {detail}") from exc
+        raise RuntimeError(f"sdr-gateway IQ sweep chunk failed: HTTP {resp.status_code}") from exc
     return dict(resp.json())
 
 

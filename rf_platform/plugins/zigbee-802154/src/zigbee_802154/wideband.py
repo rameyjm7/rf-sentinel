@@ -7,10 +7,16 @@ import numpy as np
 from .decoder import Burst, BurstDetector, IEEE802154Decoder, IEEE802154Frame, channel_to_center_freq
 from .dsp import iq_i8_to_complex
 
+try:
+    from . import _cdecode
+except ImportError:
+    _cdecode = None
+
 
 CHANNEL_OCCUPIED_BW_HZ = 2_000_000
 CHANNEL_FILTER_CUTOFF_HZ = 1_650_000
 CHANNEL_FILTER_TAPS = 129
+NATIVE_CHANNELIZER_TAPS = 9
 FIRST_CHANNEL = 11
 LAST_CHANNEL = 26
 DEFAULT_CHANNEL_RATE_SPS = 4_000_000
@@ -69,6 +75,19 @@ class WidebandChannelRuntime:
     def downconvert_and_decimate(self, iq: np.ndarray, input_sample_rate_sps: int) -> np.ndarray:
         if iq.size == 0:
             return np.empty(0, dtype=np.complex64)
+        if _cdecode is not None and hasattr(_cdecode, "channelize_boxcar"):
+            sample_cursor = int(self.sample_cursor)
+            self.sample_cursor += int(iq.size)
+            raw = _cdecode.channelize_boxcar(
+                np.ascontiguousarray(iq, dtype=np.complex64),
+                float(self.plan.freq_offset_hz),
+                float(input_sample_rate_sps),
+                sample_cursor,
+                int(self.plan.decimation),
+                int(NATIVE_CHANNELIZER_TAPS),
+            )
+            if raw is not None:
+                return np.frombuffer(raw, dtype=np.complex64)
         sample_positions = np.arange(iq.size, dtype=np.float32) + float(self.sample_cursor)
         phase = (-2.0j * np.pi * float(self.plan.freq_offset_hz) / float(input_sample_rate_sps)) * sample_positions
         osc = np.exp(phase).astype(np.complex64, copy=False)

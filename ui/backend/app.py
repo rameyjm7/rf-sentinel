@@ -4,7 +4,10 @@ import logging
 import platform
 import re
 import shutil
+import signal
+import shlex
 import subprocess
+import sys
 import threading
 import time
 from dataclasses import dataclass, field
@@ -35,6 +38,33 @@ BLE_ADV_CHANNEL_BW_HZ = 2_000_000
 BLE_ADV_SAMPLE_RATE_SPS = 2_000_000
 BLE_ADV_ACCESS_BYTES = bytes.fromhex("d6be898e")
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
+
+
+def _load_env_file(path: Path) -> None:
+    if not path.exists():
+        return
+    for raw_line in path.read_text(encoding="utf-8").splitlines():
+        line = raw_line.strip()
+        if not line or line.startswith("#"):
+            continue
+        if line.startswith("export "):
+            line = line[len("export ") :].strip()
+        if "=" not in line:
+            continue
+        key, value = line.split("=", 1)
+        key = key.strip()
+        if not re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*", key):
+            continue
+        try:
+            parsed = shlex.split(value, comments=False, posix=True)
+            value = parsed[0] if parsed else ""
+        except ValueError:
+            value = value.strip().strip("\"'")
+        os.environ.setdefault(key, value)
+
+
+_load_env_file(PROJECT_ROOT / "config" / "env.txt")
+
 DATA_DIR = Path(__file__).resolve().parent / "data"
 BLE_IDENTITY_CACHE_PATH = DATA_DIR / "ble_identities.json"
 COMPANY_IDENTIFIERS_PATH = DATA_DIR / "company_identifiers.json"
@@ -78,7 +108,7 @@ def _gateway_token() -> str:
     token = (os.getenv("SDR_GATEWAY_API_TOKEN", "") or "").strip()
     if token:
         return token
-    return "Vaed36MgaPWugC0Ie5KLYGsiR9wRWKDN/yMNImjGyyENH9lsmZMHUfcRiKShAr4Y"
+    return ""
 
 
 def _gateway_headers() -> dict[str, str]:
@@ -150,6 +180,7 @@ class ExplorerState:
     btc_engine: str = ""
     btc_engine_command: list[str] = field(default_factory=list)
     btc_engine_log: str = ""
+    scanner_log: list[str] = field(default_factory=list)
 
 
 @dataclass
@@ -1340,6 +1371,9 @@ inquiry_process: subprocess.Popen[str] | None = None
 btc_engine_process: subprocess.Popen[str] | None = None
 btc_engine_thread: threading.Thread | None = None
 btc_engine_stop = threading.Event()
+rf_sentinel_process: subprocess.Popen[str] | None = None
+rf_sentinel_thread: threading.Thread | None = None
+rf_sentinel_stop = threading.Event()
 devices_cache_lock = threading.Lock()
 devices_cache: list[dict[str, Any]] = []
 devices_cache_updated_at = 0.0
@@ -2370,6 +2404,100 @@ def _stop_duplicate_gateway_streams(device_id: str | None, keep_stream_id: str |
             _stop_gateway_stream(stream_id)
 
 
+def _printable_hex_text(hex_text: Any) -> str:
+    try:
+        raw = bytes.fromhex(str(hex_text or ""))
+    except ValueError:
+        return ""
+    cleaned = bytes(value for value in raw if value in (9, 10, 13) or 32 <= value <= 126)
+    return cleaned.decode("utf-8", errors="ignore").strip()
+
+
+def _real_rssi(value: Any) -> float | None:
+    try:
+        rssi = float(value)
+    except (TypeError, ValueError):
+        return None
+    if rssi <= -119.9:
+        return None
+    return rssi
+
+
+def _scanner_json_to_events(source: str, payload: dict[str, Any]) -> list[dict[str, Any]]:
+    now = float(payload.get("timestamp") or payload.get("seen_at") or time.time())
+    protocol = str(payload.get("protocol") or "").lower()
+    kind = str(payload.get("kind") or "").lower()
+    source_protocol = str(source or "").split(":", 1)[-1].lower()
+
+    if kind == "ble_adv" or protocol in {"ble", "btle"}:
+        payload.setdefault("kind", "ble_adv")
+        payload.setdefault("seen_at", now)
+        return [payload]
+
+    if kind == "classic_lap" or protocol in {"btc", "bluetooth_classic", "classic"} or (source_protocol == "btc" and payload.get("lap")):
+        payload.setdefault("kind", "classic_lap")
+        payload.setdefault("seen_at", now)
+        payload.setdefault("status", payload.get("type") or "observed")
+        return [payload]
+
+    if protocol == "ieee802154" or source_protocol == "zigbee":
+        mac = payload.get("mac") if isinstance(payload.get("mac"), dict) else {}
+        payload_hex = str(mac.get("payload_hex") or payload.get("payload_hex") or "")
+        source_address = str(mac.get("source_address") or "").strip()
+        destination_address = str(mac.get("destination_address") or "").strip()
+        pan_id = mac.get("source_pan_id") or mac.get("destination_pan_id")
+        text = _printable_hex_text(payload_hex)
+        return [
+            {
+                "kind": "zigbee_frame",
+                "protocol": "ZIGBEE",
+                "seen_at": now,
+                "identity": source_address or destination_address or f"802.15.4 CH {payload.get('channel') or '?'}",
+                "mac": source_address or destination_address or "",
+                "source_address": source_address,
+                "destination_address": destination_address,
+                "pan_id": pan_id,
+                "detail": text or str(mac.get("frame_type") or "802.15.4 frame"),
+                "decoded_text": text,
+                "device_type": "802.15.4",
+                "device_type_detail": str(mac.get("frame_type") or ""),
+                "channel": payload.get("channel"),
+                "center_freq_hz": payload.get("center_freq_hz"),
+                "last_rssi_dbfs": _real_rssi(payload.get("rssi_dbfs")),
+                "confidence": payload.get("confidence"),
+                "payload_hex": payload_hex,
+                "psdu_hex": payload.get("psdu_hex"),
+                "sequence_number": mac.get("sequence_number"),
+            }
+        ]
+
+    if protocol in {"tpms", "subghz"} or source_protocol == "tpms":
+        fields = payload.get("decoded_fields") if isinstance(payload.get("decoded_fields"), dict) else {}
+        sensor_id = str(fields.get("sensor_id") or fields.get("id") or payload.get("hex") or "").strip()
+        detail_bits = [
+            str(payload.get("protocol_variant") or "TPMS"),
+            f"confidence={payload.get('confidence')}" if payload.get("confidence") is not None else "",
+        ]
+        return [
+            {
+                "kind": "tpms_frame",
+                "protocol": "TPMS",
+                "seen_at": now,
+                "identity": sensor_id or "TPMS sensor",
+                "mac": sensor_id,
+                "detail": " · ".join(bit for bit in detail_bits if bit),
+                "device_type": "TPMS",
+                "device_type_detail": str(payload.get("protocol_variant") or ""),
+                "center_freq_hz": payload.get("center_freq_hz"),
+                "last_rssi_dbfs": payload.get("rssi_dbfs") or payload.get("burst_peak_dbfs"),
+                "confidence": payload.get("confidence"),
+                "payload_hex": payload.get("hex"),
+            }
+        ]
+
+    return []
+
+
 def _append_detections(events: list[dict[str, Any]], candidates: list[dict[str, Any]]) -> None:
     if not events and not candidates:
         return
@@ -2388,6 +2516,18 @@ def _append_detections(events: list[dict[str, Any]], candidates: list[dict[str, 
             state.bursts_seen += 1 if event["kind"].endswith("burst") else 0
             state.ble_packets_seen += 1 if event["kind"] == "ble_adv" else 0
             state.classic_bursts_seen += 1 if event["kind"] in {"classic_burst", "classic_lap"} else 0
+            mode_key = {
+                "ble_adv": "ble",
+                "classic_burst": "classic",
+                "classic_lap": "classic",
+                "zigbee_frame": "zigbee",
+                "tpms_frame": "tpms",
+            }.get(str(event.get("kind") or ""))
+            if mode_key:
+                rssi = _real_rssi(event.get("rssi_dbfs", event.get("last_rssi_dbfs")))
+                if rssi is not None:
+                    state.rssi_by_mode[mode_key] = round(rssi, 1)
+                    state.last_rssi_dbfs = round(rssi, 1)
             if event["kind"] in {"classic_burst", "classic_lap"}:
                 try:
                     rssi = float(event.get("rssi_dbfs"))
@@ -2397,7 +2537,7 @@ def _append_detections(events: list[dict[str, Any]], candidates: list[dict[str, 
                         state.noise_floor_dbfs = round((state.noise_floor_dbfs * 0.92) + (rssi * 0.08), 1)
                 except (TypeError, ValueError):
                     pass
-            if event["kind"] in {"ble_adv", "classic_lap"}:
+            if event["kind"] in {"ble_adv", "classic_lap", "zigbee_frame", "tpms_frame"}:
                 _upsert_discovery_row(event)
             if event["kind"] == "classic_lap":
                 _upsert_classic_address(event)
@@ -2490,6 +2630,50 @@ def _upsert_discovery_row(event: dict[str, Any]) -> None:
             "last_rssi_dbfs": event.get("rssi_dbfs"),
             "channel": event.get("channel"),
             "center_freq_hz": event.get("center_freq_hz"),
+        }
+    elif event.get("kind") == "zigbee_frame":
+        source_address = str(event.get("source_address") or "").strip()
+        destination_address = str(event.get("destination_address") or "").strip()
+        identity = str(event.get("identity") or source_address or destination_address or "802.15.4 frame")
+        pan_id = event.get("pan_id")
+        key_bits = [source_address or destination_address or identity, str(pan_id or ""), str(event.get("channel") or "")]
+        row = {
+            "key": f"zigbee:{':'.join(key_bits)}",
+            "protocol": "ZIGBEE",
+            "identity": identity,
+            "mac": source_address or destination_address,
+            "source_address": source_address,
+            "destination_address": destination_address,
+            "pan_id": pan_id,
+            "detail": str(event.get("detail") or "802.15.4 frame"),
+            "decoded_text": str(event.get("decoded_text") or ""),
+            "device_type": str(event.get("device_type") or "802.15.4"),
+            "device_type_detail": str(event.get("device_type_detail") or ""),
+            "detections": 1,
+            "last_seen_at": now,
+            "last_rssi_dbfs": _real_rssi(event.get("last_rssi_dbfs", event.get("rssi_dbfs"))),
+            "channel": event.get("channel"),
+            "center_freq_hz": event.get("center_freq_hz"),
+            "confidence": event.get("confidence"),
+            "payload_hex": event.get("payload_hex") or event.get("psdu_hex"),
+        }
+    elif event.get("kind") == "tpms_frame":
+        identity = str(event.get("identity") or "TPMS sensor")
+        row = {
+            "key": f"tpms:{identity}",
+            "protocol": "TPMS",
+            "identity": identity,
+            "mac": str(event.get("mac") or identity),
+            "detail": str(event.get("detail") or "TPMS frame"),
+            "device_type": str(event.get("device_type") or "TPMS"),
+            "device_type_detail": str(event.get("device_type_detail") or ""),
+            "detections": 1,
+            "last_seen_at": now,
+            "last_rssi_dbfs": event.get("last_rssi_dbfs") or event.get("rssi_dbfs"),
+            "channel": event.get("channel"),
+            "center_freq_hz": event.get("center_freq_hz"),
+            "confidence": event.get("confidence"),
+            "payload_hex": event.get("payload_hex"),
         }
     else:
         return
@@ -2829,6 +3013,192 @@ def _worker_loop(
                 state.worker_error = "Worker exited unexpectedly"
 
 
+def _rf_sentinel_scan_bin() -> str:
+    candidate = Path(sys.executable).parent / "rf_sentinel_scan"
+    if candidate.exists():
+        return str(candidate)
+    found = shutil.which("rf_sentinel_scan")
+    if found:
+        return found
+    return str(candidate)
+
+
+def _terminate_process_group(proc: subprocess.Popen[str], timeout_s: float = 4.0) -> None:
+    try:
+        os.killpg(proc.pid, signal.SIGTERM)
+    except ProcessLookupError:
+        return
+    except Exception:
+        proc.terminate()
+    deadline = time.time() + timeout_s
+    while proc.poll() is None and time.time() < deadline:
+        time.sleep(0.05)
+    if proc.poll() is None:
+        try:
+            os.killpg(proc.pid, signal.SIGKILL)
+        except ProcessLookupError:
+            pass
+        except Exception:
+            proc.kill()
+        proc.wait(timeout=1)
+
+
+def _parse_rf_sentinel_line(line: str) -> tuple[str, str]:
+    match = re.match(r"^\[(?P<source>[^\]]+)\]\s*(?P<body>.*)$", line.strip())
+    if not match:
+        return "scanner", line.strip()
+    return match.group("source").strip(), match.group("body").strip()
+
+
+def _append_scanner_log(line: str) -> None:
+    text = str(line or "").rstrip()
+    if not text:
+        return
+    print(text, flush=True)
+    state.scanner_log.append(text)
+    state.scanner_log = state.scanner_log[-300:]
+
+
+def _clean_device_id(value: Any) -> str:
+    text = str(value or "").strip()
+    lowered = text.lower()
+    if not text or lowered in {"loading...", "loading", "no sdr devices"}:
+        return ""
+    if "sdr-gateway is unavailable" in lowered or "no devices" in lowered:
+        return ""
+    return text
+
+
+def _rf_sentinel_loop(proc: subprocess.Popen[str]) -> None:
+    assert proc.stdout is not None
+    with state_lock:
+        state.worker_alive = True
+        state.worker_alive_by_mode["scanner"] = True
+        state.worker_error = ""
+        state.worker_errors["scanner"] = ""
+    try:
+        for raw_line in proc.stdout:
+            if rf_sentinel_stop.is_set():
+                break
+            line = raw_line.strip()
+            if not line:
+                continue
+            source, body = _parse_rf_sentinel_line(line)
+            with state_lock:
+                _append_scanner_log(line)
+                state.chunks_by_mode[source] = int(state.chunks_by_mode.get(source, 0)) + 1
+                state.chunks_seen += 1
+            if not body.startswith("{"):
+                continue
+            try:
+                payload = json.loads(body)
+            except json.JSONDecodeError:
+                continue
+            events = _scanner_json_to_events(source, payload)
+            if events:
+                _append_detections(events, [])
+        rc = proc.wait()
+        if not rf_sentinel_stop.is_set() and rc not in (0, -signal.SIGTERM):
+            with state_lock:
+                state.worker_error = f"RF Sentinel scanner exited with code {rc}"
+                state.worker_errors["scanner"] = state.worker_error
+                _append_scanner_log(state.worker_error)
+    finally:
+        with state_lock:
+            state.worker_alive = False
+            state.worker_alive_by_mode["scanner"] = False
+
+
+def _start_rf_sentinel_engine(
+    btc_device_id: str,
+    hop_device_id: str,
+    btc_center_mhz: float,
+    btc_bandwidth_mhz: int,
+    btc_lna_gain_db: int,
+    btc_vga_gain_db: int,
+    hop_lna_gain_db: int,
+    hop_vga_gain_db: int,
+    enabled_protocols: set[str] | None = None,
+    sweep_both_radios: bool = False,
+) -> dict[str, Any]:
+    global rf_sentinel_process, rf_sentinel_thread
+    rf_sentinel_stop.clear()
+    cmd = [
+        _rf_sentinel_scan_bin(),
+        "--btc-device-id",
+        btc_device_id,
+        "--hop-device-id",
+        hop_device_id,
+        "--btc-center-mhz",
+        f"{btc_center_mhz:.3f}",
+        "--btc-bandwidth-mhz",
+        str(btc_bandwidth_mhz),
+        "--btc-lna-gain-db",
+        str(btc_lna_gain_db),
+        "--btc-vga-gain-db",
+        str(btc_vga_gain_db),
+        "--ble-lna-gain-db",
+        str(hop_lna_gain_db),
+        "--ble-vga-gain-db",
+        str(hop_vga_gain_db),
+    ]
+    if sweep_both_radios:
+        cmd.extend(
+            [
+                "--sweep-both-radios",
+                "--radio-a-device-id",
+                btc_device_id,
+                "--radio-b-device-id",
+                hop_device_id,
+                "--radio-a-btc-bandwidth-mhz",
+                str(btc_bandwidth_mhz),
+                "--radio-b-btc-bandwidth-mhz",
+                "20",
+            ]
+        )
+    protocols = enabled_protocols or {"btc", "ble", "zigbee", "tpms"}
+    if "btc" not in protocols:
+        cmd.append("--no-btc")
+    if "ble" not in protocols:
+        cmd.append("--no-ble")
+    if "zigbee" not in protocols:
+        cmd.append("--no-zigbee")
+    if "tpms" not in protocols:
+        cmd.append("--no-tpms")
+    env = os.environ.copy()
+    env["PYTHONUNBUFFERED"] = "1"
+    proc = subprocess.Popen(
+        cmd,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.STDOUT,
+        text=True,
+        bufsize=1,
+        start_new_session=True,
+        cwd=str(PROJECT_ROOT),
+        env=env,
+    )
+    rf_sentinel_process = proc
+    rf_sentinel_thread = threading.Thread(target=_rf_sentinel_loop, args=(proc,), daemon=True)
+    rf_sentinel_thread.start()
+    return {"engine": "rf_sentinel_scan", "command": cmd, "pid": proc.pid}
+
+
+def _stop_rf_sentinel_engine(timeout_s: float = 4.0) -> None:
+    global rf_sentinel_process, rf_sentinel_thread
+    rf_sentinel_stop.set()
+    proc = rf_sentinel_process
+    rf_sentinel_process = None
+    with state_lock:
+        if proc is not None:
+            _append_scanner_log("[ui] stopping rf_sentinel_scan")
+    if proc is not None and proc.poll() is None:
+        _terminate_process_group(proc, timeout_s=timeout_s)
+    thread = rf_sentinel_thread
+    rf_sentinel_thread = None
+    if thread and thread.is_alive():
+        thread.join(timeout=2.0)
+
+
 def _reset_stats() -> None:
     state.chunks_seen = 0
     state.bytes_seen = 0
@@ -2846,6 +3216,7 @@ def _reset_stats() -> None:
     state.discovery_table = []
     state.channel_activity = {}
     state.decoder_stats = {}
+    state.scanner_log = []
 
 
 def _reset_live_stats_keep_discoveries() -> None:
@@ -2920,6 +3291,7 @@ def _available_devices() -> list[dict[str, Any]]:
 def _stop_scan(stop_gateway: bool = True) -> None:
     global worker_thread, worker_threads, worker_stops
     _stop_bredr_inquiry()
+    _stop_rf_sentinel_engine()
     _stop_btcsniffer_engine()
     worker_stop.set()
     if worker_thread and worker_thread.is_alive():
@@ -3034,9 +3406,9 @@ def start_scan():
         payload = request.get_json(force=True) or {}
     except BadRequest as exc:
         return _json_error(400, "start_scan", error="invalid JSON payload", detail=str(exc))
-    device_id = str(payload.get("device_id", "")).strip()
-    btc_device_id = str(payload.get("btc_device_id", "")).strip()
-    btle_device_id = str(payload.get("btle_device_id", "")).strip()
+    device_id = _clean_device_id(payload.get("device_id", ""))
+    btc_device_id = _clean_device_id(payload.get("btc_device_id", ""))
+    btle_device_id = _clean_device_id(payload.get("btle_device_id", "") or payload.get("hop_device_id", ""))
     mode = str(payload.get("mode", "classic")).strip().lower()
     channel = int(payload.get("channel", 37 if mode != "classic" else 0))
     btc_center_mhz = float(payload.get("btc_center_mhz", 2442.0))
@@ -3050,21 +3422,30 @@ def start_scan():
     btc_target_mac = str(payload.get("btc_target_mac", "")).strip()
     preserve_detections = bool(payload.get("preserve_detections", False))
     btc_engine = str(payload.get("btc_engine", BTC_ENGINE_DEFAULT) or BTC_ENGINE_DEFAULT).strip().lower()
+    requested_protocols = payload.get("protocols")
+    if isinstance(requested_protocols, list):
+        enabled_protocols = {str(item).strip().lower() for item in requested_protocols}
+    else:
+        enabled_protocols = {"btc", "ble", "zigbee", "tpms"}
+    enabled_protocols &= {"btc", "ble", "zigbee", "tpms"}
+    sweep_both_radios = bool(payload.get("sweep_both_radios", mode == "sentinel"))
 
-    if mode not in {"ble", "classic", "both"}:
-        return _json_error(400, "start_scan", error="mode must be ble, classic, or both")
+    if mode not in {"ble", "classic", "both", "sentinel"}:
+        return _json_error(400, "start_scan", error="mode must be ble, classic, both, or sentinel")
+    if mode == "sentinel" and not enabled_protocols:
+        return _json_error(400, "start_scan", error="select at least one protocol")
     if btc_engine not in {"btcsniffer", "python"}:
         return _json_error(400, "start_scan", error="btc_engine must be btcsniffer or python")
     if mode == "ble" and channel not in BLE_ADV_CHANNELS:
         return _json_error(400, "start_scan", error="BLE channel must be 37, 38, or 39")
-    if mode in {"classic", "both"}:
+    if mode in {"classic", "both", "sentinel"}:
         sample_rate_sps = max(1_000_000, min(60_000_000, sample_rate_sps))
         btc_center_mhz = max(2402.0, min(2480.0, btc_center_mhz))
 
     devices_available = _available_devices()
-    if mode in {"classic", "both"} and not btc_device_id:
+    if mode in {"classic", "both", "sentinel"} and not btc_device_id:
         btc_device_id = _pick_device(devices_available, "bladerf")
-    if mode in {"ble", "both"} and not btle_device_id:
+    if mode in {"ble", "both", "sentinel"} and not btle_device_id:
         btle_device_id = _pick_device(devices_available, "hackrf", device_id or "sidekiq")
     if mode == "classic" and not btc_device_id:
         return _json_error(400, "start_scan", error="btc_device_id is required")
@@ -3072,9 +3453,11 @@ def start_scan():
         return _json_error(400, "start_scan", error="btle_device_id is required")
     if mode == "both" and (not btc_device_id or not btle_device_id):
         return _json_error(400, "start_scan", error="both btc_device_id and btle_device_id are required")
+    if mode == "sentinel" and (not btc_device_id or not btle_device_id):
+        return _json_error(400, "start_scan", error="both btc_device_id and btle_device_id are required")
 
     btc_bandwidth_mhz = max(1, min(BT_CLASSIC_BANK_SIZE, int(round(sample_rate_sps / 1_000_000.0))))
-    if mode in {"classic", "both"} and btc_device_id:
+    if mode in {"classic", "both", "sentinel"} and btc_device_id:
         btc_bandwidth_mhz = min(btc_bandwidth_mhz, _btc_max_bandwidth_mhz_for_device(btc_device_id))
         sample_rate_sps = btc_bandwidth_mhz * 1_000_000
 
@@ -3097,6 +3480,64 @@ def start_scan():
         _stop_bredr_inquiry()
     else:
         _stop_bredr_inquiry()
+
+    if mode == "sentinel":
+        try:
+            scanner_body = _start_rf_sentinel_engine(
+                btc_device_id=btc_device_id,
+                hop_device_id=btle_device_id,
+                btc_center_mhz=btc_center_mhz,
+                btc_bandwidth_mhz=btc_bandwidth_mhz,
+                btc_lna_gain_db=btc_lna_gain_db,
+                btc_vga_gain_db=btc_vga_gain_db,
+                hop_lna_gain_db=btle_lna_gain_db,
+                hop_vga_gain_db=btle_vga_gain_db,
+                enabled_protocols=enabled_protocols,
+                sweep_both_radios=sweep_both_radios,
+            )
+        except RuntimeError as exc:
+            return _json_error(400, "start_scan", error="scan start failed", detail=str(exc))
+        with state_lock:
+            if preserve_detections:
+                _reset_live_stats_keep_discoveries()
+            else:
+                _reset_stats()
+            state.running = True
+            state.mode = "sentinel"
+            state.stream_id = None
+            state.stream_ids = {}
+            state.device_id = btc_device_id
+            state.device_ids = {"classic": btc_device_id, "hop": btle_device_id, "radio_a": btc_device_id, "radio_b": btle_device_id}
+            state.center_freq_hz = btc_center_freq_hz
+            state.sample_rate_sps = btc_bandwidth_mhz * 1_000_000
+            state.lna_gain_db = btc_lna_gain_db
+            state.vga_gain_db = btc_vga_gain_db
+            state.channel = btc_bank_start_channel
+            state.channels_by_mode = {"classic": btc_bank_start_channel}
+            state.gateway_start_response = {"scanner": scanner_body}
+            state.btc_engine = "rf_sentinel_scan"
+            state.btc_engine_command = list(scanner_body.get("command", []))
+            state.btc_engine_log = ""
+            _append_scanner_log(f"[ui] started {' '.join(state.btc_engine_command)}")
+            _append_scanner_log("[ui] RF Sentinel scanner mode active")
+            state.worker_error = ""
+            state.worker_errors = {}
+            state.worker_alive = True
+            state.worker_alive_by_mode = {"scanner": True}
+            state.test_target = btc_test_target
+            state.test_target_error = btc_test_error
+            state.decoder_stats["enabled_protocols"] = sorted(enabled_protocols)
+            state.decoder_stats["sweep_both_radios"] = bool(sweep_both_radios)
+        return jsonify(
+            {
+                "ok": True,
+                "mode": "sentinel",
+                "scanner": scanner_body,
+                "devices": {"classic": btc_device_id, "hop": btle_device_id, "radio_a": btc_device_id, "radio_b": btle_device_id},
+                "test_target": btc_test_target,
+                "test_target_error": btc_test_error,
+            }
+        )
 
     try:
         started: dict[str, dict[str, Any]] = {}
@@ -3274,6 +3715,7 @@ def status():
                 "btc_engine": state.btc_engine,
                 "btc_engine_command": state.btc_engine_command,
                 "btc_engine_log": state.btc_engine_log,
+                "scanner_log": state.scanner_log[-160:],
                 "channel_activity": [
                     state.channel_activity.get(idx, {"channel": idx, "hits": 0, "rssi_dbfs": -120.0})
                     for idx in range(79)

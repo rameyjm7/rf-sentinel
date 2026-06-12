@@ -126,8 +126,17 @@ frames and falls back to the anchor channel, so energy-only ghosts do not steal
 dwell time. Use `--follow-energy-only` when you intentionally want to chase raw
 burst energy before frames decode.
 
-If you need slower discovery for very sparse transmitters, add
-`--discovery-dwell-s 3`.
+By default, adaptive discovery first tries `--discovery-mode auto`, which uses
+the gateway's FFT sweep API to spend `--discovery-sweep-s 2` seconds across the
+full 802.15.4 spectrum. It scores only known Zigbee channel centers 11-26 using
+a 2 MHz channel mask plus guard-bin shape checks, so broadband or off-center
+energy is less likely to steal decoder time. It then opens IQ only on active
+windows and demods up to `--max-active-decode-channels 4` Zigbee-shaped channels
+per window. Use `--decode-all-channels` only when you intentionally want
+brute-force decoding across every channel in the visible window. If FFT sweep is
+unavailable, it falls back to IQ burst discovery. If you need slower discovery
+for very sparse transmitters, increase `--discovery-sweep-s`; if you want to
+force a fixed per-window IQ discovery dwell instead, set `--discovery-dwell-s`.
 
 ## Next
 

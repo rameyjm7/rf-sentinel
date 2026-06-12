@@ -6,12 +6,16 @@ import contextlib
 import json
 import math
 import os
+import signal
+import subprocess
 import sys
 import time
 from pathlib import Path
 
+import numpy as np
+
 from .decoder import Burst, BurstDetector, IEEE802154Decoder, channel_to_center_freq
-from .gateway import GatewayClient, GatewayDevice, StreamConfig
+from .gateway import GatewayClient, GatewayDevice, StreamConfig, StreamHandle, SweepConfig, SweepSample
 from .wideband import (
     WidebandDetectorConfig,
     WidebandWindowPlan,
@@ -42,11 +46,19 @@ DEFAULT_FREQUENCY_SEARCH_HZ = (0, -25_000, 25_000)
 DEFAULT_WAVEFORM_PATTERN_CORR_MIN = 0.18
 DEFAULT_LIVE_DECODE_QUEUE = 32
 DEFAULT_WIDEBAND_DWELL_S = 2.0
-DEFAULT_WIDEBAND_DISCOVERY_DWELL_S = 0.75
-DEFAULT_WIDEBAND_ACTIVE_DWELL_S = 45.0
+DEFAULT_WIDEBAND_DISCOVERY_SWEEP_S = 2.0
+DEFAULT_WIDEBAND_DISCOVERY_DWELL_S = 0.0
+DEFAULT_WIDEBAND_ACTIVE_DWELL_S = 1.0
 DEFAULT_WIDEBAND_RESCAN_INTERVAL_S = 120.0
 DEFAULT_WIDEBAND_ACTIVITY_TTL_S = 120.0
 DEFAULT_WIDEBAND_MAX_ACTIVE_DECODE_CHANNELS = 1
+DEFAULT_WIDEBAND_FFT_SWEEP_BIN_WIDTH_HZ = 250_000
+DEFAULT_WIDEBAND_FFT_ACTIVE_THRESHOLD_DB = 6.0
+DEFAULT_WIDEBAND_FFT_MIN_POWER_DB = -85.0
+DEFAULT_WIDEBAND_FFT_SHAPE_THRESHOLD_DB = 2.0
+DEFAULT_WIDEBAND_FFT_CHANNEL_BW_HZ = 2_000_000
+DEFAULT_WIDEBAND_FFT_GUARD_BW_HZ = 5_000_000
+DEFAULT_WIDEBAND_FFT_TOP_CHANNELS = 6
 DEFAULT_OFFLINE_CHUNK_BYTES = 1 << 16
 ANSI_GREEN = "\033[32m"
 ANSI_RESET = "\033[0m"
@@ -99,6 +111,7 @@ def build_parser() -> argparse.ArgumentParser:
     listen.add_argument("--reconnect-delay-seconds", type=float, default=1.0)
     listen.add_argument("--live-decode-workers", type=int, default=max(1, min(4, os.cpu_count() or 1)))
     listen.add_argument("--live-decode-queue", type=int, default=DEFAULT_LIVE_DECODE_QUEUE)
+    listen.add_argument("--require-fcs", action=argparse.BooleanOptionalAction, default=False)
     _add_decoder_arguments(listen)
 
     wideband = subparsers.add_parser("wideband-listen", help="sweep the full 2.4 GHz 802.15.4 band using the SDR's widest sample rate")
@@ -123,6 +136,12 @@ def build_parser() -> argparse.ArgumentParser:
         help="periodically discover active channels, then dwell on active windows",
     )
     wideband.add_argument(
+        "--discovery-mode",
+        choices=("auto", "fft", "iq"),
+        default="auto",
+        help="use gateway FFT sweep for discovery when available, or fall back to IQ burst discovery",
+    )
+    wideband.add_argument(
         "--decode-all-channels",
         action="store_true",
         help="decode every channel in the active wideband window instead of only the anchor channel",
@@ -136,12 +155,42 @@ def build_parser() -> argparse.ArgumentParser:
     wideband.add_argument("--sample-rate-sps", type=int, default=0, help="0 means use the device max sample rate")
     wideband.add_argument("--channel-rate-sps", type=int, default=DEFAULT_WIDEBAND_CHANNEL_RATE_SPS)
     wideband.add_argument("--window-dwell-s", type=float, default=DEFAULT_WIDEBAND_DWELL_S)
-    wideband.add_argument("--discovery-dwell-s", type=float, default=DEFAULT_WIDEBAND_DISCOVERY_DWELL_S)
+    wideband.add_argument(
+        "--discovery-sweep-s",
+        type=float,
+        default=DEFAULT_WIDEBAND_DISCOVERY_SWEEP_S,
+        help="total adaptive discovery time across the full 802.15.4 spectrum",
+    )
+    wideband.add_argument(
+        "--discovery-dwell-s",
+        type=float,
+        default=DEFAULT_WIDEBAND_DISCOVERY_DWELL_S,
+        help="override discovery dwell per window; 0 derives it from --discovery-sweep-s",
+    )
     wideband.add_argument("--active-dwell-s", type=float, default=DEFAULT_WIDEBAND_ACTIVE_DWELL_S)
     wideband.add_argument("--rescan-interval-s", type=float, default=DEFAULT_WIDEBAND_RESCAN_INTERVAL_S)
     wideband.add_argument("--activity-ttl-s", type=float, default=DEFAULT_WIDEBAND_ACTIVITY_TTL_S)
     wideband.add_argument("--activity-min-burst-ms", type=float, default=0.5)
     wideband.add_argument("--activity-min-peak-dbfs", type=float, default=-30.0)
+    wideband.add_argument("--fft-sweep-bin-width-hz", type=int, default=DEFAULT_WIDEBAND_FFT_SWEEP_BIN_WIDTH_HZ)
+    wideband.add_argument("--fft-active-threshold-db", type=float, default=DEFAULT_WIDEBAND_FFT_ACTIVE_THRESHOLD_DB)
+    wideband.add_argument("--fft-min-power-db", type=float, default=DEFAULT_WIDEBAND_FFT_MIN_POWER_DB)
+    wideband.add_argument("--fft-shape-threshold-db", type=float, default=DEFAULT_WIDEBAND_FFT_SHAPE_THRESHOLD_DB)
+    wideband.add_argument("--fft-channel-bw-hz", type=int, default=DEFAULT_WIDEBAND_FFT_CHANNEL_BW_HZ)
+    wideband.add_argument("--fft-guard-bw-hz", type=int, default=DEFAULT_WIDEBAND_FFT_GUARD_BW_HZ)
+    wideband.add_argument("--fft-top-channels", type=int, default=DEFAULT_WIDEBAND_FFT_TOP_CHANNELS)
+    wideband.add_argument(
+        "--lock-on-frame",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help="after an FCS-good frame is decoded, park active demod on that channel until the lock expires",
+    )
+    wideband.add_argument(
+        "--frame-lock-ttl-s",
+        type=float,
+        default=60.0,
+        help="seconds to keep wideband parked on a channel after a verified frame",
+    )
     wideband.add_argument(
         "--max-active-decode-channels",
         type=int,
@@ -170,7 +219,41 @@ def build_parser() -> argparse.ArgumentParser:
     wideband.add_argument("--live-decode-queue", type=int, default=DEFAULT_LIVE_DECODE_QUEUE)
     wideband.add_argument("--json", action="store_true")
     wideband.add_argument("--max-frames", type=int, default=0)
+    wideband.add_argument("--require-fcs", action=argparse.BooleanOptionalAction, default=True)
     _add_decoder_arguments(wideband)
+
+    dual = subparsers.add_parser(
+        "dual-sdr-listen",
+        help="use one SDR as a wide FFT scout and a second SDR to park/demod active Zigbee channels",
+    )
+    dual.add_argument("--base-url", default=None)
+    dual.add_argument("--token", default=None)
+    dual.add_argument("--scout-device-id", default="bladerf:0")
+    dual.add_argument("--demod-device-id", default="hackrf:0")
+    dual.add_argument("--channel", type=int, default=DEFAULT_WIDEBAND_CHANNEL, help="preferred Zigbee channel for the fast scout window")
+    dual.add_argument("--scout-all-windows", action="store_true", help="rotate all scout windows; slower, but covers the full band")
+    dual.add_argument("--scout-center-freq-hz", type=int, default=0, help="override scout center for single-window fast mode")
+    dual.add_argument("--scout-sample-rate-sps", type=int, default=60_000_000)
+    dual.add_argument("--scout-lna-gain-db", type=int, default=40)
+    dual.add_argument("--scout-vga-gain-db", type=int, default=40)
+    dual.add_argument("--scout-baseband-filter-hz", type=int, default=60_000_000)
+    dual.add_argument("--scout-sweep-s", type=float, default=0.25)
+    dual.add_argument("--scout-chunk-limit", type=int, default=24)
+    dual.add_argument("--fft-n", type=int, default=4096)
+    dual.add_argument("--fft-active-threshold-db", type=float, default=DEFAULT_WIDEBAND_FFT_ACTIVE_THRESHOLD_DB)
+    dual.add_argument("--fft-shape-threshold-db", type=float, default=DEFAULT_WIDEBAND_FFT_SHAPE_THRESHOLD_DB)
+    dual.add_argument("--fft-min-power-db", type=float, default=DEFAULT_WIDEBAND_FFT_MIN_POWER_DB)
+    dual.add_argument("--fft-channel-bw-hz", type=int, default=DEFAULT_WIDEBAND_FFT_CHANNEL_BW_HZ)
+    dual.add_argument("--fft-guard-bw-hz", type=int, default=DEFAULT_WIDEBAND_FFT_GUARD_BW_HZ)
+    dual.add_argument("--fft-top-channels", type=int, default=2)
+    dual.add_argument("--demod-dwell-s", type=float, default=1.0)
+    dual.add_argument("--demod-sample-rate-sps", type=int, default=DEFAULT_LISTEN_SAMPLE_RATE_SPS)
+    dual.add_argument("--demod-lna-gain-db", type=int, default=DEFAULT_HACKRF_LNA_GAIN_DB)
+    dual.add_argument("--demod-vga-gain-db", type=int, default=DEFAULT_HACKRF_VGA_GAIN_DB)
+    dual.add_argument("--demod-amp-enable", action=argparse.BooleanOptionalAction, default=DEFAULT_HACKRF_AMP_ENABLE)
+    dual.add_argument("--debug-bursts", action="store_true")
+    dual.add_argument("--json", action="store_true")
+    dual.add_argument("--once", action="store_true")
 
     decode_file = subparsers.add_parser("decode-file", help="decode 802.15.4 bursts from a captured CS8 IQ file")
     decode_file.add_argument("--input", required=True)
@@ -187,6 +270,7 @@ def build_parser() -> argparse.ArgumentParser:
     decode_file.add_argument("--debug-bursts", action="store_true")
     decode_file.add_argument("--json", action="store_true")
     decode_file.add_argument("--max-bursts", type=int, default=0, help="stop after this many detected bursts; 0 means decode all bursts")
+    decode_file.add_argument("--require-fcs", action=argparse.BooleanOptionalAction, default=False)
     _add_decoder_arguments(decode_file)
     return parser
 
@@ -216,6 +300,7 @@ def _build_decoder(args: argparse.Namespace) -> IEEE802154Decoder:
         start_search_symbols=int(args.start_search_symbols),
         frequency_search_hz=tuple(int(entry) for entry in args.frequency_search_hz),
         waveform_pattern_corr_min=float(args.waveform_pattern_corr_min),
+        require_fcs=bool(getattr(args, "require_fcs", False)),
     )
 
 
@@ -257,7 +342,8 @@ def _emit_frame(frame, json_mode: bool) -> None:
             text_summary = f" text={json.dumps(text)}"
     line = (
         f"frame ch={frame.channel or '?'} len={frame.phy_length} "
-        f"confidence={frame.confidence:.3f} psdu={frame.hex}{mac_summary}{text_summary}"
+        f"confidence={frame.confidence:.3f} fcs_ok={int(bool(getattr(frame, 'fcs_ok', False)))} "
+        f"psdu={frame.hex}{mac_summary}{text_summary}"
     )
     if sys.stdout.isatty():
         line = f"{ANSI_GREEN}{line}{ANSI_RESET}"
@@ -326,6 +412,149 @@ def _rf_hint(channel: int, burst: Burst, diagnostics) -> str:
     if int(channel) == 26 and 0.30 <= duration_ms <= 0.55 and pattern_corr < 0.30:
         return "possible_ble_adv39"
     return "-"
+
+
+def _fft_sweep_channel_scores(
+    samples: list[SweepSample],
+    *,
+    channel_bw_hz: int = DEFAULT_WIDEBAND_FFT_CHANNEL_BW_HZ,
+    guard_bw_hz: int = DEFAULT_WIDEBAND_FFT_GUARD_BW_HZ,
+) -> dict[int, dict[str, float]]:
+    scores: dict[int, dict[str, float]] = {}
+    half_channel_hz = max(1.0, float(channel_bw_hz) / 2.0)
+    half_guard_hz = max(half_channel_hz, float(guard_bw_hz) / 2.0)
+
+    def span_indices(hz_low: int, bin_width_hz: float, count: int, lo_hz: float, hi_hz: float) -> tuple[int, int]:
+        first = max(0, int(math.floor((lo_hz - hz_low) / bin_width_hz)))
+        last = min(count, int(math.ceil((hi_hz - hz_low) / bin_width_hz)))
+        return first, last
+
+    for sample in samples:
+        if not sample.db_values:
+            continue
+        values = np.asarray(sample.db_values, dtype=np.float32)
+        hz_low = int(sample.hz_low)
+        hz_high = int(sample.hz_high)
+        if hz_high <= hz_low:
+            continue
+        bin_width_hz = float(hz_high - hz_low) / float(values.size)
+        median_db = float(np.median(values))
+        for channel in range(11, 27):
+            center = channel_to_center_freq(channel)
+            first, last = span_indices(
+                hz_low,
+                bin_width_hz,
+                values.size,
+                float(center) - half_channel_hz,
+                float(center) + half_channel_hz,
+            )
+            if first >= last:
+                continue
+            guard_first, guard_last = span_indices(
+                hz_low,
+                bin_width_hz,
+                values.size,
+                float(center) - half_guard_hz,
+                float(center) + half_guard_hz,
+            )
+            inband = values[first:last]
+            guard_parts = []
+            if guard_first < first:
+                guard_parts.append(values[guard_first:first])
+            if last < guard_last:
+                guard_parts.append(values[last:guard_last])
+            guard = np.concatenate(guard_parts) if guard_parts else values
+            peak_db = float(np.max(inband))
+            mean_db = float(np.mean(inband))
+            guard_median_db = float(np.median(guard)) if guard.size else median_db
+            excess_db = peak_db - median_db
+            shape_db = mean_db - guard_median_db
+            entry = scores.setdefault(
+                channel,
+                {
+                    "peak_db": -999.0,
+                    "mean_db": -999.0,
+                    "excess_db": -999.0,
+                    "shape_db": -999.0,
+                    "guard_db": -999.0,
+                    "hits": 0.0,
+                },
+            )
+            entry["peak_db"] = max(float(entry["peak_db"]), float(peak_db))
+            entry["mean_db"] = max(float(entry["mean_db"]), float(mean_db))
+            entry["excess_db"] = max(float(entry["excess_db"]), float(excess_db))
+            entry["shape_db"] = max(float(entry["shape_db"]), float(shape_db))
+            entry["guard_db"] = max(float(entry["guard_db"]), float(guard_median_db))
+            entry["hits"] = float(entry.get("hits", 0.0)) + 1.0
+    return scores
+
+
+def _iq_fft_channel_scores(
+    raw_chunks: list[bytes],
+    *,
+    center_freq_hz: int,
+    sample_rate_sps: int,
+    fft_n: int,
+    channel_bw_hz: int,
+    guard_bw_hz: int,
+) -> dict[int, dict[str, float]]:
+    from .dsp import iq_i8_to_complex
+
+    fft_n = max(256, int(fft_n))
+    if fft_n & (fft_n - 1):
+        fft_n = 1 << (fft_n.bit_length() - 1)
+    window = np.hanning(fft_n).astype(np.float32)
+    half_channel_hz = max(1.0, float(channel_bw_hz) / 2.0)
+    half_guard_hz = max(half_channel_hz, float(guard_bw_hz) / 2.0)
+    freqs = np.fft.fftshift(np.fft.fftfreq(fft_n, d=1.0 / float(sample_rate_sps))) + float(center_freq_hz)
+    channel_masks: dict[int, tuple[np.ndarray, np.ndarray]] = {}
+    for channel in range(11, 27):
+        center = float(channel_to_center_freq(channel))
+        inband = (freqs >= center - half_channel_hz) & (freqs <= center + half_channel_hz)
+        guard = (freqs >= center - half_guard_hz) & (freqs <= center + half_guard_hz) & ~inband
+        if np.any(inband):
+            channel_masks[channel] = (inband, guard)
+
+    scores: dict[int, dict[str, float]] = {}
+    for raw in raw_chunks:
+        iq = iq_i8_to_complex(raw)
+        if iq.size < fft_n:
+            continue
+        usable = (iq.size // fft_n) * fft_n
+        # Keep the scout cheap; enough frames to classify occupancy, not every sample.
+        frames = iq[:usable].reshape(-1, fft_n)
+        if frames.shape[0] > 8:
+            stride = max(1, frames.shape[0] // 8)
+            frames = frames[::stride][:8]
+        spectrum = np.fft.fftshift(np.fft.fft(frames * window, axis=1), axes=1)
+        power_db = 10.0 * np.log10(np.maximum(np.mean(np.abs(spectrum) ** 2, axis=0), 1e-20))
+        band_median_db = float(np.median(power_db))
+        for channel, (inband, guard) in channel_masks.items():
+            inband_values = power_db[inband]
+            guard_values = power_db[guard] if np.any(guard) else power_db
+            peak_db = float(np.max(inband_values))
+            mean_db = float(np.mean(inband_values))
+            guard_median_db = float(np.median(guard_values))
+            excess_db = peak_db - band_median_db
+            shape_db = mean_db - guard_median_db
+            entry = scores.setdefault(
+                channel,
+                {
+                    "peak_db": -999.0,
+                    "mean_db": -999.0,
+                    "excess_db": -999.0,
+                    "shape_db": -999.0,
+                    "guard_db": -999.0,
+                    "hits": 0.0,
+                },
+            )
+            entry["peak_db"] = max(float(entry["peak_db"]), peak_db)
+            entry["mean_db"] = max(float(entry["mean_db"]), mean_db)
+            entry["excess_db"] = max(float(entry["excess_db"]), excess_db)
+            entry["shape_db"] = max(float(entry["shape_db"]), shape_db)
+            entry["guard_db"] = max(float(entry["guard_db"]), guard_median_db)
+            entry["hits"] = float(entry.get("hits", 0.0)) + 1.0
+    return scores
 
 
 def _resolve_device(client: GatewayClient, requested_device_id: str | None) -> GatewayDevice:
@@ -649,7 +878,8 @@ def _run_wideband_listen(args: argparse.Namespace) -> int:
         f"channels_per_window={[len(window.channels) for window in windows]} "
         f"start_window={window_index} scan_all={int(bool(args.scan_all_windows))} "
         f"adaptive={int(bool(args.adaptive_scan) and not bool(args.scan_all_windows))} "
-        f"follow_energy_only={int(bool(args.follow_energy_only))}",
+        f"follow_energy_only={int(bool(args.follow_energy_only))} "
+        f"discovery_sweep_s={float(args.discovery_sweep_s):.3f}",
         file=sys.stderr,
     )
     for window in windows:
@@ -678,16 +908,29 @@ def _run_wideband_listen(args: argparse.Namespace) -> int:
     adaptive_scan = bool(args.adaptive_scan) and not bool(args.scan_all_windows)
     discovery_mode = adaptive_scan
     discovery_cursor = 0
+    if adaptive_scan:
+        # Discovery should sweep every window from the bottom of the band before
+        # choosing active dwell targets. The requested channel remains the
+        # fallback/anchor if no activity is found.
+        window_index = 0
     active_cursor = 0
     last_discovery_completed_at = 0.0
     active_channels: dict[int, dict[str, float]] = {}
     active_decode_channels: set[int] = {requested_channel}
+    locked_channel: int | None = None
+    locked_until = 0.0
 
     def prune_active_channels(now: float) -> None:
         ttl_s = max(1.0, float(args.activity_ttl_s))
         for channel in list(active_channels.keys()):
             if now - float(active_channels[channel].get("last_seen", 0.0)) > ttl_s:
                 del active_channels[channel]
+
+    def discovery_dwell_target_s() -> float:
+        per_window = float(args.discovery_dwell_s)
+        if per_window > 0.0:
+            return max(0.1, per_window)
+        return max(0.1, float(args.discovery_sweep_s) / float(max(1, len(windows))))
 
     def record_activity(channel: int, burst: Burst, *, decoded_frame: bool = False) -> None:
         duration_ms = burst.duration_seconds * 1000.0
@@ -714,7 +957,42 @@ def _run_wideband_listen(args: argparse.Namespace) -> int:
                 return index
         return window_index
 
+    def current_frame_lock(now: float | None = None) -> int | None:
+        nonlocal locked_channel, locked_until
+        if not bool(args.lock_on_frame) or locked_channel is None:
+            return None
+        check_time = time.monotonic() if now is None else now
+        if check_time >= locked_until:
+            if args.debug_bursts:
+                print(
+                    f"wideband_unlock ch={locked_channel} reason=ttl_expired",
+                    file=sys.stderr,
+                    flush=True,
+                )
+            locked_channel = None
+            locked_until = 0.0
+            return None
+        return int(locked_channel)
+
+    def set_frame_lock(channel: int) -> None:
+        nonlocal locked_channel, locked_until
+        if not bool(args.lock_on_frame):
+            return
+        now = time.monotonic()
+        previous = current_frame_lock(now)
+        locked_channel = int(channel)
+        locked_until = now + max(1.0, float(args.frame_lock_ttl_s))
+        if args.debug_bursts and previous != int(channel):
+            print(
+                f"wideband_lock ch={channel} ttl_s={max(1.0, float(args.frame_lock_ttl_s)):.1f}",
+                file=sys.stderr,
+                flush=True,
+            )
+
     def active_window_indices(now: float) -> list[int]:
+        locked = current_frame_lock(now)
+        if locked is not None:
+            return [window_for_channel(locked)]
         prune_active_channels(now)
         scores: dict[int, float] = {}
         for channel, data in active_channels.items():
@@ -724,6 +1002,7 @@ def _run_wideband_listen(args: argparse.Namespace) -> int:
             scores[index] = (
                 scores.get(index, 0.0)
                 + (float(data.get("frames", 0.0)) * 100.0)
+                + (float(data.get("fft", 0.0)) * 50.0)
                 + float(data.get("score", 0.0))
             )
         if not scores:
@@ -737,6 +1016,11 @@ def _run_wideband_listen(args: argparse.Namespace) -> int:
         ]
 
     def channels_for_window(index: int) -> set[int]:
+        locked = current_frame_lock()
+        if locked is not None and locked in windows[index].channels:
+            return {locked}
+        if bool(args.decode_all_channels):
+            return set(int(channel) for channel in windows[index].channels)
         now = time.monotonic()
         prune_active_channels(now)
         candidates = [
@@ -744,6 +1028,13 @@ def _run_wideband_listen(args: argparse.Namespace) -> int:
             for channel in active_channels
             if int(channel) in windows[index].channels
         ]
+        if not bool(args.follow_energy_only):
+            candidates = [
+                channel
+                for channel in candidates
+                if channel == requested_channel
+                or float(active_channels.get(int(channel), {}).get("frames", 0.0)) > 0.0
+            ]
         if not candidates and requested_channel in windows[index].channels:
             return {requested_channel}
         max_channels = max(1, int(args.max_active_decode_channels))
@@ -793,6 +1084,101 @@ def _run_wideband_listen(args: argparse.Namespace) -> int:
                 f"frames={int(data.get('frames', 0.0))},age={age:.1f}s"
             )
         return ";".join(parts)
+
+    def fft_discover_active_channels() -> bool:
+        if str(args.discovery_mode) == "iq":
+            return False
+        sweep_id = ""
+        try:
+            handle = client.start_sweep(
+                SweepConfig(
+                    device_id=device.id,
+                    start_freq_hz=channel_to_center_freq(11) - 2_000_000,
+                    stop_freq_hz=channel_to_center_freq(26) + 2_000_000,
+                    bin_width_hz=int(args.fft_sweep_bin_width_hz),
+                    lna_gain_db=initial_config.lna_gain_db,
+                    vga_gain_db=initial_config.vga_gain_db,
+                    amp_enable=initial_config.amp_enable,
+                )
+            )
+            sweep_id = handle.sweep_id
+            sweep_started_at = time.monotonic()
+            first_sample_at = 0.0
+            hard_deadline = sweep_started_at + max(2.0, float(args.discovery_sweep_s) + 5.0)
+            samples: list[SweepSample] = []
+            while time.monotonic() < hard_deadline:
+                time.sleep(0.1)
+                samples = client.sweep_samples(sweep_id)
+                if samples and first_sample_at <= 0.0:
+                    first_sample_at = time.monotonic()
+                if first_sample_at > 0.0 and time.monotonic() - first_sample_at >= max(0.2, float(args.discovery_sweep_s)):
+                    break
+            scores = _fft_sweep_channel_scores(
+                samples,
+                channel_bw_hz=int(args.fft_channel_bw_hz),
+                guard_bw_hz=int(args.fft_guard_bw_hz),
+            )
+            ranked = [
+                (channel, data)
+                for channel, data in scores.items()
+                if float(data.get("peak_db", -999.0)) >= float(args.fft_min_power_db)
+                and float(data.get("excess_db", -999.0)) >= float(args.fft_active_threshold_db)
+                and float(data.get("shape_db", -999.0)) >= float(args.fft_shape_threshold_db)
+            ]
+            ranked.sort(
+                key=lambda item: (
+                    float(item[1].get("shape_db", -999.0)),
+                    float(item[1].get("excess_db", -999.0)),
+                    float(item[1].get("peak_db", -999.0)),
+                ),
+                reverse=True,
+            )
+            selected = ranked[: max(1, int(args.fft_top_channels))]
+            if not selected:
+                if args.debug_bursts:
+                    print(
+                        f"fft_discovery active=none samples={len(samples)} "
+                        f"threshold_db={float(args.fft_active_threshold_db):.1f} "
+                        f"shape_threshold_db={float(args.fft_shape_threshold_db):.1f} "
+                        f"min_power_db={float(args.fft_min_power_db):.1f}",
+                        file=sys.stderr,
+                        flush=True,
+                    )
+                return False
+            now = time.monotonic()
+            active_channels.clear()
+            for channel, data in selected:
+                entry = active_channels.setdefault(
+                    int(channel),
+                    {"score": 0.0, "last_seen": now, "bursts": 0.0, "frames": 0.0},
+                )
+                entry["score"] = max(1.0, float(data.get("excess_db", 0.0)))
+                entry["last_seen"] = now
+                entry["bursts"] = max(1.0, float(data.get("hits", 0.0)))
+                entry["fft"] = 1.0
+            if args.debug_bursts:
+                summary = ";".join(
+                    f"ch{channel}:peak={float(data.get('peak_db', -999.0)):.1f},"
+                    f"excess={float(data.get('excess_db', -999.0)):.1f},"
+                    f"shape={float(data.get('shape_db', -999.0)):.1f}"
+                    for channel, data in selected
+                )
+                print(
+                    f"fft_discovery active={summary} samples={len(samples)}",
+                    file=sys.stderr,
+                    flush=True,
+                )
+            return True
+        except Exception as exc:
+            if str(args.discovery_mode) == "fft":
+                raise
+            if args.debug_bursts:
+                print(f"fft_discovery unavailable error={exc}; falling back to iq discovery", file=sys.stderr, flush=True)
+            return False
+        finally:
+            if sweep_id:
+                with contextlib.suppress(Exception):
+                    client.stop_sweep(sweep_id)
 
     def selected_center_channel(window, decode_channels: set[int]) -> int | None:
         candidates = [channel for channel in decode_channels if int(channel) in window.channels]
@@ -856,6 +1242,8 @@ def _run_wideband_listen(args: argparse.Namespace) -> int:
                 continue
             emitted += 1
             record_activity(channel, burst, decoded_frame=True)
+            if bool(getattr(frame, "fcs_ok", False)):
+                set_frame_lock(channel)
             _emit_frame(frame, json_mode=bool(args.json))
             if args.max_frames and emitted >= args.max_frames:
                 return True
@@ -900,6 +1288,14 @@ def _run_wideband_listen(args: argparse.Namespace) -> int:
         pending.add(executor.submit(decode_live, channel, burst))
         return False
 
+    if adaptive_scan and fft_discover_active_channels():
+        discovery_mode = False
+        discovery_cursor = 0
+        active_cursor = 0
+        last_discovery_completed_at = time.monotonic()
+        active_indices = active_window_indices(last_discovery_completed_at)
+        window_index = active_indices[0] if active_indices else window_for_channel(requested_channel)
+
     executor = ThreadPoolExecutor(max_workers=live_workers)
     try:
         while True:
@@ -909,7 +1305,7 @@ def _run_wideband_listen(args: argparse.Namespace) -> int:
             if adaptive_scan:
                 if discovery_mode:
                     active_decode_channels = set()
-                    dwell_target_s = max(0.1, float(args.discovery_dwell_s))
+                    dwell_target_s = discovery_dwell_target_s()
                     mode_label = "discover"
                 else:
                     active_decode_channels = channels_for_window(window_index)
@@ -989,10 +1385,16 @@ def _run_wideband_listen(args: argparse.Namespace) -> int:
                                         )
                             else:
                                 now = time.monotonic()
-                                if now - last_discovery_completed_at >= max(1.0, float(args.rescan_interval_s)):
+                                locked = current_frame_lock(now)
+                                if locked is not None:
+                                    active_indices = [window_for_channel(locked)]
+                                    active_cursor = 0
+                                    window_index = active_indices[0]
+                                elif now - last_discovery_completed_at >= max(1.0, float(args.rescan_interval_s)):
                                     discovery_mode = True
                                     discovery_cursor = 0
                                     window_index = 0
+                                    active_channels.clear()
                                     if args.debug_bursts:
                                         print(
                                             f"wideband_rescan active={active_summary()}",
@@ -1011,7 +1413,7 @@ def _run_wideband_listen(args: argparse.Namespace) -> int:
                         if adaptive_scan:
                             if discovery_mode:
                                 active_decode_channels = set()
-                                dwell_target_s = max(0.1, float(args.discovery_dwell_s))
+                                dwell_target_s = discovery_dwell_target_s()
                                 mode_label = "discover"
                             else:
                                 active_decode_channels = channels_for_window(window_index)
@@ -1072,6 +1474,195 @@ def _run_wideband_listen(args: argparse.Namespace) -> int:
         for future in pending:
             future.cancel()
         executor.shutdown(wait=False, cancel_futures=True)
+
+
+def _run_dual_sdr_listen(args: argparse.Namespace) -> int:
+    client = GatewayClient(base_url=args.base_url, token=args.token)
+    scout_device = _resolve_device(client, args.scout_device_id)
+    demod_device = _resolve_device(client, args.demod_device_id)
+    scout_rate = min(int(args.scout_sample_rate_sps), int(scout_device.max_sample_rate_sps))
+    all_scout_windows = build_wideband_window_plans(sample_rate_sps=scout_rate)
+    if int(args.scout_center_freq_hz) > 0:
+        scout_windows = [
+            WidebandWindowPlan(
+                index=0,
+                center_freq_hz=int(args.scout_center_freq_hz),
+                sample_rate_sps=scout_rate,
+                channels=tuple(range(11, 27)),
+            )
+        ]
+    elif bool(args.scout_all_windows):
+        scout_windows = all_scout_windows
+    else:
+        preferred_channel = int(args.channel)
+        scout_windows = [next((window for window in all_scout_windows if preferred_channel in window.channels), all_scout_windows[-1])]
+    print(
+        f"dual_sdr scout={scout_device.id} demod={demod_device.id} scout_sr={scout_rate} "
+        f"windows={len(scout_windows)} all_windows={len(all_scout_windows)} demod_sr={int(args.demod_sample_rate_sps)}",
+        file=sys.stderr,
+        flush=True,
+    )
+    for window in scout_windows:
+        print(
+            f"scout_window[{window.index}] center={window.center_freq_hz} channels={list(window.channels)}",
+            file=sys.stderr,
+            flush=True,
+        )
+
+    scout_stream: StreamHandle | None = None
+
+    def scout_config_for_window(window: WidebandWindowPlan) -> StreamConfig:
+        return _stream_config_for_device(
+            device=scout_device,
+            center_freq_hz=window.center_freq_hz,
+            sample_rate_sps=scout_rate,
+            lna_gain_db=args.scout_lna_gain_db,
+            vga_gain_db=args.scout_vga_gain_db,
+            amp_enable=False,
+            baseband_filter_hz=int(args.scout_baseband_filter_hz) if int(args.scout_baseband_filter_hz) > 0 else scout_rate,
+        )
+
+    def scout_stream_for_window(window: WidebandWindowPlan) -> StreamHandle:
+        nonlocal scout_stream
+        config = scout_config_for_window(window)
+        if scout_stream is None:
+            scout_stream = client.start_stream(config)
+            return scout_stream
+        if int(scout_stream.center_freq_hz) != int(window.center_freq_hz):
+            scout_stream = client.retune_stream(scout_stream.stream_id, config)
+        return scout_stream
+
+    def scout_once() -> list[tuple[int, dict[str, float]]]:
+        nonlocal scout_stream
+        all_scores: dict[int, dict[str, float]] = {}
+        scout_started = time.perf_counter()
+        total_chunks = 0
+        for window in scout_windows:
+            chunks: list[bytes] = []
+            try:
+                stream = scout_stream_for_window(window)
+                deadline = time.monotonic() + max(0.1, float(args.scout_sweep_s) / float(max(1, len(scout_windows))))
+                for chunk in client.iter_iq_chunks(stream.stream_id):
+                    chunks.append(chunk)
+                    total_chunks += 1
+                    if len(chunks) >= int(args.scout_chunk_limit) or time.monotonic() >= deadline:
+                        break
+            except Exception as exc:
+                nonlocal_scout = scout_stream
+                if nonlocal_scout is not None:
+                    with contextlib.suppress(Exception):
+                        client.stop_stream(nonlocal_scout.stream_id)
+                scout_stream = None
+                if args.debug_bursts:
+                    print(f"dual_sdr_scout_error window={window.index} error={exc}", file=sys.stderr, flush=True)
+                continue
+            scores = _iq_fft_channel_scores(
+                chunks,
+                center_freq_hz=window.center_freq_hz,
+                sample_rate_sps=scout_rate,
+                fft_n=int(args.fft_n),
+                channel_bw_hz=int(args.fft_channel_bw_hz),
+                guard_bw_hz=int(args.fft_guard_bw_hz),
+            )
+            for channel, data in scores.items():
+                if int(channel) not in window.channels:
+                    continue
+                current = all_scores.setdefault(channel, dict(data))
+                for key in ("peak_db", "mean_db", "excess_db", "shape_db", "guard_db"):
+                    current[key] = max(float(current.get(key, -999.0)), float(data.get(key, -999.0)))
+                current["hits"] = float(current.get("hits", 0.0)) + float(data.get("hits", 0.0))
+        ranked = [
+            (channel, data)
+            for channel, data in all_scores.items()
+            if float(data.get("peak_db", -999.0)) >= float(args.fft_min_power_db)
+            and float(data.get("excess_db", -999.0)) >= float(args.fft_active_threshold_db)
+            and float(data.get("shape_db", -999.0)) >= float(args.fft_shape_threshold_db)
+        ]
+        ranked.sort(
+            key=lambda item: (
+                float(item[1].get("shape_db", -999.0)),
+                float(item[1].get("excess_db", -999.0)),
+                float(item[1].get("peak_db", -999.0)),
+            ),
+            reverse=True,
+        )
+        selected = ranked[: max(1, int(args.fft_top_channels))]
+        if args.debug_bursts:
+            scout_ms = (time.perf_counter() - scout_started) * 1000.0
+            summary = (
+                ";".join(
+                    f"ch{channel}:peak={float(data.get('peak_db', -999.0)):.1f},"
+                    f"excess={float(data.get('excess_db', -999.0)):.1f},"
+                    f"shape={float(data.get('shape_db', -999.0)):.1f}"
+                    for channel, data in selected
+                )
+                or "none"
+            )
+            print(f"dual_sdr_active scout_ms={scout_ms:.1f} chunks={total_chunks} {summary}", file=sys.stderr, flush=True)
+        return selected
+
+    def demod_channel(channel: int) -> None:
+        cmd = [
+            sys.executable,
+            "-m",
+            "zigbee_802154",
+            "listen",
+            "--base-url",
+            client.base_url,
+            "--device-id",
+            demod_device.id,
+            "--channel",
+            str(int(channel)),
+            "--sample-rate-sps",
+            str(int(args.demod_sample_rate_sps)),
+            "--lna-gain-db",
+            str(int(args.demod_lna_gain_db)),
+            "--vga-gain-db",
+            str(int(args.demod_vga_gain_db)),
+            "--amp-enable" if bool(args.demod_amp_enable) else "--no-amp-enable",
+            "--require-fcs",
+        ]
+        if client.token:
+            cmd.extend(["--token", client.token])
+        if args.debug_bursts:
+            cmd.append("--debug-bursts")
+        else:
+            cmd.append("--no-debug-bursts")
+        if args.json:
+            cmd.append("--json")
+        print(f"dual_sdr_demod ch={int(channel)} dwell_s={float(args.demod_dwell_s):.3f}", file=sys.stderr, flush=True)
+        proc = subprocess.Popen(cmd, start_new_session=True)
+        deadline = time.monotonic() + max(0.5, float(args.demod_dwell_s))
+        try:
+            while proc.poll() is None and time.monotonic() < deadline:
+                time.sleep(0.1)
+        finally:
+            if proc.poll() is None:
+                with contextlib.suppress(ProcessLookupError):
+                    os.killpg(proc.pid, signal.SIGTERM)
+                try:
+                    proc.wait(timeout=2)
+                except subprocess.TimeoutExpired:
+                    with contextlib.suppress(ProcessLookupError):
+                        os.killpg(proc.pid, signal.SIGKILL)
+                    proc.wait(timeout=1)
+
+    try:
+        while True:
+            selected = scout_once()
+            if not selected:
+                if args.once:
+                    return 0
+                time.sleep(0.25)
+                continue
+            for channel, _data in selected:
+                demod_channel(channel)
+            if args.once:
+                return 0
+    finally:
+        if scout_stream is not None:
+            with contextlib.suppress(Exception):
+                client.stop_stream(scout_stream.stream_id)
 
 
 def _run_decode_file(args: argparse.Namespace) -> int:
@@ -1173,6 +1764,8 @@ def main(argv: list[str] | None = None) -> int:
         return _run_listen(args)
     if args.command == "wideband-listen":
         return _run_wideband_listen(args)
+    if args.command == "dual-sdr-listen":
+        return _run_dual_sdr_listen(args)
     if args.command == "decode-file":
         return _run_decode_file(args)
     parser.error(f"unsupported command: {args.command}")

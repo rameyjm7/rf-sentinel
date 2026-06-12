@@ -125,11 +125,11 @@
       }
 
       .toolbar {
-        display: grid;
-        grid-template-columns: repeat(12, minmax(0, 1fr));
-        gap: 8px;
-        align-items: end;
-        padding: 8px;
+        display: flex;
+        align-items: center;
+        flex-wrap: wrap;
+        gap: 12px;
+        padding: 9px 10px;
         border: 1px solid var(--line);
         border-radius: 8px;
         background: rgba(255, 250, 240, 0.9);
@@ -159,14 +159,14 @@
       }
 
       .toolbar-actions {
-        grid-column: span 3;
+        margin-left: auto;
         display: flex;
-        align-items: end;
+        align-items: center;
         gap: 8px;
       }
 
       .toolbar-actions button {
-        flex: 1 1 0;
+        min-width: 126px;
       }
 
       select,
@@ -279,6 +279,46 @@
         background: #fffdf8;
       }
 
+      .radio-select {
+        min-width: 230px;
+        flex: 1 1 230px;
+      }
+
+      .protocol-select {
+        flex: 2 1 420px;
+      }
+
+      .auto-plan {
+        display: flex;
+        align-items: center;
+        gap: 10px;
+        min-width: 0;
+      }
+
+      .auto-plan strong {
+        white-space: nowrap;
+        font-size: 0.95rem;
+      }
+
+      .plan-chips {
+        display: flex;
+        flex-wrap: wrap;
+        gap: 6px;
+      }
+
+      .plan-chip {
+        display: inline-flex;
+        align-items: center;
+        min-height: 24px;
+        padding: 3px 8px;
+        border-radius: 999px;
+        color: var(--ink);
+        border: 1px solid rgba(215, 208, 191, 0.85);
+        background: rgba(255, 253, 248, 0.7);
+        font-size: 0.72rem;
+        font-weight: 800;
+      }
+
       .compact-input {
         min-width: 0;
       }
@@ -379,6 +419,46 @@
         margin-bottom: 4px;
       }
 
+      .ism-legend {
+        display: flex;
+        justify-content: center;
+        flex-wrap: wrap;
+        gap: 6px;
+        margin-bottom: 6px;
+        color: var(--muted);
+        font-size: 0.68rem;
+        font-weight: 800;
+      }
+
+      .legend-pill {
+        display: inline-flex;
+        align-items: center;
+        gap: 5px;
+        padding: 3px 7px;
+        border: 1px solid var(--line);
+        border-radius: 999px;
+        background: #fffdf8;
+      }
+
+      .legend-dot {
+        width: 8px;
+        height: 8px;
+        border-radius: 50%;
+        background: #2f75d7;
+      }
+
+      .legend-dot.ble {
+        background: #199447;
+      }
+
+      .legend-dot.zigbee {
+        background: #d08b19;
+      }
+
+      .legend-dot.tpms {
+        background: #6b7280;
+      }
+
       .channel-chart {
         display: grid;
         grid-template-columns: 38px minmax(0, 1fr);
@@ -451,6 +531,21 @@
           #eef2ef;
       }
 
+      .bar-slot::before,
+      .bar-slot::after {
+        content: "";
+        position: absolute;
+        top: 0;
+        bottom: 0;
+        pointer-events: none;
+      }
+
+      .bar-slot::before {
+        left: calc(50% - 1px);
+        width: 1px;
+        background: rgba(47, 117, 215, 0.2);
+      }
+
       .bar-slot.ble-adv {
         background:
           repeating-linear-gradient(180deg, rgba(42, 130, 76, 0.18) 0 1px, transparent 1px 28px),
@@ -459,12 +554,36 @@
         box-shadow: inset 0 0 0 1px rgba(42, 130, 76, 0.28);
       }
 
+      .bar-slot.ble-data {
+        box-shadow: inset 0 0 0 1px rgba(25, 148, 71, 0.12);
+      }
+
+      .bar-slot.ble-data::before {
+        background: rgba(25, 148, 71, 0.26);
+      }
+
+      .bar-slot.zigbee-center::after {
+        left: calc(50% - 2px);
+        width: 4px;
+        border-radius: 4px 4px 0 0;
+        background: rgba(208, 139, 25, 0.34);
+        box-shadow: 0 0 0 1px rgba(208, 139, 25, 0.36);
+      }
+
       .channel-bar.active {
         background: linear-gradient(180deg, #6fc1ff, #0759c8);
       }
 
       .channel-bar.ble-adv {
         background: linear-gradient(180deg, #86e06d, #199447);
+      }
+
+      .channel-bar.zigbee-active {
+        background: linear-gradient(180deg, #ffc857, #cc7a00);
+      }
+
+      .channel-bar.ble-active {
+        background: linear-gradient(180deg, #8ff0a4, #168a42);
       }
 
       .channel-bar.current {
@@ -484,6 +603,10 @@
       .channel-top.ble-adv,
       .channel-bottom.ble-adv {
         color: #1f8f4b;
+      }
+
+      .channel-top.zigbee-center {
+        color: #b77510;
       }
 
       .events {
@@ -644,6 +767,17 @@
         font-variant-numeric: tabular-nums;
       }
 
+      .decoded-text {
+        margin-top: 8px;
+        padding: 8px 10px;
+        border-left: 3px solid var(--teal);
+        border-radius: 6px;
+        background: rgba(8, 123, 131, 0.1);
+        color: var(--ink);
+        font-size: 0.92rem;
+        font-weight: 800;
+      }
+
       .event {
         display: grid;
         grid-template-columns: minmax(0, 1fr) auto;
@@ -784,11 +918,13 @@
         }
 
         .toolbar {
-          grid-template-columns: 1fr;
+          align-items: stretch;
+          flex-direction: column;
         }
 
         .toolbar-actions {
-          grid-column: auto;
+          width: 100%;
+          margin-left: 0;
         }
 
         .event {
@@ -806,7 +942,7 @@
       <header>
         <div>
           <h1>RF Sentinel</h1>
-          <div class="subtitle">SDR gateway scanner for BLE advertisements and BT Classic channel evidence</div>
+          <div class="subtitle">Passive RF intelligence for discovering, identifying, and tracking wireless activity in the local spectrum.</div>
         </div>
         <div class="status-pill">
           <span class="dot" id="liveDot"></span>
@@ -815,66 +951,54 @@
       </header>
 
       <form class="toolbar" id="scanForm">
-        <label class="span-2">
-          BTC SDR
+        <label class="radio-select">
+          Radio A
           <select id="btcDeviceSelect"></select>
         </label>
-        <label class="span-2">
-          BTLE SDR
+        <label class="radio-select">
+          Radio B
           <select id="btleDeviceSelect"></select>
         </label>
-        <label class="span-2">
-          BTC Engine
-          <select id="btcEngineSelect">
-            <option value="btcsniffer">btcsniffer C++</option>
-            <option value="python">Python C++-style</option>
-          </select>
-        </label>
-        <label class="span-2">
-          Protocol
-          <span class="protocol-toggles">
+        <select id="btcEngineSelect" hidden>
+          <option value="btcsniffer">btcsniffer C++</option>
+          <option value="python">Python C++-style</option>
+        </select>
+        <label class="protocol-select">
+          Protocol Sweep
+          <div class="protocol-toggles">
             <span class="toggle"><input id="btcInput" type="checkbox" checked /> BTC</span>
-            <span class="toggle"><input id="btleInput" type="checkbox" /> BTLE</span>
-          </span>
+            <span class="toggle"><input id="btleInput" type="checkbox" checked /> BLE</span>
+            <span class="toggle"><input id="zigbeeInput" type="checkbox" checked /> Zigbee</span>
+            <span class="toggle"><input id="tpmsInput" type="checkbox" checked /> TPMS</span>
+          </div>
         </label>
-        <label class="span-1 compact-input">
-          BTC Center MHz
-          <input id="btcCenterInput" type="number" min="2402" max="2480" step="0.5" value="2442" />
-        </label>
-        <label class="span-2">
-          BTC Target MAC
-          <input id="btcTargetMacInput" type="text" inputmode="latin" placeholder="34:C9:F0:88:B5:97" />
-        </label>
-        <label class="span-1 toggle-label">
-          BTC Sweep
-          <span class="toggle"><input id="btcSweepInput" type="checkbox" checked /> auto</span>
-        </label>
-        <label class="span-2">
-          BTC Gain
+        <div class="auto-plan">
+          <strong>Two-SDR autonomous sweep</strong>
+          <div class="plan-chips">
+            <span class="plan-chip">Both radios rotate enabled protocols</span>
+            <span class="plan-chip">Uncheck noisy stacks anytime</span>
+          </div>
+        </div>
+        <input id="btcCenterInput" type="number" min="2402" max="2480" step="0.5" value="2442" hidden />
+        <input id="sampleRateInput" type="number" min="1" max="60" step="1" value="60" hidden />
+        <input id="btcTargetMacInput" type="text" inputmode="latin" value="" hidden />
+        <label class="span-2 hidden">
+          Dedicated SDR Gain
           <span class="slider-control">
             <input id="btcGainInput" type="range" min="0" max="102" step="1" value="72" />
             <span class="control-value" id="btcGainValue">L32 V40</span>
           </span>
         </label>
-        <label class="span-2">
-          BTLE Gain
+        <label class="span-2 hidden">
+          Hop SDR Gain
           <span class="slider-control">
             <input id="btleGainInput" type="range" min="0" max="102" step="1" value="56" />
             <span class="control-value" id="btleGainValue">L40 V16</span>
           </span>
         </label>
-        <label class="span-1 compact-input">
-          Dwell
-          <input id="hopDwellInput" type="number" min="0.25" max="30" step="0.05" value="0.25" />
-        </label>
-        <label class="span-2">
-          BTLE Adv CH
-          <select id="channelSelect"></select>
-        </label>
-        <label class="span-1 compact-input">
-          Rate MHz
-          <input id="sampleRateInput" type="number" min="1" max="60" step="1" value="60" />
-        </label>
+        <input id="hopDwellInput" type="number" min="0.25" max="30" step="0.05" value="0.25" hidden />
+        <select id="channelSelect" hidden></select>
+        <input id="btcSweepInput" type="checkbox" checked hidden />
         <div class="toolbar-actions">
           <button id="runToggleBtn" type="submit"><span class="material-symbols-rounded">play_arrow</span><span id="runToggleText">Start</span></button>
           <button id="clearBtn" class="secondary" type="button"><span class="material-symbols-rounded">delete_sweep</span>Clear</button>
@@ -885,24 +1009,14 @@
         <section class="panel">
           <h2>RF Health</h2>
           <div class="metrics">
-            <div class="metric"><span>RSSI</span><strong id="rssiMetric">-120.0</strong></div>
-            <div class="metric"><span>BTC RSSI</span><strong id="btcRssiMetric">-120.0</strong></div>
-            <div class="metric"><span>BTLE RSSI</span><strong id="btleRssiMetric">-120.0</strong></div>
-            <div class="metric"><span>BTC Chunks</span><strong id="btcChunksMetric">0</strong></div>
-            <div class="metric"><span>BTLE Chunks</span><strong id="btleChunksMetric">0</strong></div>
-            <div class="metric"><span>BTLE Adv CH</span><strong id="btleChannelMetric">37</strong></div>
-            <div class="metric"><span>Noise</span><strong id="noiseMetric">-120.0</strong></div>
-            <div class="metric"><span>Chunks</span><strong id="chunksMetric">0</strong></div>
-            <div class="metric"><span>Bursts</span><strong id="burstsMetric">0</strong></div>
-            <div class="metric"><span>BLE</span><strong id="bleMetric">0</strong></div>
-            <div class="metric"><span>Classic</span><strong id="classicMetric">0</strong></div>
-            <div class="metric"><span>Preamble</span><strong id="preambleMetric">0</strong></div>
-            <div class="metric"><span>Barker</span><strong id="barkerMetric">0</strong></div>
-            <div class="metric"><span>Access</span><strong id="accessMetric">0</strong></div>
-            <div class="metric"><span>Access Rejects</span><strong id="accessRejectMetric">0</strong></div>
-            <div class="metric btc-target-metric"><span>Target Near</span><strong id="targetNearMetric">0</strong></div>
-            <div class="metric btc-target-metric"><span>Best Dist</span><strong id="targetBestMetric">68</strong></div>
-            <div class="metric"><span>LAP</span><strong id="lapMetric">0</strong></div>
+            <div class="metric"><span>Dedicated SDR RSSI</span><strong id="btcRssiMetric">-120.0</strong></div>
+            <div class="metric"><span>Hop SDR RSSI</span><strong id="btleRssiMetric">-120.0</strong></div>
+            <div class="metric"><span>Total Detections</span><strong id="detectionsMetric">0</strong></div>
+            <div class="metric"><span>RF Bursts</span><strong id="burstsMetric">0</strong></div>
+            <div class="metric"><span>BLE Devices</span><strong id="bleMetric">0</strong></div>
+            <div class="metric"><span>BTC Evidence</span><strong id="classicMetric">0</strong></div>
+            <div class="metric"><span>Zigbee Frames</span><strong id="zigbeeMetric">0</strong></div>
+            <div class="metric"><span>TPMS Frames</span><strong id="tpmsMetric">0</strong></div>
           </div>
           <div class="spectrum" id="spectrum"></div>
         </section>
@@ -912,8 +1026,11 @@
             <h2>Detections</h2>
             <div class="section-tools">
               <div class="tabs">
-                <button class="tab-btn active" id="btcTabBtn" type="button">BTC</button>
+                <button class="tab-btn active" id="allTabBtn" type="button">All</button>
+                <button class="tab-btn" id="btcTabBtn" type="button">BTC</button>
                 <button class="tab-btn" id="btleTabBtn" type="button">BTLE</button>
+                <button class="tab-btn" id="zigbeeTabBtn" type="button">Zigbee</button>
+                <button class="tab-btn" id="tpmsTabBtn" type="button">TPMS</button>
               </div>
               <select class="view-select" id="detectionViewSelect">
                 <option value="cards">Cards</option>
@@ -924,8 +1041,14 @@
           </section>
 
           <section class="panel rssi-viewer">
-            <h2>Classic Channels</h2>
-            <div class="rssi-title">BT Classic channel</div>
+            <h2>2.4 GHz ISM Band</h2>
+            <div class="rssi-title">2402-2480 MHz protocol activity</div>
+            <div class="ism-legend">
+              <span class="legend-pill"><span class="legend-dot"></span>BT Classic 1 MHz channels</span>
+              <span class="legend-pill"><span class="legend-dot ble"></span>BLE adv/data</span>
+              <span class="legend-pill"><span class="legend-dot zigbee"></span>Zigbee / 802.15.4 centers</span>
+              <span class="legend-pill"><span class="legend-dot tpms"></span>TPMS is sub-GHz/off-chart</span>
+            </div>
             <div class="channel-chart">
               <div class="db-axis">
                 <span>-20</span>
@@ -946,9 +1069,10 @@
         </div>
 
         <section class="panel">
-          <h2 id="candidatePanelTitle">UAP Candidates</h2>
+          <h2 id="candidatePanelTitle">Most Interesting</h2>
           <div class="candidate-list" id="candidates"></div>
         </section>
+
       </main>
     </div>
 
@@ -961,6 +1085,8 @@
       const btcSweepInput = document.getElementById("btcSweepInput");
       const btcInput = document.getElementById("btcInput");
       const btleInput = document.getElementById("btleInput");
+      const zigbeeInput = document.getElementById("zigbeeInput");
+      const tpmsInput = document.getElementById("tpmsInput");
       const channelSelect = document.getElementById("channelSelect");
       const scanForm = document.getElementById("scanForm");
       const runToggleBtn = document.getElementById("runToggleBtn");
@@ -977,34 +1103,28 @@
       const spectrum = document.getElementById("spectrum");
       const channelChart = document.getElementById("channelChart");
       const identityTableWrap = document.getElementById("identityTableWrap");
+      const allTabBtn = document.getElementById("allTabBtn");
       const btcTabBtn = document.getElementById("btcTabBtn");
       const btleTabBtn = document.getElementById("btleTabBtn");
+      const zigbeeTabBtn = document.getElementById("zigbeeTabBtn");
+      const tpmsTabBtn = document.getElementById("tpmsTabBtn");
       const candidatePanelTitle = document.getElementById("candidatePanelTitle");
       const candidatesEl = document.getElementById("candidates");
       const detectionViewSelect = document.getElementById("detectionViewSelect");
-      let activeDetectionTab = "BTC";
+      let devicesReady = false;
+      let activeDetectionTab = "ALL";
       let tableSort = { key: "last_seen_at", direction: "desc" };
       const detectionGroupOpen = new Map();
       const btcTargetMetrics = Array.from(document.querySelectorAll(".btc-target-metric"));
       const metrics = {
-        rssi: document.getElementById("rssiMetric"),
         btcRssi: document.getElementById("btcRssiMetric"),
         btleRssi: document.getElementById("btleRssiMetric"),
-        btcChunks: document.getElementById("btcChunksMetric"),
-        btleChunks: document.getElementById("btleChunksMetric"),
-        btleChannel: document.getElementById("btleChannelMetric"),
-        noise: document.getElementById("noiseMetric"),
-        chunks: document.getElementById("chunksMetric"),
+        detections: document.getElementById("detectionsMetric"),
         bursts: document.getElementById("burstsMetric"),
         ble: document.getElementById("bleMetric"),
         classic: document.getElementById("classicMetric"),
-        preamble: document.getElementById("preambleMetric"),
-        barker: document.getElementById("barkerMetric"),
-        access: document.getElementById("accessMetric"),
-        accessReject: document.getElementById("accessRejectMetric"),
-        targetNear: document.getElementById("targetNearMetric"),
-        targetBest: document.getElementById("targetBestMetric"),
-        lap: document.getElementById("lapMetric"),
+        zigbee: document.getElementById("zigbeeMetric"),
+        tpms: document.getElementById("tpmsMetric"),
       };
 
       const bars = Array.from({ length: 40 }, (_, idx) => {
@@ -1019,19 +1139,43 @@
         [24, { channel: 38, mhz: 2426 }],
         [78, { channel: 39, mhz: 2480 }],
       ]);
+      const bleAdvIndexByChannel = new Map([[37, 0], [38, 24], [39, 78]]);
+      const bleDataByMhzIndex = new Map([
+        ...Array.from({ length: 11 }, (_, channel) => {
+          const mhz = 2404 + (channel * 2);
+          return [mhz - 2402, { channel, mhz }];
+        }),
+        ...Array.from({ length: 26 }, (_, idx) => {
+          const channel = 11 + idx;
+          const mhz = 2428 + (idx * 2);
+          return [mhz - 2402, { channel, mhz }];
+        }),
+      ]);
+      const zigbeeByMhzIndex = new Map(
+        Array.from({ length: 16 }, (_, idx) => {
+          const channel = 11 + idx;
+          const mhz = 2405 + (idx * 5);
+          return [mhz - 2402, { channel, mhz }];
+        })
+      );
       const channelBars = Array.from({ length: 79 }, (_, idx) => {
         const cell = document.createElement("div");
         cell.className = "channel-cell";
         const bleAdv = bleAdvByClassicChannel.get(idx);
+        const bleData = bleDataByMhzIndex.get(idx);
+        const zigbee = zigbeeByMhzIndex.get(idx);
 
         const top = document.createElement("div");
         top.className = "channel-top";
-        top.textContent = bleAdv ? `BLE ${bleAdv.channel}` : idx % 5 === 0 ? String(idx).padStart(2, "0") : "";
+        top.textContent = bleAdv ? `BLE ${bleAdv.channel}` : zigbee ? `Z${zigbee.channel}` : idx % 5 === 0 ? String(idx).padStart(2, "0") : "";
         top.classList.toggle("ble-adv", Boolean(bleAdv));
+        top.classList.toggle("zigbee-center", Boolean(zigbee));
 
         const slot = document.createElement("div");
         slot.className = "bar-slot";
         slot.classList.toggle("ble-adv", Boolean(bleAdv));
+        slot.classList.toggle("ble-data", Boolean(bleData));
+        slot.classList.toggle("zigbee-center", Boolean(zigbee));
 
         const bar = document.createElement("div");
         bar.className = "channel-bar";
@@ -1060,14 +1204,7 @@
       }
 
       function syncRateInputToSelection(forceCap = false) {
-        const mode = selectedMode();
         const current = Math.max(1, Number(sampleRateInput.value || 1));
-        if (mode === "ble") {
-          sampleRateInput.value = "2";
-          sampleRateInput.max = "2";
-          refreshPlannedStatusLabel();
-          return;
-        }
         const cap = btcMaxRateMhzForDevice(btcDeviceSelect.value);
         sampleRateInput.max = String(cap);
         sampleRateInput.value = String(forceCap ? cap : Math.max(1, Math.min(cap, current || cap)));
@@ -1075,50 +1212,39 @@
       }
 
       function setChannels() {
-        const mode = selectedMode();
         channelSelect.innerHTML = "";
-        if (mode === "classic" || mode === "both") {
-          [[37, 2402], [38, 2426], [39, 2480]].forEach(([ch, mhz]) => {
-            const opt = document.createElement("option");
-            opt.value = String(ch);
-            opt.textContent = `${ch} · ${mhz} MHz`;
-            channelSelect.appendChild(opt);
-          });
-        } else {
-          [
-            [37, 2402],
-            [38, 2426],
-            [39, 2480],
-          ].forEach(([ch, mhz]) => {
-            const opt = document.createElement("option");
-            opt.value = String(ch);
-            opt.textContent = `${ch} · ${mhz} MHz`;
-            channelSelect.appendChild(opt);
-          });
-        }
+        [[37, 2402], [38, 2426], [39, 2480]].forEach(([ch, mhz]) => {
+          const opt = document.createElement("option");
+          opt.value = String(ch);
+          opt.textContent = `${ch} · ${mhz} MHz`;
+          channelSelect.appendChild(opt);
+        });
         syncRateInputToSelection();
         refreshPlannedStatusLabel();
       }
 
       function selectedMode() {
-        if (btcInput.checked && btleInput.checked) return "both";
-        if (btcInput.checked) return "classic";
-        if (btleInput.checked) return "ble";
-        btcInput.checked = true;
-        return "classic";
+        return "sentinel";
+      }
+
+      function selectedProtocols() {
+        const protocols = [];
+        if (btcInput.checked) protocols.push("btc");
+        if (btleInput.checked) protocols.push("ble");
+        if (zigbeeInput.checked) protocols.push("zigbee");
+        if (tpmsInput.checked) protocols.push("tpms");
+        return protocols;
+      }
+
+      function selectedDeviceId(select) {
+        const value = String(select.value || "").trim();
+        const lower = value.toLowerCase();
+        if (!value || lower === "loading..." || lower.includes("unavailable") || lower.includes("no devices")) return "";
+        return value;
       }
 
       function syncModeCheckboxes(mode) {
-        if (mode === "both") {
-          btcInput.checked = true;
-          btleInput.checked = true;
-        } else if (mode === "ble") {
-          btcInput.checked = false;
-          btleInput.checked = true;
-        } else {
-          btcInput.checked = true;
-          btleInput.checked = false;
-        }
+        return mode;
       }
 
       function nextChannelValue() {
@@ -1137,6 +1263,8 @@
       }
 
       async function loadDevices() {
+        devicesReady = false;
+        runToggleBtn.disabled = true;
         btcDeviceSelect.innerHTML = "<option>Loading...</option>";
         btleDeviceSelect.innerHTML = "<option>Loading...</option>";
         try {
@@ -1163,15 +1291,36 @@
           if (!data.length) {
             btcDeviceSelect.innerHTML = "<option>No SDR devices</option>";
             btleDeviceSelect.innerHTML = "<option>No SDR devices</option>";
+            devicesReady = false;
+          } else {
+            devicesReady = true;
           }
         } catch (err) {
           btcDeviceSelect.innerHTML = `<option>${err.message}</option>`;
           btleDeviceSelect.innerHTML = `<option>${err.message}</option>`;
+          devicesReady = false;
+        } finally {
+          runToggleBtn.disabled = !devicesReady;
         }
       }
 
       function fmtDb(value) {
         return `${Number(value || -120).toFixed(1)}`;
+      }
+
+      function hasDb(value) {
+        const n = Number(value);
+        return Number.isFinite(n) && n > -119.9;
+      }
+
+      function fmtMaybeDb(value) {
+        return hasDb(value) ? `${Number(value).toFixed(1)} dBFS` : "RSSI unknown";
+      }
+
+      function decodedTextBlock(row) {
+        const text = String(row.decoded_text || "").trim();
+        if (!text) return "";
+        return `<div class="decoded-text">Decoded text: “${text}”</div>`;
       }
 
       function fmtFreq(hz) {
@@ -1303,7 +1452,7 @@
                 <td>${manufacturer || ""}</td>
                 <td>${Number(row.detections || 0).toLocaleString()}</td>
                 <td>${age(row.last_seen_at)}</td>
-                <td>${fmtDb(row.last_rssi_dbfs)}</td>
+                <td>${fmtMaybeDb(row.last_rssi_dbfs)}</td>
                 <td>${row.channel ?? ""}</td>
               </tr>
             `;
@@ -1337,6 +1486,8 @@
       }
 
       function manufacturerGroupLabel(row) {
+        if (row.protocol === "ZIGBEE") return "Zigbee / 802.15.4";
+        if (row.protocol === "TPMS") return "TPMS / Sub-GHz";
         const manufacturerName = canonicalBleVendorName(row.manufacturer?.company_name || "");
         if (manufacturerName) return manufacturerName;
         const uuidVendor = uuidVendorName(row);
@@ -1388,7 +1539,7 @@
       }
 
       function renderIdentityTable(rows) {
-        const filtered = rows.filter((row) => row.protocol === activeDetectionTab);
+        const filtered = activeDetectionTab === "ALL" ? rows : rows.filter((row) => row.protocol === activeDetectionTab);
         const displayRows = activeDetectionTab === "BTC" ? mergeBtcRows(filtered) : filtered;
         if (!displayRows.length) {
           identityTableWrap.innerHTML = `<div class="empty">No detections yet</div>`;
@@ -1427,7 +1578,7 @@
                   <span class="chips">
                     <span class="chip">${devices.length} device${devices.length === 1 ? "" : "s"}</span>
                     <span class="chip">${Number(detections || 0).toLocaleString()} detections</span>
-                    <span class="chip">${fmtDb(bestRssi)} dBFS</span>
+                    <span class="chip">${fmtMaybeDb(bestRssi)}</span>
                     <span class="chip">${age(lastSeen)}</span>
                   </span>
                 </summary>
@@ -1448,13 +1599,14 @@
                             ${deviceTypeDetail ? `<span class="chip">${deviceTypeDetail}</span>` : ""}
                             <span class="chip">${Number(row.detections || 0).toLocaleString()} hits</span>
                             <span class="chip">${age(row.last_seen_at)}</span>
-                            <span class="chip">${fmtDb(row.last_rssi_dbfs)} dBFS</span>
+                            <span class="chip">${fmtMaybeDb(row.last_rssi_dbfs)}</span>
                             <span class="chip">CH ${row.channel ?? ""}</span>
                             ${row.mac ? `<span class="chip">${row.mac}</span>` : ""}
                             ${uuid ? `<span class="chip">UUID ${uuid}</span>` : ""}
                             ${manufacturer ? `<span class="chip">${manufacturer}</span>` : ""}
                           </div>
-                          <p class="small">${row.identity_source || "Observed from SDR packet evidence."}</p>
+                          ${decodedTextBlock(row)}
+                          <p class="small">${row.identity_source || row.detail || "Observed from SDR packet evidence."}</p>
                         </article>
                       `;
                     })
@@ -1625,7 +1777,7 @@
                 </div>
                 <div class="chips">
                   <span class="chip">${Number(group.detections || 0).toLocaleString()} detections</span>
-                  <span class="chip">${fmtDb(group.bestRssi)} dBFS</span>
+                  <span class="chip">${fmtMaybeDb(group.bestRssi)}</span>
                   <span class="chip">${age(group.lastSeen)}</span>
                   ${channels.length ? `<span class="chip">CH ${channels.join(" ")}</span>` : ""}
                   ${uuids.length ? `<span class="chip">UUID ${uuids.join(" ")}</span>` : ""}
@@ -1637,10 +1789,88 @@
           .join("");
       }
 
+      function interestingScore(row) {
+        const detections = Number(row.detections || 0);
+        const rssi = Number(row.last_rssi_dbfs || -120);
+        const ageSeconds = Math.max(0, Date.now() / 1000 - Number(row.last_seen_at || 0));
+        const recency = Math.max(0, 120 - ageSeconds) / 6;
+        const strength = Math.max(0, rssi + 90) / 2;
+        const protocolBoost = row.protocol === "ZIGBEE" || row.protocol === "TPMS" ? 12 : row.protocol === "BTC" ? 8 : 0;
+        return detections * 2 + recency + strength + protocolBoost;
+      }
+
+      function renderMostInteresting(rows) {
+        candidatePanelTitle.textContent = "Most Interesting";
+        const interesting = [...rows]
+          .sort((a, b) => interestingScore(b) - interestingScore(a))
+          .slice(0, 18);
+        if (!interesting.length) {
+          candidatesEl.innerHTML = `<div class="empty">No RF entities yet</div>`;
+          return;
+        }
+        candidatesEl.innerHTML = interesting
+          .map((row) => {
+            const type = fmtDeviceType(row);
+            const manufacturer = fmtManufacturer(row);
+            const detail = row.detail || row.identity_source || row.device_type_detail || "Observed from SDR packet evidence.";
+            return `
+              <article class="${Number(row.detections || 0) > 3 ? "candidate good" : "candidate soft"}">
+                <div class="candidate-top">
+                  <strong>${row.identity || row.name || row.mac || row.protocol || "Unknown RF entity"}</strong>
+                  <span class="chip">${row.protocol || "RF"}</span>
+                </div>
+                <div class="chips">
+                  ${type ? `<span class="chip">${type}</span>` : ""}
+                  ${manufacturer ? `<span class="chip">${manufacturer}</span>` : ""}
+                  <span class="chip">${Number(row.detections || 0).toLocaleString()} detections</span>
+                  <span class="chip">${fmtMaybeDb(row.last_rssi_dbfs)}</span>
+                  <span class="chip">${age(row.last_seen_at)}</span>
+                  ${row.channel !== undefined && row.channel !== null && row.channel !== "" ? `<span class="chip">CH ${row.channel}</span>` : ""}
+                </div>
+                ${decodedTextBlock(row)}
+                <p class="small">${detail}</p>
+              </article>
+            `;
+          })
+          .join("");
+      }
+
       function renderCandidates(candidates, addresses = [], rows = []) {
+        if (activeDetectionTab === "ALL") {
+          renderMostInteresting(rows);
+          return;
+        }
         if (activeDetectionTab === "BTLE") {
           candidatePanelTitle.textContent = "BTLE Manufacturers";
           renderBleGroups(rows);
+          return;
+        }
+        if (!["ALL", "BTC"].includes(activeDetectionTab)) {
+          candidatePanelTitle.textContent = `${activeDetectionTab} Activity`;
+          const protocolRows = rows.filter((row) => row.protocol === activeDetectionTab).slice(0, 24);
+          if (!protocolRows.length) {
+            candidatesEl.innerHTML = `<div class="empty">No ${activeDetectionTab} detections yet</div>`;
+            return;
+          }
+          candidatesEl.innerHTML = protocolRows
+            .map((row) => `
+              <article class="${Number(row.detections || 0) > 1 ? "candidate good" : "candidate soft"}">
+                <div class="candidate-top">
+                  <strong>${row.identity || row.mac || activeDetectionTab}</strong>
+                  <span class="chip">${Number(row.detections || 0).toLocaleString()} hits</span>
+                </div>
+                <div class="chips">
+                  <span class="chip">CH ${row.channel ?? ""}</span>
+                  <span class="chip">${age(row.last_seen_at)}</span>
+                  <span class="chip">${fmtMaybeDb(row.last_rssi_dbfs)}</span>
+                  ${row.confidence !== undefined ? `<span class="chip">confidence ${row.confidence}</span>` : ""}
+                  ${row.pan_id !== undefined && row.pan_id !== null ? `<span class="chip">PAN ${row.pan_id}</span>` : ""}
+                </div>
+                ${decodedTextBlock(row)}
+                <p class="small">${row.detail || row.device_type_detail || "Decoded protocol frame."}</p>
+              </article>
+            `)
+            .join("");
           return;
         }
         candidatePanelTitle.textContent = "UAP Candidates";
@@ -1704,7 +1934,7 @@
       }
 
       function currentBankChannels(status) {
-        if (!["classic", "both"].includes(status.mode) || !status.running) return new Set();
+        if (!["classic", "both", "sentinel"].includes(status.mode) || !status.running) return new Set();
         const centerMhz = Number(status.center_freq_hz || 0) / 1_000_000;
         const bandwidthMhz = Math.max(1, Math.round(Number(status.sample_rate_sps || 0) / 1_000_000) || 60);
         const halfSpan = (bandwidthMhz - 1) / 2;
@@ -1712,18 +1942,43 @@
         return new Set(Array.from({ length: bandwidthMhz }, (_, idx) => start + idx).filter((ch) => ch >= 0 && ch < 79));
       }
 
+      function zigbeeMhzIndex(channel) {
+        const ch = Number(channel);
+        if (!Number.isFinite(ch) || ch < 11 || ch > 26) return null;
+        return (2405 + ((ch - 11) * 5)) - 2402;
+      }
+
+      function addProtocolChartActivity(points, index, row) {
+        if (index === null || index === undefined || index < 0 || index > 78) return;
+        const point = points[index] || { hits: 0, rssi_dbfs: -120, protocols: new Set(), labels: [] };
+        const detections = Math.max(1, Number(row.detections || row.hits || 1));
+        const rssi = Number(row.last_rssi_dbfs ?? row.rssi_dbfs ?? row.best_rssi_dbfs ?? -120);
+        point.hits += detections;
+        if (Number.isFinite(rssi) && rssi > point.rssi_dbfs) point.rssi_dbfs = rssi;
+        if (row.protocol) point.protocols.add(String(row.protocol));
+        const label = row.protocol === "ZIGBEE"
+          ? `Zigbee CH ${row.channel || "?"}`
+          : row.protocol === "BTLE"
+            ? `BLE CH ${row.channel || "?"}`
+            : row.protocol || "RF";
+        point.labels.push(`${label}: ${detections} detections`);
+        points[index] = point;
+      }
+
       function plannedStatusLabel() {
-        const mode = selectedMode();
-        if (mode === "ble") {
-          return `BTLE CH ${channelSelect.value || 37} / 2 MHz`;
-        }
-        const rate = Math.max(1, Number(sampleRateInput.value || 1));
-        const center = Number(btcCenterInput.value || 2442) * 1_000_000;
-        return `${mode === "both" ? "BTC+BTLE" : "CLASSIC"} ${fmtFreqCompact(center)} / ${rate} MHz`;
+        const protocols = selectedProtocols().map((item) => item.toUpperCase()).join("+") || "no protocols";
+        const radioA = selectedDeviceId(btcDeviceSelect) || "Radio A";
+        const radioB = selectedDeviceId(btleDeviceSelect) || "Radio B";
+        return `Ready: ${protocols} across ${radioA} + ${radioB}`;
       }
 
       function statusLabel(status) {
         if (!status.running) return plannedStatusLabel();
+        if (status.mode === "sentinel") {
+          const radioA = status.device_ids?.radio_a || status.device_ids?.classic || "radio A";
+          const radioB = status.device_ids?.radio_b || status.device_ids?.hop || "radio B";
+          return `RF Sentinel two-SDR sweep · ${radioA} + ${radioB}`;
+        }
         if (status.mode === "classic" || status.mode === "both") {
           const rateMhz = Math.max(1, Math.round(Number(status.sample_rate_sps || 0) / 1_000_000) || 60);
           return `${status.mode === "both" ? "BTC+BTLE" : "CLASSIC"} ${fmtFreqCompact(status.center_freq_hz)} / ${rateMhz} MHz`;
@@ -1740,23 +1995,53 @@
       function renderChannelActivity(status) {
         const activity = status.channel_activity || [];
         const bank = currentBankChannels(status);
-        const maxHits = Math.max(1, ...activity.map((item) => Number(item.hits || 0)));
+        const protocolPoints = {};
+        (status.discovery_table || []).forEach((row) => {
+          if (row.protocol === "BTLE") {
+            const bleIndex = bleAdvIndexByChannel.get(Number(row.channel));
+            if (bleIndex !== undefined) addProtocolChartActivity(protocolPoints, bleIndex, row);
+          } else if (row.protocol === "ZIGBEE") {
+            addProtocolChartActivity(protocolPoints, zigbeeMhzIndex(row.channel), row);
+          } else if (row.protocol === "BTC") {
+            const ch = Number(row.channel);
+            if (Number.isFinite(ch)) addProtocolChartActivity(protocolPoints, Math.max(0, Math.min(78, ch)), row);
+          }
+        });
+        const maxHits = Math.max(
+          1,
+          ...activity.map((item) => Number(item.hits || 0)),
+          ...Object.values(protocolPoints).map((item) => Number(item.hits || 0))
+        );
         channelBars.forEach((bar, idx) => {
           const row = activity[idx] || { hits: 0, rssi_dbfs: -120 };
-          const hits = Number(row.hits || 0);
-          const rssi = Number(row.rssi_dbfs || -120);
+          const protocolPoint = protocolPoints[idx];
+          const hits = Number(row.hits || 0) + Number(protocolPoint?.hits || 0);
+          const rssi = Math.max(Number(row.rssi_dbfs || -120), Number(protocolPoint?.rssi_dbfs || -120));
           const hitLevel = hits / maxHits;
           const rssiLevel = Math.max(0, Math.min(1, (rssi + 110) / 80));
           const scannedIdle = bank.has(idx) ? 0.18 : 0.02;
           const level = hits > 0 ? Math.max(0.22, hitLevel, rssiLevel * 0.78) : scannedIdle;
           const bleAdv = bleAdvByClassicChannel.get(idx);
+          const bleData = bleDataByMhzIndex.get(idx);
+          const zigbee = zigbeeByMhzIndex.get(idx);
+          const protocols = protocolPoint?.protocols || new Set();
           bar.classList.toggle("active", hits > 0);
           bar.classList.toggle("ble-adv", Boolean(bleAdv));
-          bar.classList.toggle("current", bank.has(idx) && hits === 0 && !bleAdv);
+          bar.classList.toggle("ble-active", protocols.has("BTLE"));
+          bar.classList.toggle("zigbee-active", protocols.has("ZIGBEE"));
+          bar.classList.toggle("current", bank.has(idx) && hits === 0 && !bleAdv && !zigbee);
           bar.style.height = `${3 + level * 90}px`;
-          bar.title = bleAdv
-            ? `BLE adv CH ${bleAdv.channel} / BTC CH ${idx}: ${hits} BTC hits, ${fmtDb(rssi)} dBFS`
-            : `BTC CH ${idx}: ${hits} hits, ${fmtDb(rssi)} dBFS`;
+          const labels = [
+            `ISM ${2402 + idx} MHz`,
+            `BT Classic CH ${idx}`,
+            bleAdv ? `BLE adv CH ${bleAdv.channel}` : "",
+            bleData ? `BLE data CH ${bleData.channel}` : "",
+            zigbee ? `Zigbee CH ${zigbee.channel}` : "",
+            ...(protocolPoint?.labels || []),
+            `${hits} total hits`,
+            `${fmtDb(rssi)} dBFS`,
+          ].filter(Boolean);
+          bar.title = labels.join(" · ");
         });
       }
 
@@ -1770,24 +2055,19 @@
           runToggleText.textContent = status.running ? "Stop" : "Start";
           runToggleBtn.querySelector(".material-symbols-rounded").textContent = status.running ? "stop" : "play_arrow";
           if (status.running) syncModeCheckboxes(status.mode);
-          metrics.rssi.textContent = fmtDb(status.last_rssi_dbfs);
+          const rows = status.discovery_table || [];
+          const detectionTotal = rows.reduce((sum, row) => sum + Number(row.detections || 0), 0);
+          const protocolDetections = (protocol) => rows
+            .filter((row) => row.protocol === protocol)
+            .reduce((sum, row) => sum + Number(row.detections || 0), 0);
           metrics.btcRssi.textContent = fmtDb(status.rssi_by_mode?.classic);
           metrics.btleRssi.textContent = fmtDb(status.rssi_by_mode?.ble);
-          metrics.btcChunks.textContent = Number(status.chunks_by_mode?.classic || 0).toLocaleString();
-          metrics.btleChunks.textContent = Number(status.chunks_by_mode?.ble || 0).toLocaleString();
-          metrics.btleChannel.textContent = status.channels_by_mode?.ble || [37, 38, 39][window.bleHopIndex || 0];
-          metrics.noise.textContent = fmtDb(status.noise_floor_dbfs);
-          metrics.chunks.textContent = Number(status.chunks_seen || 0).toLocaleString();
+          metrics.detections.textContent = Number(detectionTotal || 0).toLocaleString();
           metrics.bursts.textContent = Number(status.bursts_seen || 0).toLocaleString();
-          metrics.ble.textContent = Number(status.ble_packets_seen || 0).toLocaleString();
-          metrics.classic.textContent = Number(status.classic_bursts_seen || 0).toLocaleString();
-          metrics.preamble.textContent = Number(status.decoder_stats?.preamble_hits || 0).toLocaleString();
-          metrics.barker.textContent = Number(status.decoder_stats?.barker_hits || 0).toLocaleString();
-          metrics.access.textContent = Number(status.decoder_stats?.access_code_hits || 0).toLocaleString();
-          metrics.accessReject.textContent = Number(status.decoder_stats?.access_code_mismatch || 0).toLocaleString();
-          metrics.targetNear.textContent = Number(status.decoder_stats?.target_access_near_hits || 0).toLocaleString();
-          metrics.targetBest.textContent = Number(status.decoder_stats?.target_access_best_distance ?? 68).toLocaleString();
-          metrics.lap.textContent = Number(status.decoder_stats?.lap_hits || 0).toLocaleString();
+          metrics.ble.textContent = Number(rows.filter((row) => row.protocol === "BTLE").length || 0).toLocaleString();
+          metrics.classic.textContent = Number(protocolDetections("BTC") || status.classic_bursts_seen || 0).toLocaleString();
+          metrics.zigbee.textContent = Number(protocolDetections("ZIGBEE") || 0).toLocaleString();
+          metrics.tpms.textContent = Number(protocolDetections("TPMS") || 0).toLocaleString();
           updateBtcTargetVisibility(Boolean((btcTargetMacInput.value || "").trim() || status.test_target));
           renderIdentityTable(status.discovery_table || []);
           renderCandidates(status.classic_candidates || [], status.classic_addresses || [], status.discovery_table || []);
@@ -1802,21 +2082,25 @@
       async function startScan({ preserve = false, hop = false } = {}) {
         const mode = selectedMode();
         const rateMhz = Math.max(1, Math.min(60, Number(document.getElementById("sampleRateInput").value || 60)));
-        const btcEnabled = ["classic", "both"].includes(mode);
         const btcCenterMhz = Math.max(2402, Math.min(2480, Number(btcCenterInput.value || 2442)));
         const btcGain = splitGain(btcGainInput.value || 72);
         const btleGain = splitGain(btleGainInput.value || 56);
+        const protocols = selectedProtocols();
+        if (!protocols.length) {
+          throw new Error("Select at least one protocol");
+        }
         const resp = await fetch("/api/scan/start", {
           method: "POST",
           headers: { "Content-Type": "application/json" },
           body: JSON.stringify({
-            device_id: btcDeviceSelect.value || btleDeviceSelect.value,
-            btc_device_id: btcDeviceSelect.value,
-            btle_device_id: btleDeviceSelect.value,
+            device_id: selectedDeviceId(btcDeviceSelect) || selectedDeviceId(btleDeviceSelect),
+            btc_device_id: selectedDeviceId(btcDeviceSelect),
+            btle_device_id: selectedDeviceId(btleDeviceSelect),
             btc_engine: btcEngineSelect.value,
             btc_center_mhz: btcCenterMhz,
             btc_target_mac: btcTargetMacInput.value.trim(),
             mode,
+            hop_device_id: selectedDeviceId(btleDeviceSelect),
             channel: Number(channelSelect.value),
             ble_channel: Number(channelSelect.value || [37, 38, 39][(window.bleHopIndex || 0) % 3]),
             sample_rate_sps: Math.round(rateMhz * 1_000_000),
@@ -1827,6 +2111,8 @@
             btle_lna_gain_db: btleGain.lna,
             btle_vga_gain_db: btleGain.vga,
             preserve_detections: preserve,
+            protocols,
+            sweep_both_radios: true,
           }),
         });
         if (!resp.ok) {
@@ -1835,7 +2121,6 @@
         }
         if (!hop) {
           await pollStatus();
-          scheduleAutoHop();
         } else {
           pollStatus();
         }
@@ -1843,17 +2128,6 @@
 
       function scheduleAutoHop() {
         clearTimeout(window.autoHopTimer);
-        if (runToggleText.textContent !== "Stop") return;
-        const mode = selectedMode();
-        const bleSweepActive = ["ble", "both"].includes(mode);
-        if (!bleSweepActive) return;
-        const dwellMs = Math.max(0.25, Math.min(30, Number(hopDwellInput.value || 0.25))) * 1000;
-        window.autoHopTimer = setTimeout(async () => {
-          if (runToggleText.textContent !== "Stop") return;
-          advanceSweepValues();
-          await startScan({ preserve: true, hop: true });
-          scheduleAutoHop();
-        }, dwellMs);
       }
 
       scanForm.addEventListener("submit", async (event) => {
@@ -1863,10 +2137,21 @@
           await fetch("/api/scan/stop", { method: "POST" });
           pollStatus();
         } else {
+          if (!devicesReady) {
+            runState.textContent = "Waiting for SDR devices";
+            await loadDevices();
+            if (!devicesReady) return;
+          }
           try {
+            runState.textContent = "Starting";
+            runToggleBtn.disabled = true;
+            runToggleText.textContent = "Starting";
+            runToggleBtn.querySelector(".material-symbols-rounded").textContent = "hourglass_top";
             await startScan();
           } catch (err) {
             runState.textContent = err.message || "Start failed";
+          } finally {
+            runToggleBtn.disabled = false;
           }
         }
       });
@@ -1887,26 +2172,35 @@
       sampleRateInput.addEventListener("input", refreshPlannedStatusLabel);
       detectionViewSelect.addEventListener("change", pollStatus);
       hopDwellInput.addEventListener("change", scheduleAutoHop);
-      btcTabBtn.addEventListener("click", () => {
-        activeDetectionTab = "BTC";
-        btcTabBtn.classList.add("active");
-        btleTabBtn.classList.remove("active");
+      function setDetectionTab(protocol) {
+        activeDetectionTab = protocol;
+        [
+          [allTabBtn, "ALL"],
+          [btcTabBtn, "BTC"],
+          [btleTabBtn, "BTLE"],
+          [zigbeeTabBtn, "ZIGBEE"],
+          [tpmsTabBtn, "TPMS"],
+        ].forEach(([button, value]) => button.classList.toggle("active", protocol === value));
         pollStatus();
-      });
-      btleTabBtn.addEventListener("click", () => {
-        activeDetectionTab = "BTLE";
-        btleTabBtn.classList.add("active");
-        btcTabBtn.classList.remove("active");
-        pollStatus();
-      });
+      }
+
+      allTabBtn.addEventListener("click", () => setDetectionTab("ALL"));
+      btcTabBtn.addEventListener("click", () => setDetectionTab("BTC"));
+      btleTabBtn.addEventListener("click", () => setDetectionTab("BTLE"));
+      zigbeeTabBtn.addEventListener("click", () => setDetectionTab("ZIGBEE"));
+      tpmsTabBtn.addEventListener("click", () => setDetectionTab("TPMS"));
       btcInput.addEventListener("change", () => {
         setChannels();
         scheduleAutoHop();
+        refreshPlannedStatusLabel();
       });
       btleInput.addEventListener("change", () => {
         setChannels();
         scheduleAutoHop();
+        refreshPlannedStatusLabel();
       });
+      zigbeeInput.addEventListener("change", refreshPlannedStatusLabel);
+      tpmsInput.addEventListener("change", refreshPlannedStatusLabel);
       setChannels();
       loadDevices();
       pollStatus();

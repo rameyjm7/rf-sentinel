@@ -79,6 +79,31 @@ class StreamConfig:
     num_samples: int | None = None
 
 
+@dataclass(frozen=True)
+class SweepConfig:
+    device_id: str
+    start_freq_hz: int
+    stop_freq_hz: int
+    bin_width_hz: int = 250_000
+    lna_gain_db: int = 16
+    vga_gain_db: int = 32
+    amp_enable: bool = False
+
+
+@dataclass(frozen=True)
+class SweepHandle:
+    sweep_id: str
+    device_id: str
+
+
+@dataclass(frozen=True)
+class SweepSample:
+    timestamp: str
+    hz_low: int
+    hz_high: int
+    db_values: tuple[float, ...]
+
+
 class GatewayClient:
     def __init__(self, base_url: str | None = None, token: str | None = None) -> None:
         self.base_url = _setting("SDR_GATEWAY_BASE_URL", explicit=base_url, default="http://127.0.0.1:8080").rstrip("/")
@@ -177,10 +202,69 @@ class GatewayClient:
                 continue
         return stopped
 
+    def stop_sweeps_for_device(self, device_id: str) -> int:
+        response = self._session.get(f"{self.base_url}/sweeps", headers=self.headers(), timeout=8)
+        response.raise_for_status()
+        stopped = 0
+        for item in response.json():
+            config = item.get("config", {}) or {}
+            if str(config.get("device_id", "")) != device_id:
+                continue
+            sweep_id = str(item.get("sweep_id", ""))
+            if not sweep_id:
+                continue
+            try:
+                self.stop_sweep(sweep_id)
+                stopped += 1
+            except Exception:
+                continue
+        return stopped
+
     def stop_stream(self, stream_id: str) -> None:
         if not stream_id:
             return
         response = self._session.post(f"{self.base_url}/streams/{stream_id}/stop", headers=self.headers(), timeout=2)
+        response.raise_for_status()
+
+    def start_sweep(self, config: SweepConfig) -> SweepHandle:
+        payload = {
+            "device_id": config.device_id,
+            "start_freq_hz": int(config.start_freq_hz),
+            "stop_freq_hz": int(config.stop_freq_hz),
+            "bin_width_hz": int(config.bin_width_hz),
+            "lna_gain_db": int(config.lna_gain_db),
+            "vga_gain_db": int(config.vga_gain_db),
+            "amp_enable": bool(config.amp_enable),
+        }
+        response = self._session.post(f"{self.base_url}/sweeps/start", headers=self.headers(), json=payload, timeout=12)
+        if response.status_code == 409:
+            self.stop_streams_for_device(config.device_id)
+            self.stop_sweeps_for_device(config.device_id)
+            response = self._session.post(f"{self.base_url}/sweeps/start", headers=self.headers(), json=payload, timeout=12)
+        response.raise_for_status()
+        body = response.json()
+        return SweepHandle(sweep_id=str(body["sweep_id"]), device_id=config.device_id)
+
+    def sweep_samples(self, sweep_id: str) -> list[SweepSample]:
+        response = self._session.get(f"{self.base_url}/sweeps/{sweep_id}/samples", headers=self.headers(), timeout=5)
+        response.raise_for_status()
+        samples: list[SweepSample] = []
+        for item in response.json():
+            values = item.get("db_values", []) or []
+            samples.append(
+                SweepSample(
+                    timestamp=str(item.get("timestamp", "")),
+                    hz_low=int(item.get("hz_low", 0)),
+                    hz_high=int(item.get("hz_high", 0)),
+                    db_values=tuple(float(value) for value in values),
+                )
+            )
+        return samples
+
+    def stop_sweep(self, sweep_id: str) -> None:
+        if not sweep_id:
+            return
+        response = self._session.post(f"{self.base_url}/sweeps/{sweep_id}/stop", headers=self.headers(), timeout=5)
         response.raise_for_status()
 
     def retune_stream(self, stream_id: str, config: StreamConfig) -> StreamHandle:

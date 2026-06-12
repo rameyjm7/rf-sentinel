@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
+from functools import lru_cache
 import json
 import time
 
@@ -55,6 +56,19 @@ SYMBOL_TABLES: tuple[tuple[str, dict[int, str]], ...] = (
     ("inverted", _INVERTED_SYMBOL_TABLE),
     ("reversed_inverted", _REVERSED_INVERTED_SYMBOL_TABLE),
 )
+SYMBOL_TABLE_BY_NAME = dict(SYMBOL_TABLES)
+
+
+@lru_cache(maxsize=256)
+def _cached_pattern_iq(symbols: tuple[int, ...], chip_samples: int, symbol_table_name: str, half_sine: bool) -> np.ndarray:
+    symbol_table = SYMBOL_TABLE_BY_NAME[symbol_table_name]
+    return synthesize_pattern_iq(
+        list(symbols),
+        chip_samples=chip_samples,
+        symbol_table=symbol_table,
+        amplitude=1.0,
+        half_sine=half_sine,
+    )
 
 
 @dataclass
@@ -176,6 +190,7 @@ class IEEE802154Frame:
     chip_offset: int
     chip_samples: int
     symbol_errors: list[int] = field(default_factory=list)
+    fcs_ok: bool = False
     mac: IEEE802154MacFields | None = None
     timestamp: float = field(default_factory=time.time)
 
@@ -196,6 +211,7 @@ class IEEE802154Frame:
             "chip_offset": self.chip_offset,
             "chip_samples": self.chip_samples,
             "symbol_errors": self.symbol_errors,
+            "fcs_ok": self.fcs_ok,
             "timestamp": round(self.timestamp, 6),
         }
         if self.mac is not None:
@@ -372,6 +388,7 @@ class IEEE802154Decoder:
         start_search_symbols: int = 24,
         frequency_search_hz: tuple[int, ...] = (0, -100_000, -50_000, 50_000, 100_000),
         waveform_pattern_corr_min: float = 0.35,
+        require_fcs: bool = False,
     ) -> None:
         self.symbol_error_limit = int(symbol_error_limit)
         self.phase_search_steps = max(1, int(phase_search_steps))
@@ -380,6 +397,7 @@ class IEEE802154Decoder:
         self.start_search_symbols = max(4, int(start_search_symbols))
         self.frequency_search_hz = tuple(int(entry) for entry in frequency_search_hz) or (0,)
         self.waveform_pattern_corr_min = float(waveform_pattern_corr_min)
+        self.require_fcs = bool(require_fcs)
         self.last_diagnostics = IEEE802154DecodeDiagnostics()
 
     def decode(self, burst: Burst) -> IEEE802154Frame | None:
@@ -470,11 +488,10 @@ class IEEE802154Decoder:
         symbol_table: dict[int, str],
         sfd_symbols: tuple[int, int],
     ) -> tuple[np.ndarray, float, int]:
-        pattern_ref = synthesize_pattern_iq(
-            PREAMBLE_SYMBOLS + list(sfd_symbols),
+        pattern_ref = _cached_pattern_iq(
+            tuple(PREAMBLE_SYMBOLS + list(sfd_symbols)),
             chip_samples=chip_samples,
-            symbol_table=symbol_table,
-            amplitude=1.0,
+            symbol_table_name=self._symbol_table_cache_name(symbol_table),
             half_sine=True,
         )
         if pattern_ref.size == 0 or sample_start < 0 or sample_start + pattern_ref.size > iq.size:
@@ -540,11 +557,10 @@ class IEEE802154Decoder:
         chip_samples: int,
         symbol_table: dict[int, str],
     ) -> float:
-        symbol_ref = synthesize_pattern_iq(
-            [0],
+        symbol_ref = _cached_pattern_iq(
+            (0,),
             chip_samples=chip_samples,
-            symbol_table=symbol_table,
-            amplitude=1.0,
+            symbol_table_name=self._symbol_table_cache_name(symbol_table),
             half_sine=True,
         )
         symbol_stride = SYMBOL_CHIPS * chip_samples
@@ -597,11 +613,11 @@ class IEEE802154Decoder:
     ) -> list[int]:
         if iq.size == 0:
             return [0]
-        ref = synthesize_pattern_iq(
-            symbols=PREAMBLE_SYMBOLS + list(sfd_symbols),
+        ref = _cached_pattern_iq(
+            tuple(PREAMBLE_SYMBOLS + list(sfd_symbols)),
             chip_samples=chip_samples,
-            symbol_table=symbol_table,
-            amplitude=1.0,
+            symbol_table_name=self._symbol_table_cache_name(symbol_table),
+            half_sine=True,
         )
         if ref.size == 0:
             return [0]
@@ -647,6 +663,12 @@ class IEEE802154Decoder:
         )
         return current_key > previous_key
 
+    def _symbol_table_cache_name(self, symbol_table: dict[int, str]) -> str:
+        for name, candidate in SYMBOL_TABLES:
+            if candidate is symbol_table:
+                return name
+        return "primary"
+
     def _prepare_iq(self, iq: np.ndarray) -> np.ndarray:
         if iq.size == 0:
             return iq
@@ -664,6 +686,14 @@ class IEEE802154Decoder:
     def _correct_frequency_offset(self, iq: np.ndarray, sample_rate_sps: int, frequency_offset_hz: float) -> np.ndarray:
         if abs(frequency_offset_hz) <= 1e-9 or iq.size == 0:
             return iq
+        if _cdecode is not None and hasattr(_cdecode, "correct_frequency_offset"):
+            raw = _cdecode.correct_frequency_offset(
+                np.ascontiguousarray(iq, dtype=np.complex64),
+                float(sample_rate_sps),
+                float(frequency_offset_hz),
+            )
+            if raw is not None:
+                return np.frombuffer(raw, dtype=np.complex64).copy()
         sample_index = np.arange(iq.size, dtype=np.float32)
         rotation = np.exp(
             np.complex64(-1j)
@@ -843,6 +873,8 @@ class IEEE802154Decoder:
                 psdu = nibbles_to_bytes([entry.symbol for entry in payload_symbols])
                 best_diag.best_payload_preview_hex = psdu[: min(8, len(psdu))].hex()
                 best_diag.crc_ok = ieee802154_fcs_ok(psdu)
+                if self.require_fcs and not best_diag.crc_ok:
+                    continue
                 if length_byte < 5 or (not best_diag.crc_ok and sum(symbol_errors) != 0):
                     continue
                 confidence = max(0.0, 1.0 - (sum(symbol_errors) / float(len(symbol_errors) * SYMBOL_CHIPS)))
@@ -858,6 +890,7 @@ class IEEE802154Decoder:
                         chip_offset=chip_offset + ((start % SYMBOL_CHIPS) * chip_samples),
                         chip_samples=chip_samples,
                         symbol_errors=symbol_errors,
+                        fcs_ok=best_diag.crc_ok,
                         mac=parse_mac_fields(psdu),
                         timestamp=burst.ended_at,
                     ),
@@ -888,7 +921,12 @@ class IEEE802154Decoder:
             symbol_phase=0,
         )
         pattern_symbols = PREAMBLE_SYMBOLS + list(sfd_symbols)
-        pattern_ref = synthesize_pattern_iq(pattern_symbols, chip_samples=chip_samples, symbol_table=symbol_table, amplitude=1.0, half_sine=True)
+        pattern_ref = _cached_pattern_iq(
+            tuple(pattern_symbols),
+            chip_samples=chip_samples,
+            symbol_table_name=symbol_table_name,
+            half_sine=True,
+        )
         if pattern_ref.size == 0:
             return None, best_diag
         pattern_end = int(sample_start) + (len(pattern_symbols) * SYMBOL_CHIPS * chip_samples)
@@ -941,20 +979,14 @@ class IEEE802154Decoder:
             decision_start = pattern_end + decision_adjust
             if decision_start < 0 or decision_start + (2 * symbol_samples) > iq.size:
                 continue
-            length_symbols: list[SymbolDecision] = []
-            for block_index in range(2):
-                lo = decision_start + (block_index * symbol_samples)
-                hi = lo + symbol_samples + chip_samples
-                symbol = self._nearest_symbol_iq(
-                    aligned_iq[lo:hi],
-                    chip_samples=chip_samples,
-                    symbol_table_name=symbol_table_name,
-                    symbol_table=symbol_table,
-                )
-                if symbol is None:
-                    length_symbols = []
-                    break
-                length_symbols.append(symbol)
+            length_symbols = self._nearest_symbols_iq_bulk(
+                aligned_iq,
+                chip_samples=chip_samples,
+                symbol_table_name=symbol_table_name,
+                symbol_table=symbol_table,
+                start_sample=decision_start,
+                symbol_count=2,
+            )
             if len(length_symbols) != 2:
                 continue
 
@@ -967,24 +999,18 @@ class IEEE802154Decoder:
                 if length_byte > MAX_PHY_PSDU:
                     continue
                 psdu_symbol_count = length_byte * 2
-                payload_symbols: list[SymbolDecision] = []
                 payload_start = decision_start + (2 * symbol_samples)
                 payload_end = payload_start + (psdu_symbol_count * symbol_samples) + chip_samples
                 if payload_end > iq.size:
                     continue
-                for block_index in range(psdu_symbol_count):
-                    lo = payload_start + (block_index * symbol_samples)
-                    hi = lo + symbol_samples + chip_samples
-                    symbol = self._nearest_symbol_iq(
-                        aligned_iq[lo:hi],
-                        chip_samples=chip_samples,
-                        symbol_table_name=symbol_table_name,
-                        symbol_table=symbol_table,
-                    )
-                    if symbol is None:
-                        payload_symbols = []
-                        break
-                    payload_symbols.append(symbol)
+                payload_symbols = self._nearest_symbols_iq_bulk(
+                    aligned_iq,
+                    chip_samples=chip_samples,
+                    symbol_table_name=symbol_table_name,
+                    symbol_table=symbol_table,
+                    start_sample=payload_start,
+                    symbol_count=psdu_symbol_count,
+                )
                 if len(payload_symbols) != psdu_symbol_count:
                     continue
 
@@ -993,6 +1019,8 @@ class IEEE802154Decoder:
                 psdu = nibbles_to_bytes([entry.symbol for entry in payload_symbols])
                 best_diag.best_payload_preview_hex = psdu[: min(8, len(psdu))].hex()
                 best_diag.crc_ok = ieee802154_fcs_ok(psdu)
+                if self.require_fcs and not best_diag.crc_ok:
+                    continue
                 if length_byte < 5 or (not best_diag.crc_ok and sum(symbol_errors) != 0):
                     continue
                 confidence = max(0.0, 1.0 - (sum(symbol_errors) / float(max(1, len(symbol_errors) * SYMBOL_CHIPS))))
@@ -1008,12 +1036,65 @@ class IEEE802154Decoder:
                         chip_offset=max(0, int(sample_start)),
                         chip_samples=chip_samples,
                         symbol_errors=symbol_errors,
+                        fcs_ok=best_diag.crc_ok,
                         mac=parse_mac_fields(psdu),
                         timestamp=burst.ended_at,
                     ),
                     best_diag,
                 )
         return None, best_diag
+
+    def _nearest_symbols_iq_bulk(
+        self,
+        iq: np.ndarray,
+        chip_samples: int,
+        symbol_table_name: str,
+        symbol_table: dict[int, str],
+        start_sample: int,
+        symbol_count: int,
+    ) -> list[SymbolDecision]:
+        symbol_count = int(symbol_count)
+        if symbol_count <= 0:
+            return []
+        symbol_samples = SYMBOL_CHIPS * chip_samples
+        expected_samples = (SYMBOL_CHIPS + 1) * chip_samples
+        if start_sample < 0 or int(start_sample) + ((symbol_count - 1) * symbol_samples) + expected_samples > iq.size:
+            return []
+        if _cdecode is not None and hasattr(_cdecode, "nearest_symbols_iq_bulk"):
+            accelerated = _cdecode.nearest_symbols_iq_bulk(
+                np.ascontiguousarray(iq, dtype=np.complex64),
+                int(chip_samples),
+                symbol_table_name,
+                int(start_sample),
+                symbol_count,
+            )
+            if accelerated is not None:
+                symbols_raw, distances_raw = accelerated
+                symbols = bytes(symbols_raw)
+                distances = bytes(distances_raw)
+                if len(symbols) == symbol_count and len(distances) == symbol_count:
+                    return [
+                        SymbolDecision(
+                            symbol=int(symbols[index]),
+                            hamming_distance=int(distances[index]),
+                            chips=symbol_table[int(symbols[index])],
+                        )
+                        for index in range(symbol_count)
+                    ]
+        out: list[SymbolDecision] = []
+        for block_index in range(symbol_count):
+            lo = int(start_sample) + (block_index * symbol_samples)
+            hi = lo + expected_samples
+            symbol = self._nearest_symbol_iq(
+                iq[lo:hi],
+                chip_samples=chip_samples,
+                symbol_table_name=symbol_table_name,
+                symbol_table=symbol_table,
+            )
+            if symbol is None:
+                return []
+            out.append(symbol)
+        return out
 
     def _slice_chips_half_sine(
         self,
@@ -1058,7 +1139,12 @@ class IEEE802154Decoder:
         best_chip_string = ""
         iq_norm = float(np.linalg.norm(iq)) + 1e-9
         for symbol, reference in symbol_table.items():
-            ref_iq = synthesize_pattern_iq([symbol], chip_samples=chip_samples, symbol_table=symbol_table, amplitude=1.0, half_sine=True)
+            ref_iq = _cached_pattern_iq(
+                (int(symbol),),
+                chip_samples=chip_samples,
+                symbol_table_name=symbol_table_name,
+                half_sine=True,
+            )
             ref_norm = float(np.linalg.norm(ref_iq)) + 1e-9
             score = float(np.real(np.vdot(ref_iq, iq)) / (ref_norm * iq_norm))
             if score > best_score:

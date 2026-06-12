@@ -3,12 +3,33 @@ set -euo pipefail
 
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 VENV_DIR="${VENV_DIR:-${ROOT_DIR}/.venv}"
+if [[ "${VENV_DIR}" != /* ]]; then
+  VENV_DIR="${ROOT_DIR}/${VENV_DIR}"
+fi
 PYTHON_BIN="${PYTHON_BIN:-python3}"
 BTC_PLUGIN_DIR="${ROOT_DIR}/rf_platform/plugins/bluetooth-classic"
 BTC_BUILD_DIR="${BTC_PLUGIN_DIR}/build"
 BLE_PLUGIN_DIR="${ROOT_DIR}/rf_platform/plugins/bluetooth-lowenergy"
 ZIGBEE_PLUGIN_DIR="${ROOT_DIR}/rf_platform/plugins/zigbee-802154"
 SUBGHZ_PLUGIN_DIR="${ROOT_DIR}/rf_platform/plugins/subghz-stack"
+
+venv_is_stale() {
+  if [[ ! -x "${VENV_DIR}/bin/python" ]]; then
+    return 0
+  fi
+
+  local activate_file="${VENV_DIR}/bin/activate"
+  if [[ -f "${activate_file}" ]] && ! grep -Fq "VIRTUAL_ENV=${VENV_DIR}" "${activate_file}"; then
+    return 0
+  fi
+
+  local cfg_file="${VENV_DIR}/pyvenv.cfg"
+  if [[ -f "${cfg_file}" ]] && grep -Eq "BluetoothExplorer|/[^ ]+/.venv" "${cfg_file}" && ! grep -Fq "${VENV_DIR}" "${cfg_file}"; then
+    return 0
+  fi
+
+  return 1
+}
 
 echo "[RF Sentinel] root: ${ROOT_DIR}"
 echo "[RF Sentinel] host arch: $(uname -m)"
@@ -21,6 +42,11 @@ fi
 if ! command -v "${PYTHON_BIN}" >/dev/null 2>&1; then
   echo "error: ${PYTHON_BIN} not found" >&2
   exit 1
+fi
+
+if [[ -d "${VENV_DIR}" ]] && venv_is_stale; then
+  echo "[RF Sentinel] stale or moved venv detected; recreating: ${VENV_DIR}"
+  rm -rf "${VENV_DIR}"
 fi
 
 if [[ ! -d "${VENV_DIR}" ]]; then
@@ -36,6 +62,14 @@ echo "[RF Sentinel] installing Python requirements"
 "${VENV_DIR}/bin/python" -m pip install -e "${BLE_PLUGIN_DIR}"
 "${VENV_DIR}/bin/python" -m pip install -e "${ZIGBEE_PLUGIN_DIR}"
 "${VENV_DIR}/bin/python" -m pip install -e "${SUBGHZ_PLUGIN_DIR}"
+
+echo "[RF Sentinel] verifying CLI entry points"
+for cli in rf_sentinel_scan rf_sentinel_pipeline rf_sentinel_ui bluetooth_classic ble_scanner zigbee_802154 tpms_stack; do
+  if [[ ! -x "${VENV_DIR}/bin/${cli}" ]]; then
+    echo "error: expected CLI missing or not executable: ${VENV_DIR}/bin/${cli}" >&2
+    exit 1
+  fi
+done
 
 echo "[RF Sentinel] rebuilding Bluetooth Classic plugin for native arch"
 rm -rf "${BTC_BUILD_DIR}"
@@ -56,4 +90,5 @@ echo
 echo "Install complete."
 echo "Run:"
 echo "  source \"${VENV_DIR}/bin/activate\""
-echo "  python3 \"${ROOT_DIR}/ui/backend/app.py\""
+echo "  rf_sentinel_scan"
+echo "  rf_sentinel_ui"

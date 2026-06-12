@@ -14,6 +14,8 @@ rf-sentinel-scan = "rf_platform.scanner:main"
 rf_sentinel_scan = "rf_platform.scanner:main"
 rf-sentinel-pipeline = "rf_platform.pipeline:main"
 rf_sentinel_pipeline = "rf_platform.pipeline:main"
+rf-sentinel-ui = "rf_platform.ui:main"
+rf_sentinel_ui = "rf_platform.ui:main"
 
 [tool.setuptools.packages.find]
 include = ["rf_platform*"]

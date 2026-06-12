@@ -1248,9 +1248,15 @@ def _run_iq_sweep(args: argparse.Namespace) -> int:
     detectors: dict[int, BLEAdvertisingDetector] = {}
     events_seen = 0
     chunks_seen = 0
+    exit_code = 0
     try:
         while not stop_requested[0]:
-            payload = iq_sweep_chunk(args.base_url, args.token, iq_sweep_id, args.chunk_bytes)
+            try:
+                payload = iq_sweep_chunk(args.base_url, args.token, iq_sweep_id, args.chunk_bytes)
+            except RuntimeError as exc:
+                print(f"iq_sweep_error device={args.device_id} sweep_id={iq_sweep_id} error={exc}", file=sys.stderr, flush=True)
+                exit_code = 1
+                break
             raw_b64 = str(payload.get("iq_i8_b64") or "")
             if not raw_b64:
                 time.sleep(0.05)
@@ -1304,7 +1310,7 @@ def _run_iq_sweep(args: argparse.Namespace) -> int:
         stop_iq_sweep(args.base_url, args.token, iq_sweep_id)
         if reporter is not None:
             reporter.maybe_print_summary(force=True)
-    return 0
+    return exit_code
 
 
 def _run_listen(args: argparse.Namespace) -> int:
