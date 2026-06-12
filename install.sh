@@ -6,6 +6,8 @@ VENV_DIR="${VENV_DIR:-${ROOT_DIR}/.venv}"
 PYTHON_BIN="${PYTHON_BIN:-python3}"
 BTC_PLUGIN_DIR="${ROOT_DIR}/rf_platform/plugins/bluetooth-classic"
 BTC_BUILD_DIR="${BTC_PLUGIN_DIR}/build"
+BLE_PLUGIN_DIR="${ROOT_DIR}/rf_platform/plugins/bluetooth-lowenergy"
+ZIGBEE_PLUGIN_DIR="${ROOT_DIR}/rf_platform/plugins/zigbee-802154"
 
 echo "[RF Sentinel] root: ${ROOT_DIR}"
 echo "[RF Sentinel] host arch: $(uname -m)"
@@ -28,6 +30,8 @@ fi
 echo "[RF Sentinel] installing Python requirements"
 "${VENV_DIR}/bin/python" -m pip install --upgrade pip
 "${VENV_DIR}/bin/python" -m pip install -r "${ROOT_DIR}/requirements.txt"
+"${VENV_DIR}/bin/python" -m pip install -e "${BLE_PLUGIN_DIR}"
+"${VENV_DIR}/bin/python" -m pip install -e "${ZIGBEE_PLUGIN_DIR}"
 
 echo "[RF Sentinel] rebuilding Bluetooth Classic plugin for native arch"
 rm -rf "${BTC_BUILD_DIR}"

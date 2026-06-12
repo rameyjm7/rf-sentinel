@@ -28,6 +28,7 @@ The core product stays passive: RF discovery, protocol intelligence, entity reso
 - `ui/frontend/index.html`: browser UI for SDR controls, RF health, discoveries, and UAP candidates.
 - `rf_platform/`: shared normalized event and entity primitives for the broader platform.
 - `rf_platform/plugins/bluetooth-classic/`: Bluetooth Classic sniffer plugin.
+- `rf_platform/plugins/bluetooth-lowenergy/`: BLE advertising receiver plugin.
 - `rf_platform/plugins/zigbee-802154/`: Zigbee / IEEE 802.15.4 receiver plugin.
 - `docs/`: product strategy, architecture, and milestone roadmap.
 - `research/`: the referenced paper and corresponding `btsniffer` code.

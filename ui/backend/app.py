@@ -44,6 +44,7 @@ BTC_SNIFFER_BINARY = Path(os.getenv("BTC_SNIFFER_BINARY", str(BTC_SNIFFER_ROOT /
 BTC_SNIFFER_LOG_PATH = Path(os.getenv("BTC_SNIFFER_LOG", str(DATA_DIR / "btcexplorer-sniffer.log")))
 BTC_SNIFFER_AUTO_BUILD = os.getenv("BTC_SNIFFER_AUTO_BUILD", "1").strip().lower() not in {"0", "false", "no"}
 BTC_ENGINE_DEFAULT = os.getenv("BTC_ENGINE", "btcsniffer").strip().lower()
+SDR_GATEWAY_DEVICES_TIMEOUT_SECONDS = float(os.getenv("SDR_GATEWAY_DEVICES_TIMEOUT_SECONDS", "10"))
 INVALID_CLK_INDEX = -1
 DELTA_TS_SAME_THRESHOLD_US = 40
 DELTA_TS_SLOT_THRESHOLD_US = 620
@@ -1339,6 +1340,9 @@ inquiry_process: subprocess.Popen[str] | None = None
 btc_engine_process: subprocess.Popen[str] | None = None
 btc_engine_thread: threading.Thread | None = None
 btc_engine_stop = threading.Event()
+devices_cache_lock = threading.Lock()
+devices_cache: list[dict[str, Any]] = []
+devices_cache_updated_at = 0.0
 ble_identity_cache: dict[str, dict[str, Any]] = {}
 company_identifier_lut: dict[str, str] = {}
 uuid16_identifier_lut: dict[str, str] = {}
@@ -2883,15 +2887,34 @@ def _device_matches(devices: list[dict[str, Any]], device_id: str, pattern: str)
     return pattern_l in device_id.lower()
 
 
+def _fetch_gateway_devices() -> list[dict[str, Any]]:
+    global devices_cache, devices_cache_updated_at
+    resp = requests.get(
+        f"{_gateway_base()}/devices",
+        headers=_gateway_headers(),
+        timeout=SDR_GATEWAY_DEVICES_TIMEOUT_SECONDS,
+    )
+    if resp.status_code >= 400:
+        resp.raise_for_status()
+    body = resp.json()
+    devices = body if isinstance(body, list) else []
+    with devices_cache_lock:
+        devices_cache = [dict(item) for item in devices if isinstance(item, dict)]
+        devices_cache_updated_at = time.time()
+    return devices
+
+
+def _cached_gateway_devices() -> tuple[list[dict[str, Any]], float]:
+    with devices_cache_lock:
+        return [dict(item) for item in devices_cache], float(devices_cache_updated_at)
+
+
 def _available_devices() -> list[dict[str, Any]]:
     try:
-        resp = requests.get(f"{_gateway_base()}/devices", headers=_gateway_headers(), timeout=3)
-        if resp.status_code >= 400:
-            return []
-        body = resp.json()
-        return body if isinstance(body, list) else []
+        return _fetch_gateway_devices()
     except requests.RequestException:
-        return []
+        cached, _ = _cached_gateway_devices()
+        return cached
 
 
 def _stop_scan(stop_gateway: bool = True) -> None:
@@ -2985,11 +3008,15 @@ def index():
 @app.get("/api/devices")
 def devices():
     try:
-        resp = requests.get(f"{_gateway_base()}/devices", headers=_gateway_headers(), timeout=3)
-        if resp.status_code >= 400:
-            return jsonify(resp.json()), resp.status_code
-        return jsonify(resp.json())
+        return jsonify(_fetch_gateway_devices())
     except requests.RequestException as exc:
+        cached, updated_at = _cached_gateway_devices()
+        if cached:
+            response = jsonify(cached)
+            response.headers["X-RF-Sentinel-Warning"] = "using cached SDR device list; sdr-gateway /devices request failed"
+            response.headers["X-RF-Sentinel-Cache-Age"] = f"{max(0.0, time.time() - updated_at):.1f}"
+            response.headers["X-RF-Sentinel-Gateway-Error"] = str(exc)[:300]
+            return response
         return jsonify({"error": "sdr-gateway is unavailable", "detail": str(exc), "gateway_base": _gateway_base()}), 503
 
 
