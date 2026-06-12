@@ -174,6 +174,7 @@ def _build_jobs(args: argparse.Namespace) -> tuple[list[ScanJob], list[ScanJob]]
                 "--json",
                 "--max-frames",
                 "0",
+                "--require-fcs",
                 "--discovery-mode",
                 args.zigbee_discovery_mode,
                 "--sample-rate-sps",
@@ -327,11 +328,26 @@ def _command_value(command: list[str], flag: str, default: str = "") -> str:
         return default
 
 
+def _follow_device_id(args: argparse.Namespace) -> str:
+    return str(args.radio_b_device_id or args.hop_device_id or "").strip()
+
+
+def _job_device_id(args: argparse.Namespace, job: ScanJob) -> str:
+    return _command_value(job.command, "--device-id", args.hop_device_id).strip()
+
+
+def _is_follow_device_job(args: argparse.Namespace, job: ScanJob) -> bool:
+    follow_device = _follow_device_id(args)
+    return bool(follow_device) and _job_device_id(args, job) == follow_device
+
+
 def _materialize_job(args: argparse.Namespace, job: ScanJob) -> tuple[ScanJob, str]:
     if job.protocol != "zigbee":
         return job, ""
     follow_channel = _zigbee_follow_channel(args)
     if follow_channel is None:
+        return job, ""
+    if not _is_follow_device_job(args, job):
         return job, ""
     device_id = _command_value(job.command, "--device-id", args.hop_device_id)
     followed = ScanJob(
@@ -356,6 +372,7 @@ def _materialize_job(args: argparse.Namespace, job: ScanJob) -> tuple[ScanJob, s
             str(args.zigbee_vga_gain_db),
             "--no-amp-enable",
             "--no-debug-bursts",
+            "--require-fcs",
             "--live-decode-workers",
             str(args.zigbee_live_decode_workers),
             "--live-decode-queue",
@@ -365,8 +382,8 @@ def _materialize_job(args: argparse.Namespace, job: ScanJob) -> tuple[ScanJob, s
     return followed, str(follow_channel)
 
 
-def _priority_protocol(args: argparse.Namespace) -> str:
-    return "zigbee" if _zigbee_follow_channel(args) is not None else ""
+def _priority_protocol(args: argparse.Namespace, job: ScanJob) -> str:
+    return "zigbee" if _zigbee_follow_channel(args) is not None and _is_follow_device_job(args, job) else ""
 
 
 def _run(args: argparse.Namespace) -> int:
@@ -394,7 +411,7 @@ def _run(args: argparse.Namespace) -> int:
             job = jobs[cycle_index % len(jobs)]
             cycle_index += 1
             enabled_protocols = _enabled_protocols(args)
-            priority_protocol = _priority_protocol(args)
+            priority_protocol = _priority_protocol(args, job)
             if priority_protocol and job.protocol != priority_protocol:
                 time.sleep(0.15)
                 continue
@@ -423,7 +440,8 @@ def _run(args: argparse.Namespace) -> int:
                 if job.protocol not in _enabled_protocols(args):
                     print(f"[rf-sentinel] stopping disabled job={active_job.name}", flush=True)
                     break
-                if _priority_protocol(args) and job.protocol != _priority_protocol(args):
+                priority_protocol = _priority_protocol(args, job)
+                if priority_protocol and job.protocol != priority_protocol:
                     print(f"[rf-sentinel] stopping deprioritized job={active_job.name}", flush=True)
                     break
                 if job.protocol == "zigbee" and str(_zigbee_follow_channel(args) or "") != follow_marker:
@@ -461,7 +479,7 @@ def _run(args: argparse.Namespace) -> int:
             job = cycled[cycle_index % len(cycled)]
             cycle_index += 1
             enabled_protocols = _enabled_protocols(args)
-            priority_protocol = _priority_protocol(args)
+            priority_protocol = _priority_protocol(args, job)
             if priority_protocol and job.protocol != priority_protocol:
                 time.sleep(0.15)
                 continue
@@ -490,7 +508,8 @@ def _run(args: argparse.Namespace) -> int:
                 if job.protocol not in _enabled_protocols(args):
                     print(f"[rf-sentinel] stopping disabled job={active_job.name}", flush=True)
                     break
-                if _priority_protocol(args) and job.protocol != _priority_protocol(args):
+                priority_protocol = _priority_protocol(args, job)
+                if priority_protocol and job.protocol != priority_protocol:
                     print(f"[rf-sentinel] stopping deprioritized job={active_job.name}", flush=True)
                     break
                 if job.protocol == "zigbee" and str(_zigbee_follow_channel(args) or "") != follow_marker:

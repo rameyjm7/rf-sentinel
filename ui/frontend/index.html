@@ -907,6 +907,16 @@
         font-size: 14px;
       }
 
+      .chip.fcs-ok {
+        color: #06351f;
+        background: #95f2bf;
+      }
+
+      .chip.fcs-bad {
+        color: #fff7ed;
+        background: #b42318;
+      }
+
       .chip-icon {
         width: 15px;
         height: 15px;
@@ -1567,6 +1577,13 @@
         return `<span class="chip ${protocolClass(value)}">${icon}${value}</span>`;
       }
 
+      function fcsChip(row) {
+        if (row?.protocol !== "ZIGBEE" || row.fcs_ok === undefined || row.fcs_ok === null) return "";
+        return row.fcs_ok
+          ? `<span class="chip fcs-ok">${materialIcon("verified")}FCS OK</span>`
+          : `<span class="chip fcs-bad">${materialIcon("warning")}FCS BAD</span>`;
+      }
+
       function brandKind(rowOrLabel) {
         const text = typeof rowOrLabel === "string"
           ? rowOrLabel
@@ -1834,6 +1851,7 @@
                           <h3>${titleWithFollowLock(row)}</h3>
                           <div class="chips">
                             ${protocolChip(row.protocol)}
+                            ${fcsChip(row)}
                             ${row.inferred_merge ? `<span class="chip inferred">inferred merge${Number(row.inferred_merge_count || 0) > 1 ? ` · ${Number(row.inferred_merge_count || 0)} linked` : ""}</span>` : ""}
                             ${deviceType ? `<span class="chip">Type ${deviceType}</span>` : ""}
                             ${deviceTypeDetail ? `<span class="chip">${deviceTypeDetail}</span>` : ""}
@@ -2062,6 +2080,7 @@
                   ${protocolChip(row.protocol)}
                 </div>
                 <div class="chips">
+                  ${fcsChip(row)}
                   ${type ? `<span class="chip">${type}</span>` : ""}
                   ${manufacturer ? `<span class="chip">${manufacturer}</span>` : ""}
                   <span class="chip">${Number(row.detections || 0).toLocaleString()} detections</span>
@@ -2104,6 +2123,7 @@
                 </div>
                 <div class="chips">
                   ${protocolChip(row.protocol)}
+                  ${fcsChip(row)}
                   <span class="chip">CH ${row.channel ?? ""}</span>
                   <span class="chip">${age(row.last_seen_at)}</span>
                   <span class="chip">${fmtMaybeDb(row.last_rssi_dbfs)}</span>
@@ -2222,6 +2242,10 @@
         if (status.mode === "sentinel") {
           const radioA = status.device_ids?.radio_a || status.device_ids?.classic || "radio A";
           const radioB = status.device_ids?.radio_b || status.device_ids?.hop || "radio B";
+          const followChannel = status.follow_target?.zigbee?.channel ?? status.decoder_stats?.follow?.zigbee?.channel;
+          if (followChannel !== undefined && followChannel !== null) {
+            return `RF Sentinel two-SDR sweep · ${radioA} + ${radioB} · Zigbee locked CH ${followChannel}`;
+          }
           return `RF Sentinel two-SDR sweep · ${radioA} + ${radioB}`;
         }
         if (status.mode === "classic" || status.mode === "both") {

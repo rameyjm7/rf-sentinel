@@ -68,6 +68,7 @@ _load_env_file(PROJECT_ROOT / "config" / "env.txt")
 DATA_DIR = Path(__file__).resolve().parent / "data"
 RF_SENTINEL_CONTROL_PATH = DATA_DIR / "rf_sentinel_control.json"
 RF_SENTINEL_NO_CHANGE = object()
+RF_SENTINEL_KEEP_BAD_FCS = os.getenv("RF_SENTINEL_KEEP_BAD_FCS", "0").strip().lower() in {"1", "true", "yes", "on"}
 BLE_IDENTITY_CACHE_PATH = DATA_DIR / "ble_identities.json"
 COMPANY_IDENTIFIERS_PATH = DATA_DIR / "company_identifiers.json"
 UUID16_IDENTIFIERS_PATH = DATA_DIR / "uuid16_identifiers.json"
@@ -2425,6 +2426,19 @@ def _real_rssi(value: Any) -> float | None:
     return rssi
 
 
+def _optional_bool(value: Any) -> bool | None:
+    if isinstance(value, bool):
+        return value
+    if value is None:
+        return None
+    text = str(value).strip().lower()
+    if text in {"1", "true", "yes", "on"}:
+        return True
+    if text in {"0", "false", "no", "off"}:
+        return False
+    return None
+
+
 def _scanner_json_to_events(source: str, payload: dict[str, Any]) -> list[dict[str, Any]]:
     now = float(payload.get("timestamp") or payload.get("seen_at") or time.time())
     protocol = str(payload.get("protocol") or "").lower()
@@ -2445,6 +2459,9 @@ def _scanner_json_to_events(source: str, payload: dict[str, Any]) -> list[dict[s
     if protocol == "ieee802154" or source_protocol == "zigbee":
         mac = payload.get("mac") if isinstance(payload.get("mac"), dict) else {}
         payload_hex = str(mac.get("payload_hex") or payload.get("payload_hex") or "")
+        fcs_ok = _optional_bool(payload.get("fcs_ok"))
+        if fcs_ok is False and not RF_SENTINEL_KEEP_BAD_FCS:
+            return []
         source_address = str(mac.get("source_address") or "").strip()
         destination_address = str(mac.get("destination_address") or "").strip()
         pan_id = mac.get("source_pan_id") or mac.get("destination_pan_id")
@@ -2467,6 +2484,8 @@ def _scanner_json_to_events(source: str, payload: dict[str, Any]) -> list[dict[s
                 "center_freq_hz": payload.get("center_freq_hz"),
                 "last_rssi_dbfs": _real_rssi(payload.get("rssi_dbfs")),
                 "confidence": payload.get("confidence"),
+                "fcs_ok": fcs_ok,
+                "fcs_hex": mac.get("fcs_hex"),
                 "payload_hex": payload_hex,
                 "psdu_hex": payload.get("psdu_hex"),
                 "sequence_number": mac.get("sequence_number"),
@@ -2657,6 +2676,8 @@ def _upsert_discovery_row(event: dict[str, Any]) -> None:
             "channel": event.get("channel"),
             "center_freq_hz": event.get("center_freq_hz"),
             "confidence": event.get("confidence"),
+            "fcs_ok": event.get("fcs_ok"),
+            "fcs_hex": event.get("fcs_hex"),
             "payload_hex": event.get("payload_hex") or event.get("psdu_hex"),
         }
     elif event.get("kind") == "tpms_frame":
@@ -3191,7 +3212,6 @@ def _start_rf_sentinel_engine(
             ]
         )
     protocols = enabled_protocols or {"btc", "ble", "zigbee", "tpms"}
-    _write_rf_sentinel_control(protocols)
     if "btc" not in protocols:
         cmd.append("--no-btc")
     if "ble" not in protocols:
@@ -3200,6 +3220,7 @@ def _start_rf_sentinel_engine(
         cmd.append("--no-zigbee")
     if "tpms" not in protocols:
         cmd.append("--no-tpms")
+    control = _write_rf_sentinel_control(protocols, zigbee_follow_channel=None)
     cmd.extend(["--control-file", str(RF_SENTINEL_CONTROL_PATH)])
     env = os.environ.copy()
     env["PYTHONUNBUFFERED"] = "1"
@@ -3216,7 +3237,7 @@ def _start_rf_sentinel_engine(
     rf_sentinel_process = proc
     rf_sentinel_thread = threading.Thread(target=_rf_sentinel_loop, args=(proc,), daemon=True)
     rf_sentinel_thread.start()
-    return {"engine": "rf_sentinel_scan", "command": cmd, "pid": proc.pid}
+    return {"engine": "rf_sentinel_scan", "command": cmd, "pid": proc.pid, "follow": control.get("follow", {})}
 
 
 def _stop_rf_sentinel_engine(timeout_s: float = 4.0) -> None:
