@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import argparse
+import json
 import os
 import shutil
 import signal
@@ -27,6 +28,7 @@ DEFAULT_ZIGBEE_ACTIVE_DWELL_S = 1.0
 @dataclass(frozen=True)
 class ScanJob:
     name: str
+    protocol: str
     command: list[str]
     dwell_s: float
     continuous: bool = False
@@ -114,6 +116,7 @@ def _build_jobs(args: argparse.Namespace) -> tuple[list[ScanJob], list[ScanJob]]
     def btc_job(name: str, device_id: str, bandwidth_mhz: int, lna_gain_db: float, vga_gain_db: float) -> ScanJob:
         return ScanJob(
             name=name,
+            protocol="btc",
             dwell_s=args.btc_slice_s,
             command=[
                 _bin("bluetooth_classic"),
@@ -139,6 +142,7 @@ def _build_jobs(args: argparse.Namespace) -> tuple[list[ScanJob], list[ScanJob]]
     def ble_job(name: str, device_id: str) -> ScanJob:
         return ScanJob(
             name=name,
+            protocol="ble",
             dwell_s=args.ble_slice_s,
             command=[
                 _bin("ble_scanner"),
@@ -157,8 +161,9 @@ def _build_jobs(args: argparse.Namespace) -> tuple[list[ScanJob], list[ScanJob]]
         )
 
     def zigbee_job(name: str, device_id: str) -> ScanJob:
-        return ScanJob(
+        job = ScanJob(
             name=name,
+            protocol="zigbee",
             dwell_s=args.zigbee_slice_s,
             command=[
                 _bin("zigbee_802154"),
@@ -182,7 +187,14 @@ def _build_jobs(args: argparse.Namespace) -> tuple[list[ScanJob], list[ScanJob]]
                 str(args.zigbee_activity_ttl_s),
                 "--max-active-decode-channels",
                 str(args.zigbee_max_active_decode_channels),
-                "--follow-energy-only",
+                "--fft-active-threshold-db",
+                str(args.zigbee_fft_active_threshold_db),
+                "--fft-shape-threshold-db",
+                str(args.zigbee_fft_shape_threshold_db),
+                "--fft-min-power-db",
+                str(args.zigbee_fft_min_power_db),
+                "--fft-top-channels",
+                str(args.zigbee_fft_top_channels),
                 "--lna-gain-db",
                 str(args.zigbee_lna_gain_db),
                 "--vga-gain-db",
@@ -194,10 +206,14 @@ def _build_jobs(args: argparse.Namespace) -> tuple[list[ScanJob], list[ScanJob]]
                 str(args.zigbee_live_decode_queue),
             ],
         )
+        if args.zigbee_follow_energy_only:
+            job.command.append("--follow-energy-only")
+        return job
 
     def tpms_job(name: str, device_id: str) -> ScanJob:
         return ScanJob(
             name=name,
+            protocol="tpms",
             dwell_s=args.tpms_slice_s,
             command=[
                 _bin("tpms_stack"),
@@ -235,7 +251,7 @@ def _build_jobs(args: argparse.Namespace) -> tuple[list[ScanJob], list[ScanJob]]
 
     if not args.no_btc:
         job = btc_job("btc", args.btc_device_id, args.btc_bandwidth_mhz, args.btc_lna_gain_db, args.btc_vga_gain_db)
-        continuous.append(ScanJob(name=job.name, continuous=True, dwell_s=0.0, command=job.command))
+        continuous.append(ScanJob(name=job.name, protocol=job.protocol, continuous=True, dwell_s=0.0, command=job.command))
 
     if not args.no_ble:
         cycled.append(ble_job("ble", args.hop_device_id))
@@ -247,6 +263,38 @@ def _build_jobs(args: argparse.Namespace) -> tuple[list[ScanJob], list[ScanJob]]
         cycled.append(tpms_job("tpms", args.hop_device_id))
 
     return continuous, cycled
+
+
+def _configured_protocols(args: argparse.Namespace) -> set[str]:
+    protocols = {"btc", "ble", "zigbee", "tpms"}
+    if args.no_btc:
+        protocols.discard("btc")
+    if args.no_ble:
+        protocols.discard("ble")
+    if args.no_zigbee:
+        protocols.discard("zigbee")
+    if args.no_tpms:
+        protocols.discard("tpms")
+    return protocols
+
+
+def _enabled_protocols(args: argparse.Namespace) -> set[str]:
+    protocols = _configured_protocols(args)
+    if not args.control_file:
+        return protocols
+    try:
+        with open(args.control_file, "r", encoding="utf-8") as handle:
+            payload = json.load(handle)
+    except FileNotFoundError:
+        return protocols
+    except (OSError, json.JSONDecodeError) as exc:
+        print(f"[rf-sentinel] control_file ignored error={exc}", file=sys.stderr, flush=True)
+        return protocols
+    requested = payload.get("protocols")
+    if not isinstance(requested, list):
+        return protocols
+    live_protocols = {str(item).strip().lower() for item in requested}
+    return protocols & live_protocols
 
 
 def _run(args: argparse.Namespace) -> int:
@@ -269,9 +317,18 @@ def _run(args: argparse.Namespace) -> int:
 
     def cycle_jobs(name: str, jobs: list[ScanJob]) -> None:
         cycle_index = 0
+        idle_notice = False
         while jobs and not supervisor.stop_requested.is_set():
             job = jobs[cycle_index % len(jobs)]
             cycle_index += 1
+            enabled_protocols = _enabled_protocols(args)
+            if job.protocol not in enabled_protocols:
+                if not enabled_protocols and not idle_notice:
+                    print(f"[rf-sentinel] hop group={name} paused; no protocols enabled", flush=True)
+                    idle_notice = True
+                time.sleep(0.15)
+                continue
+            idle_notice = False
             print(
                 f"[rf-sentinel] hop group={name} job={job.name} dwell_s={job.dwell_s:.1f}: {_format_command(job.command)}",
                 flush=True,
@@ -280,6 +337,9 @@ def _run(args: argparse.Namespace) -> int:
             deadline = time.time() + max(1.0, float(job.dwell_s))
             while time.time() < deadline and not supervisor.stop_requested.is_set():
                 if proc.poll() is not None:
+                    break
+                if job.protocol not in _enabled_protocols(args):
+                    print(f"[rf-sentinel] stopping disabled job={job.name}", flush=True)
                     break
                 time.sleep(0.1)
             supervisor.stop(job.name)
@@ -308,9 +368,18 @@ def _run(args: argparse.Namespace) -> int:
             return 0
 
         cycle_index = 0
+        idle_notice = False
         while not supervisor.stop_requested.is_set():
             job = cycled[cycle_index % len(cycled)]
             cycle_index += 1
+            enabled_protocols = _enabled_protocols(args)
+            if job.protocol not in enabled_protocols:
+                if not enabled_protocols and not idle_notice:
+                    print("[rf-sentinel] hop paused; no protocols enabled", flush=True)
+                    idle_notice = True
+                time.sleep(0.15)
+                continue
+            idle_notice = False
             print(
                 f"[rf-sentinel] hop job={job.name} dwell_s={job.dwell_s:.1f}: {_format_command(job.command)}",
                 flush=True,
@@ -319,6 +388,9 @@ def _run(args: argparse.Namespace) -> int:
             deadline = time.time() + max(1.0, float(job.dwell_s))
             while time.time() < deadline and not supervisor.stop_requested.is_set():
                 if proc.poll() is not None:
+                    break
+                if job.protocol not in _enabled_protocols(args):
+                    print(f"[rf-sentinel] stopping disabled job={job.name}", flush=True)
                     break
                 time.sleep(0.1)
             supervisor.stop(job.name)
@@ -365,7 +437,12 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--zigbee-active-dwell-s", type=float, default=DEFAULT_ZIGBEE_ACTIVE_DWELL_S)
     parser.add_argument("--zigbee-rescan-interval-s", type=float, default=45.0)
     parser.add_argument("--zigbee-activity-ttl-s", type=float, default=90.0)
-    parser.add_argument("--zigbee-max-active-decode-channels", type=int, default=4)
+    parser.add_argument("--zigbee-max-active-decode-channels", type=int, default=1)
+    parser.add_argument("--zigbee-fft-active-threshold-db", type=float, default=3.0)
+    parser.add_argument("--zigbee-fft-shape-threshold-db", type=float, default=2.0)
+    parser.add_argument("--zigbee-fft-min-power-db", type=float, default=-95.0)
+    parser.add_argument("--zigbee-fft-top-channels", type=int, default=4)
+    parser.add_argument("--zigbee-follow-energy-only", action="store_true")
     parser.add_argument("--zigbee-lna-gain-db", type=int, default=16)
     parser.add_argument("--zigbee-vga-gain-db", type=int, default=32)
     parser.add_argument("--zigbee-live-decode-workers", type=int, default=max(1, min(4, os.cpu_count() or 1)))
@@ -379,6 +456,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--no-ble", action="store_true")
     parser.add_argument("--no-zigbee", action="store_true")
     parser.add_argument("--no-tpms", action="store_true")
+    parser.add_argument("--control-file", default="", help="optional JSON file with a live protocols list")
     parser.add_argument("--once", action="store_true", help="run one BLE/Zigbee/TPMS cycle and exit")
     return parser
 

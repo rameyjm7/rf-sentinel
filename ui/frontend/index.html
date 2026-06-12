@@ -18,6 +18,9 @@
         --red: #b83c32;
         --gold: #b77b17;
         --chip: #e8e0ce;
+        --ble-blue: #125fd8;
+        --btc-blue: #64b5f6;
+        --zigbee-purple: #7e3ff2;
         --shadow: 0 18px 60px rgba(23, 33, 27, 0.12);
       }
 
@@ -757,8 +760,32 @@
       .detection-card {
         padding: 8px;
         border: 1px solid rgba(215, 208, 191, 0.8);
+        border-left: 4px solid var(--teal);
         border-radius: 7px;
         background: rgba(255, 250, 240, 0.82);
+      }
+
+      .detection-card.protocol-btle,
+      .candidate.protocol-btle {
+        border-left-color: var(--ble-blue);
+        background: linear-gradient(90deg, rgba(18, 95, 216, 0.1), rgba(255, 250, 240, 0.86) 34%);
+      }
+
+      .detection-card.protocol-btc,
+      .candidate.protocol-btc {
+        border-left-color: var(--btc-blue);
+        background: linear-gradient(90deg, rgba(100, 181, 246, 0.16), rgba(255, 250, 240, 0.86) 34%);
+      }
+
+      .detection-card.protocol-zigbee,
+      .candidate.protocol-zigbee {
+        border-left-color: var(--zigbee-purple);
+        background: linear-gradient(90deg, rgba(126, 63, 242, 0.12), rgba(255, 250, 240, 0.86) 34%);
+      }
+
+      .detection-card.protocol-tpms,
+      .candidate.protocol-tpms {
+        border-left-color: #6b7280;
       }
 
       .detection-card h3 {
@@ -806,12 +833,49 @@
       }
 
       .chip {
+        display: inline-flex;
+        align-items: center;
+        gap: 4px;
         padding: 3px 6px;
         border-radius: 999px;
         color: var(--ink);
         background: var(--chip);
         font-size: 0.7rem;
         font-variant-numeric: tabular-nums;
+      }
+
+      .chip .material-symbols-rounded {
+        font-size: 14px;
+      }
+
+      .chip-icon {
+        width: 15px;
+        height: 15px;
+        object-fit: contain;
+        border-radius: 3px;
+      }
+
+      .chip.protocol-btle {
+        color: #fff;
+        background: var(--ble-blue);
+      }
+
+      .chip.protocol-btc {
+        color: #082235;
+        background: #b9e1ff;
+      }
+
+      .chip.protocol-zigbee {
+        color: #fff;
+        background: var(--zigbee-purple);
+      }
+
+      .brand-icon-inline {
+        width: 1.25em;
+        height: 1.25em;
+        object-fit: contain;
+        margin-right: 0.28em;
+        vertical-align: -0.24em;
       }
 
       .chip.inferred {
@@ -863,6 +927,22 @@
       .candidate.good {
         border-color: rgba(31, 143, 98, 0.35);
         box-shadow: inset 0 0 0 1px rgba(31, 143, 98, 0.08);
+      }
+
+      .candidate.protocol-btle {
+        border-left: 4px solid var(--ble-blue);
+      }
+
+      .candidate.protocol-btc {
+        border-left: 4px solid var(--btc-blue);
+      }
+
+      .candidate.protocol-zigbee {
+        border-left: 4px solid var(--zigbee-purple);
+      }
+
+      .candidate.protocol-tpms {
+        border-left: 4px solid #6b7280;
       }
 
       .candidate-top {
@@ -1112,6 +1192,7 @@
       const candidatesEl = document.getElementById("candidates");
       const detectionViewSelect = document.getElementById("detectionViewSelect");
       let devicesReady = false;
+      let latestStatus = null;
       let activeDetectionTab = "ALL";
       let tableSort = { key: "last_seen_at", direction: "desc" };
       const detectionGroupOpen = new Map();
@@ -1390,6 +1471,68 @@
         return text;
       }
 
+      function protocolClass(protocol) {
+        const value = String(protocol || "").toUpperCase();
+        if (value === "BTLE") return "protocol-btle";
+        if (value === "BTC") return "protocol-btc";
+        if (value === "ZIGBEE") return "protocol-zigbee";
+        if (value === "TPMS") return "protocol-tpms";
+        return "protocol-rf";
+      }
+
+      function materialIcon(name) {
+        return `<span class="material-symbols-rounded" aria-hidden="true">${name}</span>`;
+      }
+
+      function protocolChip(protocol) {
+        const value = String(protocol || "RF").toUpperCase();
+        const icon = value === "BTLE" || value === "BTC"
+          ? materialIcon("bluetooth")
+          : value === "ZIGBEE"
+            ? iconImg("zigbee.png", "Zigbee")
+            : value === "TPMS"
+              ? materialIcon("radio_button_checked")
+              : materialIcon("sensors");
+        return `<span class="chip ${protocolClass(value)}">${icon}${value}</span>`;
+      }
+
+      function brandKind(rowOrLabel) {
+        const text = typeof rowOrLabel === "string"
+          ? rowOrLabel
+          : [
+              rowOrLabel?.identity,
+              rowOrLabel?.name,
+              rowOrLabel?.device_type,
+              rowOrLabel?.device_type_detail,
+              rowOrLabel?.manufacturer?.company_name,
+              fmtManufacturer(rowOrLabel || {}),
+              Array.isArray(rowOrLabel?.uuid16_names) ? rowOrLabel.uuid16_names.join(" ") : "",
+            ].join(" ");
+        const lower = String(text || "").toLowerCase();
+        if (lower.includes("airtag") || lower.includes("find my")) return "airtag";
+        if (lower.includes("apple") || lower.includes("airtag") || lower.includes("find my")) return "apple";
+        if (lower.includes("tile") || lower.includes("feed")) return "tile";
+        return "";
+      }
+
+      function iconImg(file, label) {
+        return `<img class="chip-icon" src="/resources/icons/${file}" alt="${label}" loading="lazy" />`;
+      }
+
+      function brandIcon(rowOrLabel) {
+        const kind = brandKind(rowOrLabel);
+        if (kind === "airtag") return `<img class="brand-icon-inline" src="/resources/icons/apple-airtag.png" alt="AirTag" loading="lazy" />`;
+        if (kind === "apple") return `<img class="brand-icon-inline" src="/resources/icons/apple.png" alt="Apple" loading="lazy" />`;
+        if (kind === "tile") return `<img class="brand-icon-inline" src="/resources/icons/tile.png" alt="Tile" loading="lazy" />`;
+        return "";
+      }
+
+      function titleWithBrandIcon(row) {
+        const icon = brandIcon(row);
+        const title = row.identity || row.name || row.mac || row.protocol || "Unknown RF entity";
+        return `${icon}${title}`;
+      }
+
       function uuidVendorName(row) {
         if (!Array.isArray(row.uuid16_names)) return "";
         for (const name of row.uuid16_names) {
@@ -1443,8 +1586,8 @@
             const deviceType = fmtDeviceType(row);
             const deviceTypeDetail = fmtDeviceTypeDetail(row);
             return `
-              <tr>
-                <td>${row.protocol || ""}</td>
+              <tr class="${protocolClass(row.protocol)}">
+                <td>${protocolChip(row.protocol)}</td>
                 <td>${row.identity || row.name || row.mac || "Unknown device"}</td>
                 <td>${deviceType || ""}${deviceTypeDetail ? `<br><span class="small">${deviceTypeDetail}</span>` : ""}</td>
                 <td>${row.mac || ""}</td>
@@ -1568,14 +1711,16 @@
             const bestRssi = Math.max(...devices.map((row) => Number(row.last_rssi_dbfs || -120)));
             const lastSeen = Math.max(...devices.map((row) => Number(row.last_seen_at || 0)));
             const groupKey = encodeURIComponent(label);
+            const groupProtocol = devices[0]?.protocol || "";
             const isOpen = detectionGroupOpen.has(groupKey)
               ? detectionGroupOpen.get(groupKey)
               : collapseAll ? false : index < 3;
             return `
-              <details class="detection-group" data-group="${groupKey}" ${isOpen ? "open" : ""}>
+              <details class="detection-group ${protocolClass(groupProtocol)}" data-group="${groupKey}" ${isOpen ? "open" : ""}>
                 <summary>
-                  <span>${label}</span>
+                  <span>${brandIcon(label)}${label}</span>
                   <span class="chips">
+                    ${groupProtocol ? protocolChip(groupProtocol) : ""}
                     <span class="chip">${devices.length} device${devices.length === 1 ? "" : "s"}</span>
                     <span class="chip">${Number(detections || 0).toLocaleString()} detections</span>
                     <span class="chip">${fmtMaybeDb(bestRssi)}</span>
@@ -1590,10 +1735,10 @@
                       const deviceType = fmtDeviceType(row);
                       const deviceTypeDetail = fmtDeviceTypeDetail(row);
                       return `
-                        <article class="detection-card">
-                          <h3>${row.identity || row.name || row.mac || "Unknown device"}</h3>
+                        <article class="detection-card ${protocolClass(row.protocol)}">
+                          <h3>${titleWithBrandIcon(row)}</h3>
                           <div class="chips">
-                            <span class="chip">${row.protocol || ""}</span>
+                            ${protocolChip(row.protocol)}
                             ${row.inferred_merge ? `<span class="chip inferred">inferred merge${Number(row.inferred_merge_count || 0) > 1 ? ` · ${Number(row.inferred_merge_count || 0)} linked` : ""}</span>` : ""}
                             ${deviceType ? `<span class="chip">Type ${deviceType}</span>` : ""}
                             ${deviceTypeDetail ? `<span class="chip">${deviceTypeDetail}</span>` : ""}
@@ -1770,12 +1915,13 @@
               macs.length ? `MACs: ${macs.join(", ")}` : "",
             ].filter(Boolean);
             return `
-              <article class="${group.detections > 1 ? "candidate good" : "candidate soft"}">
+              <article class="${group.detections > 1 ? "candidate good" : "candidate soft"} protocol-btle">
                 <div class="candidate-top">
-                  <strong>${group.label}</strong>
-                  <span class="chip">${group.rows.length} device${group.rows.length === 1 ? "" : "s"}</span>
+                  <strong>${brandIcon(group.label)}${group.label}</strong>
+                  <span class="chip protocol-btle">${materialIcon("bluetooth")}${group.rows.length} device${group.rows.length === 1 ? "" : "s"}</span>
                 </div>
                 <div class="chips">
+                  ${protocolChip("BTLE")}
                   <span class="chip">${Number(group.detections || 0).toLocaleString()} detections</span>
                   <span class="chip">${fmtMaybeDb(group.bestRssi)}</span>
                   <span class="chip">${age(group.lastSeen)}</span>
@@ -1814,10 +1960,10 @@
             const manufacturer = fmtManufacturer(row);
             const detail = row.detail || row.identity_source || row.device_type_detail || "Observed from SDR packet evidence.";
             return `
-              <article class="${Number(row.detections || 0) > 3 ? "candidate good" : "candidate soft"}">
+              <article class="${Number(row.detections || 0) > 3 ? "candidate good" : "candidate soft"} ${protocolClass(row.protocol)}">
                 <div class="candidate-top">
-                  <strong>${row.identity || row.name || row.mac || row.protocol || "Unknown RF entity"}</strong>
-                  <span class="chip">${row.protocol || "RF"}</span>
+                  <strong>${titleWithBrandIcon(row)}</strong>
+                  ${protocolChip(row.protocol)}
                 </div>
                 <div class="chips">
                   ${type ? `<span class="chip">${type}</span>` : ""}
@@ -1854,12 +2000,13 @@
           }
           candidatesEl.innerHTML = protocolRows
             .map((row) => `
-              <article class="${Number(row.detections || 0) > 1 ? "candidate good" : "candidate soft"}">
+              <article class="${Number(row.detections || 0) > 1 ? "candidate good" : "candidate soft"} ${protocolClass(row.protocol)}">
                 <div class="candidate-top">
-                  <strong>${row.identity || row.mac || activeDetectionTab}</strong>
+                  <strong>${titleWithBrandIcon(row)}</strong>
                   <span class="chip">${Number(row.detections || 0).toLocaleString()} hits</span>
                 </div>
                 <div class="chips">
+                  ${protocolChip(row.protocol)}
                   <span class="chip">CH ${row.channel ?? ""}</span>
                   <span class="chip">${age(row.last_seen_at)}</span>
                   <span class="chip">${fmtMaybeDb(row.last_rssi_dbfs)}</span>
@@ -1895,12 +2042,13 @@
                   ? "Converging. Follow-up packets are pruning UAP candidates."
                   : "Initialized cleanly. Waiting for more packets from this LAP to prune UAP candidates.";
             return `
-            <article class="${classicStrengthClass(candidate)}">
+            <article class="${classicStrengthClass(candidate)} protocol-btc">
               <div class="candidate-top">
                 <strong>${candidate.full_mac || candidate.mac || "XX:XX:XX:XX:XX:XX"}</strong>
-                <span class="chip">${statusText}</span>
+                <span class="chip protocol-btc">${materialIcon("bluetooth")}${statusText}</span>
               </div>
               <div class="chips">
+                ${protocolChip("BTC")}
                 <span class="chip">NAP ${candidate.nap || "XXXX"}</span>
                 <span class="chip">UAP ${uapLabel}</span>
                 <span class="chip">LAP ${candidate.lap || "XXXXXX"}</span>
@@ -2049,6 +2197,7 @@
         try {
           const resp = await fetch("/api/status");
           const status = await resp.json();
+          latestStatus = status;
           liveDot.classList.toggle("live", Boolean(status.running && status.worker_alive));
           runState.textContent = statusLabel(status);
           runToggleBtn.classList.toggle("danger", Boolean(status.running));
@@ -2076,6 +2225,25 @@
         } catch {
           liveDot.classList.remove("live");
           runState.textContent = "Offline";
+        }
+      }
+
+      async function applyProtocolSelection() {
+        refreshPlannedStatusLabel();
+        const protocols = selectedProtocols();
+        if (!latestStatus?.running) return;
+        try {
+          const resp = await fetch("/api/scan/protocols", {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ protocols }),
+          });
+          const data = await resp.json().catch(() => ({}));
+          if (!resp.ok) throw new Error(data.error || data.detail || "Protocol update failed");
+          const label = protocols.map((item) => item.toUpperCase()).join("+") || "paused";
+          runState.textContent = `Updated protocols: ${label}`;
+        } catch (err) {
+          runState.textContent = err.message || "Protocol update failed";
         }
       }
 
@@ -2192,15 +2360,15 @@
       btcInput.addEventListener("change", () => {
         setChannels();
         scheduleAutoHop();
-        refreshPlannedStatusLabel();
+        applyProtocolSelection();
       });
       btleInput.addEventListener("change", () => {
         setChannels();
         scheduleAutoHop();
-        refreshPlannedStatusLabel();
+        applyProtocolSelection();
       });
-      zigbeeInput.addEventListener("change", refreshPlannedStatusLabel);
-      tpmsInput.addEventListener("change", refreshPlannedStatusLabel);
+      zigbeeInput.addEventListener("change", applyProtocolSelection);
+      tpmsInput.addEventListener("change", applyProtocolSelection);
       setChannels();
       loadDevices();
       pollStatus();

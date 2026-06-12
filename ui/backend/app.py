@@ -66,6 +66,7 @@ def _load_env_file(path: Path) -> None:
 _load_env_file(PROJECT_ROOT / "config" / "env.txt")
 
 DATA_DIR = Path(__file__).resolve().parent / "data"
+RF_SENTINEL_CONTROL_PATH = DATA_DIR / "rf_sentinel_control.json"
 BLE_IDENTITY_CACHE_PATH = DATA_DIR / "ble_identities.json"
 COMPANY_IDENTIFIERS_PATH = DATA_DIR / "company_identifiers.json"
 UUID16_IDENTIFIERS_PATH = DATA_DIR / "uuid16_identifiers.json"
@@ -3023,6 +3024,14 @@ def _rf_sentinel_scan_bin() -> str:
     return str(candidate)
 
 
+def _write_rf_sentinel_control(enabled_protocols: set[str]) -> None:
+    DATA_DIR.mkdir(parents=True, exist_ok=True)
+    protocols = sorted(enabled_protocols & {"btc", "ble", "zigbee", "tpms"})
+    tmp_path = RF_SENTINEL_CONTROL_PATH.with_suffix(".json.tmp")
+    tmp_path.write_text(json.dumps({"protocols": protocols}, separators=(",", ":")), encoding="utf-8")
+    tmp_path.replace(RF_SENTINEL_CONTROL_PATH)
+
+
 def _terminate_process_group(proc: subprocess.Popen[str], timeout_s: float = 4.0) -> None:
     try:
         os.killpg(proc.pid, signal.SIGTERM)
@@ -3157,6 +3166,7 @@ def _start_rf_sentinel_engine(
             ]
         )
     protocols = enabled_protocols or {"btc", "ble", "zigbee", "tpms"}
+    _write_rf_sentinel_control(protocols)
     if "btc" not in protocols:
         cmd.append("--no-btc")
     if "ble" not in protocols:
@@ -3165,6 +3175,7 @@ def _start_rf_sentinel_engine(
         cmd.append("--no-zigbee")
     if "tpms" not in protocols:
         cmd.append("--no-tpms")
+    cmd.extend(["--control-file", str(RF_SENTINEL_CONTROL_PATH)])
     env = os.environ.copy()
     env["PYTHONUNBUFFERED"] = "1"
     proc = subprocess.Popen(
@@ -3197,6 +3208,21 @@ def _stop_rf_sentinel_engine(timeout_s: float = 4.0) -> None:
     rf_sentinel_thread = None
     if thread and thread.is_alive():
         thread.join(timeout=2.0)
+
+
+@app.post("/api/scan/protocols")
+def update_scan_protocols():
+    payload = request.get_json(silent=True) or {}
+    requested_protocols = payload.get("protocols")
+    if not isinstance(requested_protocols, list):
+        return _json_error(400, "update_scan_protocols", error="protocols must be a list")
+    enabled_protocols = {str(item).strip().lower() for item in requested_protocols}
+    enabled_protocols &= {"btc", "ble", "zigbee", "tpms"}
+    _write_rf_sentinel_control(enabled_protocols)
+    with state_lock:
+        state.decoder_stats["enabled_protocols"] = sorted(enabled_protocols)
+        _append_scanner_log(f"[ui] enabled protocols updated: {', '.join(sorted(enabled_protocols)) or 'none'}")
+    return jsonify({"ok": True, "protocols": sorted(enabled_protocols)})
 
 
 def _reset_stats() -> None:
@@ -3375,6 +3401,11 @@ def _start_gateway_stream(
 @app.get("/")
 def index():
     return send_from_directory(app.static_folder, "index.html")
+
+
+@app.get("/resources/<path:filename>")
+def resources(filename: str):
+    return send_from_directory(PROJECT_ROOT / "ui" / "resources", filename)
 
 
 @app.get("/api/devices")
