@@ -12,6 +12,8 @@ dependencies = []
 [project.scripts]
 rf-sentinel-scan = "rf_platform.scanner:main"
 rf_sentinel_scan = "rf_platform.scanner:main"
+rf-sentinel-pipeline = "rf_platform.pipeline:main"
+rf_sentinel_pipeline = "rf_platform.pipeline:main"
 
 [tool.setuptools.packages.find]
 include = ["rf_platform*"]
