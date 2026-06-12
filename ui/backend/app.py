@@ -67,6 +67,7 @@ _load_env_file(PROJECT_ROOT / "config" / "env.txt")
 
 DATA_DIR = Path(__file__).resolve().parent / "data"
 RF_SENTINEL_CONTROL_PATH = DATA_DIR / "rf_sentinel_control.json"
+RF_SENTINEL_NO_CHANGE = object()
 BLE_IDENTITY_CACHE_PATH = DATA_DIR / "ble_identities.json"
 COMPANY_IDENTIFIERS_PATH = DATA_DIR / "company_identifiers.json"
 UUID16_IDENTIFIERS_PATH = DATA_DIR / "uuid16_identifiers.json"
@@ -3024,12 +3025,36 @@ def _rf_sentinel_scan_bin() -> str:
     return str(candidate)
 
 
-def _write_rf_sentinel_control(enabled_protocols: set[str]) -> None:
+def _read_rf_sentinel_control() -> dict[str, Any]:
+    try:
+        payload = json.loads(RF_SENTINEL_CONTROL_PATH.read_text(encoding="utf-8"))
+    except (FileNotFoundError, OSError, json.JSONDecodeError):
+        return {}
+    return payload if isinstance(payload, dict) else {}
+
+
+def _write_rf_sentinel_control(
+    enabled_protocols: set[str] | None = None,
+    *,
+    zigbee_follow_channel: int | None | object = RF_SENTINEL_NO_CHANGE,
+) -> dict[str, Any]:
     DATA_DIR.mkdir(parents=True, exist_ok=True)
-    protocols = sorted(enabled_protocols & {"btc", "ble", "zigbee", "tpms"})
+    payload = _read_rf_sentinel_control()
+    if enabled_protocols is not None:
+        payload["protocols"] = sorted(enabled_protocols & {"btc", "ble", "zigbee", "tpms"})
+    if zigbee_follow_channel is not RF_SENTINEL_NO_CHANGE:
+        follow = payload.get("follow")
+        if not isinstance(follow, dict):
+            follow = {}
+        if isinstance(zigbee_follow_channel, int):
+            follow["zigbee"] = {"channel": zigbee_follow_channel}
+        else:
+            follow.pop("zigbee", None)
+        payload["follow"] = follow
     tmp_path = RF_SENTINEL_CONTROL_PATH.with_suffix(".json.tmp")
-    tmp_path.write_text(json.dumps({"protocols": protocols}, separators=(",", ":")), encoding="utf-8")
+    tmp_path.write_text(json.dumps(payload, separators=(",", ":")), encoding="utf-8")
     tmp_path.replace(RF_SENTINEL_CONTROL_PATH)
+    return payload
 
 
 def _terminate_process_group(proc: subprocess.Popen[str], timeout_s: float = 4.0) -> None:
@@ -3223,6 +3248,35 @@ def update_scan_protocols():
         state.decoder_stats["enabled_protocols"] = sorted(enabled_protocols)
         _append_scanner_log(f"[ui] enabled protocols updated: {', '.join(sorted(enabled_protocols)) or 'none'}")
     return jsonify({"ok": True, "protocols": sorted(enabled_protocols)})
+
+
+@app.post("/api/scan/follow")
+def update_scan_follow():
+    payload = request.get_json(silent=True) or {}
+    protocol = str(payload.get("protocol") or "").strip().lower()
+    if protocol != "zigbee":
+        return _json_error(400, "update_scan_follow", error="only zigbee follow is supported right now")
+    follow = bool(payload.get("follow", True))
+    channel_value = payload.get("channel")
+    channel: int | None
+    if follow:
+        try:
+            channel = int(channel_value)
+        except (TypeError, ValueError):
+            return _json_error(400, "update_scan_follow", error="zigbee follow requires a numeric channel")
+        if channel < 11 or channel > 26:
+            return _json_error(400, "update_scan_follow", error="zigbee channel must be 11-26")
+    else:
+        channel = None
+    control = _write_rf_sentinel_control(zigbee_follow_channel=channel)
+    follow_state = control.get("follow") if isinstance(control.get("follow"), dict) else {}
+    with state_lock:
+        state.decoder_stats["follow"] = follow_state
+        if channel is None:
+            _append_scanner_log("[ui] zigbee follow cleared")
+        else:
+            _append_scanner_log(f"[ui] zigbee follow locked channel {channel}")
+    return jsonify({"ok": True, "follow": follow_state})
 
 
 def _reset_stats() -> None:
@@ -3559,6 +3613,8 @@ def start_scan():
             state.test_target_error = btc_test_error
             state.decoder_stats["enabled_protocols"] = sorted(enabled_protocols)
             state.decoder_stats["sweep_both_radios"] = bool(sweep_both_radios)
+            control = _read_rf_sentinel_control()
+            state.decoder_stats["follow"] = control.get("follow") if isinstance(control.get("follow"), dict) else {}
         return jsonify(
             {
                 "ok": True,
@@ -3741,6 +3797,7 @@ def status():
                 "classic_candidates": state.classic_candidates[:32],
                 "classic_addresses": state.classic_addresses[:64],
                 "decoder_stats": state.decoder_stats,
+                "follow_target": state.decoder_stats.get("follow", {}),
                 "test_target": state.test_target,
                 "test_target_error": state.test_target_error,
                 "btc_engine": state.btc_engine,

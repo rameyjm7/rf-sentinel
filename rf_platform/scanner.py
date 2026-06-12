@@ -23,6 +23,7 @@ DEFAULT_JOB_DWELL_S = 8.0
 DEFAULT_ZIGBEE_SLICE_S = 16.0
 DEFAULT_ZIGBEE_DISCOVERY_SWEEP_S = 2.0
 DEFAULT_ZIGBEE_ACTIVE_DWELL_S = 1.0
+DEFAULT_ZIGBEE_FOLLOW_SAMPLE_RATE_SPS = 8_000_000
 
 
 @dataclass(frozen=True)
@@ -278,23 +279,94 @@ def _configured_protocols(args: argparse.Namespace) -> set[str]:
     return protocols
 
 
-def _enabled_protocols(args: argparse.Namespace) -> set[str]:
-    protocols = _configured_protocols(args)
+def _control_payload(args: argparse.Namespace) -> dict[str, object]:
     if not args.control_file:
-        return protocols
+        return {}
     try:
         with open(args.control_file, "r", encoding="utf-8") as handle:
             payload = json.load(handle)
     except FileNotFoundError:
-        return protocols
+        return {}
     except (OSError, json.JSONDecodeError) as exc:
         print(f"[rf-sentinel] control_file ignored error={exc}", file=sys.stderr, flush=True)
-        return protocols
+        return {}
+    return payload if isinstance(payload, dict) else {}
+
+
+def _enabled_protocols(args: argparse.Namespace) -> set[str]:
+    protocols = _configured_protocols(args)
+    payload = _control_payload(args)
     requested = payload.get("protocols")
     if not isinstance(requested, list):
         return protocols
     live_protocols = {str(item).strip().lower() for item in requested}
     return protocols & live_protocols
+
+
+def _zigbee_follow_channel(args: argparse.Namespace) -> int | None:
+    payload = _control_payload(args)
+    follow = payload.get("follow")
+    if not isinstance(follow, dict):
+        return None
+    zigbee = follow.get("zigbee")
+    if not isinstance(zigbee, dict):
+        return None
+    try:
+        channel = int(zigbee.get("channel"))
+    except (TypeError, ValueError):
+        return None
+    if 11 <= channel <= 26:
+        return channel
+    return None
+
+
+def _command_value(command: list[str], flag: str, default: str = "") -> str:
+    try:
+        return command[command.index(flag) + 1]
+    except (ValueError, IndexError):
+        return default
+
+
+def _materialize_job(args: argparse.Namespace, job: ScanJob) -> tuple[ScanJob, str]:
+    if job.protocol != "zigbee":
+        return job, ""
+    follow_channel = _zigbee_follow_channel(args)
+    if follow_channel is None:
+        return job, ""
+    device_id = _command_value(job.command, "--device-id", args.hop_device_id)
+    followed = ScanJob(
+        name=f"{job.name}:follow{follow_channel}",
+        protocol=job.protocol,
+        dwell_s=job.dwell_s,
+        command=[
+            _bin("zigbee_802154"),
+            "listen",
+            "--device-id",
+            device_id,
+            "--channel",
+            str(follow_channel),
+            "--json",
+            "--max-frames",
+            "0",
+            "--sample-rate-sps",
+            str(args.zigbee_follow_sample_rate_sps),
+            "--lna-gain-db",
+            str(args.zigbee_lna_gain_db),
+            "--vga-gain-db",
+            str(args.zigbee_vga_gain_db),
+            "--no-amp-enable",
+            "--no-debug-bursts",
+            "--live-decode-workers",
+            str(args.zigbee_live_decode_workers),
+            "--live-decode-queue",
+            str(args.zigbee_live_decode_queue),
+        ],
+    )
+    return followed, str(follow_channel)
+
+
+def _priority_protocol(args: argparse.Namespace) -> str:
+    return "zigbee" if _zigbee_follow_channel(args) is not None else ""
 
 
 def _run(args: argparse.Namespace) -> int:
@@ -322,6 +394,10 @@ def _run(args: argparse.Namespace) -> int:
             job = jobs[cycle_index % len(jobs)]
             cycle_index += 1
             enabled_protocols = _enabled_protocols(args)
+            priority_protocol = _priority_protocol(args)
+            if priority_protocol and job.protocol != priority_protocol:
+                time.sleep(0.15)
+                continue
             if job.protocol not in enabled_protocols:
                 if not enabled_protocols and not idle_notice:
                     print(f"[rf-sentinel] hop group={name} paused; no protocols enabled", flush=True)
@@ -329,20 +405,32 @@ def _run(args: argparse.Namespace) -> int:
                 time.sleep(0.15)
                 continue
             idle_notice = False
+            active_job, follow_marker = _materialize_job(args, job)
             print(
-                f"[rf-sentinel] hop group={name} job={job.name} dwell_s={job.dwell_s:.1f}: {_format_command(job.command)}",
+                f"[rf-sentinel] hop group={name} job={active_job.name} dwell_s={active_job.dwell_s:.1f}: {_format_command(active_job.command)}",
                 flush=True,
             )
-            proc = supervisor.start(job)
-            deadline = time.time() + max(1.0, float(job.dwell_s))
+            proc = supervisor.start(active_job)
+            deadline = time.time() + max(1.0, float(active_job.dwell_s))
+            proc_exited = False
             while time.time() < deadline and not supervisor.stop_requested.is_set():
                 if proc.poll() is not None:
-                    break
+                    if follow_marker:
+                        break
+                    if not proc_exited:
+                        proc_exited = True
+                        print(f"[rf-sentinel] job exited early job={active_job.name}; holding slot", flush=True)
                 if job.protocol not in _enabled_protocols(args):
-                    print(f"[rf-sentinel] stopping disabled job={job.name}", flush=True)
+                    print(f"[rf-sentinel] stopping disabled job={active_job.name}", flush=True)
+                    break
+                if _priority_protocol(args) and job.protocol != _priority_protocol(args):
+                    print(f"[rf-sentinel] stopping deprioritized job={active_job.name}", flush=True)
+                    break
+                if job.protocol == "zigbee" and str(_zigbee_follow_channel(args) or "") != follow_marker:
+                    print(f"[rf-sentinel] retuning zigbee job={active_job.name}", flush=True)
                     break
                 time.sleep(0.1)
-            supervisor.stop(job.name)
+            supervisor.stop(active_job.name)
             if args.once and cycle_index >= len(jobs):
                 break
 
@@ -373,6 +461,10 @@ def _run(args: argparse.Namespace) -> int:
             job = cycled[cycle_index % len(cycled)]
             cycle_index += 1
             enabled_protocols = _enabled_protocols(args)
+            priority_protocol = _priority_protocol(args)
+            if priority_protocol and job.protocol != priority_protocol:
+                time.sleep(0.15)
+                continue
             if job.protocol not in enabled_protocols:
                 if not enabled_protocols and not idle_notice:
                     print("[rf-sentinel] hop paused; no protocols enabled", flush=True)
@@ -380,20 +472,32 @@ def _run(args: argparse.Namespace) -> int:
                 time.sleep(0.15)
                 continue
             idle_notice = False
+            active_job, follow_marker = _materialize_job(args, job)
             print(
-                f"[rf-sentinel] hop job={job.name} dwell_s={job.dwell_s:.1f}: {_format_command(job.command)}",
+                f"[rf-sentinel] hop job={active_job.name} dwell_s={active_job.dwell_s:.1f}: {_format_command(active_job.command)}",
                 flush=True,
             )
-            proc = supervisor.start(job)
-            deadline = time.time() + max(1.0, float(job.dwell_s))
+            proc = supervisor.start(active_job)
+            deadline = time.time() + max(1.0, float(active_job.dwell_s))
+            proc_exited = False
             while time.time() < deadline and not supervisor.stop_requested.is_set():
                 if proc.poll() is not None:
-                    break
+                    if follow_marker:
+                        break
+                    if not proc_exited:
+                        proc_exited = True
+                        print(f"[rf-sentinel] job exited early job={active_job.name}; holding slot", flush=True)
                 if job.protocol not in _enabled_protocols(args):
-                    print(f"[rf-sentinel] stopping disabled job={job.name}", flush=True)
+                    print(f"[rf-sentinel] stopping disabled job={active_job.name}", flush=True)
+                    break
+                if _priority_protocol(args) and job.protocol != _priority_protocol(args):
+                    print(f"[rf-sentinel] stopping deprioritized job={active_job.name}", flush=True)
+                    break
+                if job.protocol == "zigbee" and str(_zigbee_follow_channel(args) or "") != follow_marker:
+                    print(f"[rf-sentinel] retuning zigbee job={active_job.name}", flush=True)
                     break
                 time.sleep(0.1)
-            supervisor.stop(job.name)
+            supervisor.stop(active_job.name)
             if args.once and cycle_index >= len(cycled):
                 break
         return 0
@@ -433,6 +537,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--zigbee-slice-s", type=float, default=DEFAULT_ZIGBEE_SLICE_S)
     parser.add_argument("--zigbee-discovery-mode", choices=("auto", "fft", "iq"), default="auto")
     parser.add_argument("--zigbee-sample-rate-sps", type=int, default=0, help="0 means use the hop SDR max rate")
+    parser.add_argument("--zigbee-follow-sample-rate-sps", type=int, default=DEFAULT_ZIGBEE_FOLLOW_SAMPLE_RATE_SPS)
     parser.add_argument("--zigbee-discovery-sweep-s", type=float, default=DEFAULT_ZIGBEE_DISCOVERY_SWEEP_S)
     parser.add_argument("--zigbee-active-dwell-s", type=float, default=DEFAULT_ZIGBEE_ACTIVE_DWELL_S)
     parser.add_argument("--zigbee-rescan-interval-s", type=float, default=45.0)

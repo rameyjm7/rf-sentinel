@@ -792,6 +792,65 @@
         margin: 0 0 6px;
         font-size: 0.92rem;
         font-variant-numeric: tabular-nums;
+        display: flex;
+        align-items: center;
+        gap: 6px;
+        justify-content: space-between;
+      }
+
+      .title-text {
+        min-width: 0;
+      }
+
+      .lock-button {
+        border: 1px solid rgba(126, 63, 242, 0.45);
+        background: rgba(126, 63, 242, 0.14);
+        color: var(--zigbee-purple);
+        border-radius: 999px;
+        padding: 2px 7px;
+        display: inline-flex;
+        align-items: center;
+        gap: 3px;
+        cursor: pointer;
+        font: inherit;
+        line-height: 1;
+      }
+
+      .lock-button .material-symbols-rounded {
+        font-size: 1rem;
+      }
+
+      .follow-menu {
+        position: fixed;
+        z-index: 50;
+        min-width: 190px;
+        padding: 6px;
+        border: 1px solid rgba(126, 63, 242, 0.45);
+        border-radius: 10px;
+        background: rgba(36, 24, 0, 0.96);
+        box-shadow: 0 14px 35px rgba(0, 0, 0, 0.35);
+      }
+
+      .follow-menu[hidden] {
+        display: none;
+      }
+
+      .follow-menu button {
+        width: 100%;
+        border: 0;
+        border-radius: 8px;
+        background: transparent;
+        color: var(--cream);
+        padding: 8px 10px;
+        display: flex;
+        align-items: center;
+        gap: 7px;
+        cursor: pointer;
+        text-align: left;
+      }
+
+      .follow-menu button:hover {
+        background: rgba(126, 63, 242, 0.26);
       }
 
       .decoded-text {
@@ -1018,6 +1077,7 @@
     </style>
   </head>
   <body>
+    <div id="followMenu" class="follow-menu" hidden></div>
     <div class="app">
       <header>
         <div>
@@ -1191,6 +1251,7 @@
       const candidatePanelTitle = document.getElementById("candidatePanelTitle");
       const candidatesEl = document.getElementById("candidates");
       const detectionViewSelect = document.getElementById("detectionViewSelect");
+      const followMenu = document.getElementById("followMenu");
       let devicesReady = false;
       let latestStatus = null;
       let activeDetectionTab = "ALL";
@@ -1326,6 +1387,16 @@
 
       function syncModeCheckboxes(mode) {
         return mode;
+      }
+
+      function syncProtocolCheckboxes(status) {
+        const enabled = status?.decoder_stats?.enabled_protocols;
+        if (!Array.isArray(enabled)) return;
+        const protocols = new Set(enabled.map((item) => String(item).toLowerCase()));
+        btcInput.checked = protocols.has("btc");
+        btleInput.checked = protocols.has("ble");
+        zigbeeInput.checked = protocols.has("zigbee");
+        tpmsInput.checked = protocols.has("tpms");
       }
 
       function nextChannelValue() {
@@ -1533,6 +1604,30 @@
         return `${icon}${title}`;
       }
 
+      function zigbeeFollowChannel() {
+        const channel = latestStatus?.follow_target?.zigbee?.channel ?? latestStatus?.decoder_stats?.follow?.zigbee?.channel;
+        const numeric = Number(channel);
+        return Number.isFinite(numeric) ? numeric : null;
+      }
+
+      function isFollowedZigbee(row) {
+        return row?.protocol === "ZIGBEE" && Number(row.channel) === zigbeeFollowChannel();
+      }
+
+      function followAttrs(row) {
+        if (row?.protocol !== "ZIGBEE" || row.channel === undefined || row.channel === null || row.channel === "") return "";
+        const channel = Number(row.channel);
+        if (!Number.isFinite(channel)) return "";
+        return ` data-follow-protocol="zigbee" data-follow-channel="${channel}"`;
+      }
+
+      function titleWithFollowLock(row) {
+        const lock = isFollowedZigbee(row)
+          ? `<button class="lock-button" type="button" data-unfollow-zigbee="${Number(row.channel)}" title="Unlock Zigbee channel ${Number(row.channel)}">${materialIcon("lock")}CH ${Number(row.channel)}</button>`
+          : "";
+        return `<span class="title-text">${titleWithBrandIcon(row)}</span>${lock}`;
+      }
+
       function uuidVendorName(row) {
         if (!Array.isArray(row.uuid16_names)) return "";
         for (const name of row.uuid16_names) {
@@ -1735,8 +1830,8 @@
                       const deviceType = fmtDeviceType(row);
                       const deviceTypeDetail = fmtDeviceTypeDetail(row);
                       return `
-                        <article class="detection-card ${protocolClass(row.protocol)}">
-                          <h3>${titleWithBrandIcon(row)}</h3>
+                        <article class="detection-card ${protocolClass(row.protocol)}"${followAttrs(row)}>
+                          <h3>${titleWithFollowLock(row)}</h3>
                           <div class="chips">
                             ${protocolChip(row.protocol)}
                             ${row.inferred_merge ? `<span class="chip inferred">inferred merge${Number(row.inferred_merge_count || 0) > 1 ? ` · ${Number(row.inferred_merge_count || 0)} linked` : ""}</span>` : ""}
@@ -1960,9 +2055,10 @@
             const manufacturer = fmtManufacturer(row);
             const detail = row.detail || row.identity_source || row.device_type_detail || "Observed from SDR packet evidence.";
             return `
-              <article class="${Number(row.detections || 0) > 3 ? "candidate good" : "candidate soft"} ${protocolClass(row.protocol)}">
+              <article class="${Number(row.detections || 0) > 3 ? "candidate good" : "candidate soft"} ${protocolClass(row.protocol)}"${followAttrs(row)}>
                 <div class="candidate-top">
                   <strong>${titleWithBrandIcon(row)}</strong>
+                  ${isFollowedZigbee(row) ? `<button class="lock-button" type="button" data-unfollow-zigbee="${Number(row.channel)}" title="Unlock Zigbee channel ${Number(row.channel)}">${materialIcon("lock")}CH ${Number(row.channel)}</button>` : ""}
                   ${protocolChip(row.protocol)}
                 </div>
                 <div class="chips">
@@ -2000,9 +2096,10 @@
           }
           candidatesEl.innerHTML = protocolRows
             .map((row) => `
-              <article class="${Number(row.detections || 0) > 1 ? "candidate good" : "candidate soft"} ${protocolClass(row.protocol)}">
+              <article class="${Number(row.detections || 0) > 1 ? "candidate good" : "candidate soft"} ${protocolClass(row.protocol)}"${followAttrs(row)}>
                 <div class="candidate-top">
                   <strong>${titleWithBrandIcon(row)}</strong>
+                  ${isFollowedZigbee(row) ? `<button class="lock-button" type="button" data-unfollow-zigbee="${Number(row.channel)}" title="Unlock Zigbee channel ${Number(row.channel)}">${materialIcon("lock")}CH ${Number(row.channel)}</button>` : ""}
                   <span class="chip">${Number(row.detections || 0).toLocaleString()} hits</span>
                 </div>
                 <div class="chips">
@@ -2204,6 +2301,7 @@
           runToggleText.textContent = status.running ? "Stop" : "Start";
           runToggleBtn.querySelector(".material-symbols-rounded").textContent = status.running ? "stop" : "play_arrow";
           if (status.running) syncModeCheckboxes(status.mode);
+          if (status.running) syncProtocolCheckboxes(status);
           const rows = status.discovery_table || [];
           const detectionTotal = rows.reduce((sum, row) => sum + Number(row.detections || 0), 0);
           const protocolDetections = (protocol) => rows
@@ -2244,6 +2342,67 @@
           runState.textContent = `Updated protocols: ${label}`;
         } catch (err) {
           runState.textContent = err.message || "Protocol update failed";
+        }
+      }
+
+      function hideFollowMenu() {
+        followMenu.hidden = true;
+        followMenu.innerHTML = "";
+      }
+
+      async function setZigbeeFollow(channel) {
+        const follow = Number.isFinite(Number(channel));
+        const resp = await fetch("/api/scan/follow", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ protocol: "zigbee", follow, channel: follow ? Number(channel) : null }),
+        });
+        const data = await resp.json().catch(() => ({}));
+        if (!resp.ok) throw new Error(data.error || data.detail || "Follow update failed");
+        latestStatus = { ...(latestStatus || {}), follow_target: data.follow || {} };
+        runState.textContent = follow ? `Following Zigbee CH ${Number(channel)}` : "Zigbee follow cleared";
+        await pollStatus();
+      }
+
+      function showFollowMenu(event, card) {
+        const channel = Number(card.dataset.followChannel);
+        if (!Number.isFinite(channel)) return;
+        const followed = channel === zigbeeFollowChannel();
+        event.preventDefault();
+        followMenu.innerHTML = `
+          <button type="button" data-follow-menu-action="${followed ? "unfollow" : "follow"}" data-channel="${channel}">
+            ${materialIcon(followed ? "lock_open" : "lock")}
+            ${followed ? `Unfollow Zigbee CH ${channel}` : `Follow Zigbee CH ${channel}`}
+          </button>
+        `;
+        const width = 210;
+        followMenu.style.left = `${Math.min(event.clientX, window.innerWidth - width - 12)}px`;
+        followMenu.style.top = `${Math.min(event.clientY, window.innerHeight - 58)}px`;
+        followMenu.hidden = false;
+      }
+
+      function handleFollowContextMenu(event) {
+        const card = event.target.closest("[data-follow-protocol='zigbee']");
+        if (!card) return;
+        showFollowMenu(event, card);
+      }
+
+      async function handleFollowClick(event) {
+        const menuButton = event.target.closest("[data-follow-menu-action]");
+        const unlockButton = event.target.closest("[data-unfollow-zigbee]");
+        if (!menuButton && !unlockButton) return;
+        event.preventDefault();
+        event.stopPropagation();
+        try {
+          if (unlockButton || menuButton.dataset.followMenuAction === "unfollow") {
+            await setZigbeeFollow(null);
+          } else {
+            await setZigbeeFollow(Number(menuButton.dataset.channel));
+          }
+        } catch (err) {
+          runState.textContent = err.message || "Follow update failed";
+        } finally {
+          hideFollowMenu();
         }
       }
 
@@ -2369,6 +2528,13 @@
       });
       zigbeeInput.addEventListener("change", applyProtocolSelection);
       tpmsInput.addEventListener("change", applyProtocolSelection);
+      identityTableWrap.addEventListener("contextmenu", handleFollowContextMenu);
+      candidatesEl.addEventListener("contextmenu", handleFollowContextMenu);
+      document.addEventListener("click", handleFollowClick);
+      document.addEventListener("click", (event) => {
+        if (!event.target.closest("#followMenu")) hideFollowMenu();
+      });
+      window.addEventListener("blur", hideFollowMenu);
       setChannels();
       loadDevices();
       pollStatus();

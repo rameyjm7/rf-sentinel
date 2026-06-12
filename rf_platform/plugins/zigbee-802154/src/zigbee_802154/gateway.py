@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import os
+import time
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Iterator
@@ -163,6 +164,9 @@ class GatewayClient:
         response = self._session.post(f"{self.base_url}/streams/start", headers=self.headers(), json=payload, timeout=12)
         if response.status_code == 409:
             self.stop_streams_for_device(config.device_id)
+            self.stop_sweeps_for_device(config.device_id)
+            self.stop_iq_sweeps_for_device(config.device_id)
+            time.sleep(0.2)
             response = self._session.post(f"{self.base_url}/streams/start", headers=self.headers(), json=payload, timeout=12)
         response.raise_for_status()
         body = response.json()
@@ -220,10 +224,39 @@ class GatewayClient:
                 continue
         return stopped
 
+    def stop_iq_sweeps_for_device(self, device_id: str) -> int:
+        try:
+            response = self._session.get(f"{self.base_url}/iq-sweeps", headers=self.headers(), timeout=8)
+            response.raise_for_status()
+        except requests.RequestException:
+            return 0
+        stopped = 0
+        for item in response.json():
+            config = item.get("config", {}) or {}
+            if str(config.get("device_id", "")) != device_id:
+                continue
+            sweep_id = str(item.get("iq_sweep_id") or item.get("sweep_id") or "")
+            if not sweep_id:
+                continue
+            try:
+                self.stop_iq_sweep(sweep_id)
+                stopped += 1
+            except Exception:
+                continue
+        return stopped
+
     def stop_stream(self, stream_id: str) -> None:
         if not stream_id:
             return
         response = self._session.post(f"{self.base_url}/streams/{stream_id}/stop", headers=self.headers(), timeout=2)
+        response.raise_for_status()
+
+    def stop_iq_sweep(self, sweep_id: str) -> None:
+        if not sweep_id:
+            return
+        response = self._session.post(f"{self.base_url}/iq-sweeps/{sweep_id}/stop", headers=self.headers(), timeout=2)
+        if response.status_code == 404:
+            return
         response.raise_for_status()
 
     def start_sweep(self, config: SweepConfig) -> SweepHandle:
@@ -240,6 +273,8 @@ class GatewayClient:
         if response.status_code == 409:
             self.stop_streams_for_device(config.device_id)
             self.stop_sweeps_for_device(config.device_id)
+            self.stop_iq_sweeps_for_device(config.device_id)
+            time.sleep(0.2)
             response = self._session.post(f"{self.base_url}/sweeps/start", headers=self.headers(), json=payload, timeout=12)
         response.raise_for_status()
         body = response.json()
