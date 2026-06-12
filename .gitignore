@@ -17,3 +17,4 @@ rf_platform/plugins/*/.git*/
 rf_platform/plugins/*/captures/
 rf_platform/plugins/*/src/*.egg-info/
 rf_platform/plugins/*/src/**/*.so
+*.egg-info/

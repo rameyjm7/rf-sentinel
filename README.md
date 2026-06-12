@@ -22,6 +22,7 @@ The core product stays passive: RF discovery, protocol intelligence, entity reso
 - A 79-channel Classic activity chart with one vertical bar per channel.
 - Zigbee / IEEE 802.15.4 receiver plugin under `rf_platform/plugins/zigbee-802154`.
 - Sub-GHz / TPMS receiver plugin under `rf_platform/plugins/subghz-stack`.
+- Multi-protocol scanner CLI that runs BTC on one SDR while time-slicing BLE, Zigbee, and TPMS on another SDR.
 
 ## Project Layout
 
@@ -101,6 +102,31 @@ Open:
 - `http://127.0.0.1:5050`
 
 The UI defaults to BTC enabled. For combined scanning, enable both `BTC` and `BTLE`; BTC defaults to a bladeRF device at `60` MHz and BTLE defaults to a HackRF device. The single gain slider drives both LNA and VGA gain values. Set the dwell seconds and press the Start/Stop button to rotate BTC banks while BTLE cycles advertising channels 37/38/39.
+
+Run the multi-protocol CLI scanner:
+
+```bash
+rf_sentinel_scan
+```
+
+Default scanner layout:
+
+- `bladerf:0` runs Bluetooth Classic continuously at `2442 MHz` / `60 MHz`.
+- `hackrf:0` time-slices BLE, Zigbee/802.15.4, and TPMS.
+- BLE uses the gateway-managed HackRF IQ sweep.
+- Zigbee defaults to the known-good XBee channel 25 settings.
+- TPMS auto-hops known `315 MHz` and `433.92 MHz` bands.
+
+Example with explicit radios and shorter slices:
+
+```bash
+rf_sentinel_scan \
+  --btc-device-id bladerf:0 \
+  --hop-device-id hackrf:0 \
+  --ble-slice-s 15 \
+  --zigbee-slice-s 15 \
+  --tpms-slice-s 15
+```
 
 ## Notes
 

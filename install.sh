@@ -31,6 +31,7 @@ fi
 echo "[RF Sentinel] installing Python requirements"
 "${VENV_DIR}/bin/python" -m pip install --upgrade pip
 "${VENV_DIR}/bin/python" -m pip install -r "${ROOT_DIR}/requirements.txt"
+"${VENV_DIR}/bin/python" -m pip install -e "${ROOT_DIR}"
 "${VENV_DIR}/bin/python" -m pip install -e "${BTC_PLUGIN_DIR}"
 "${VENV_DIR}/bin/python" -m pip install -e "${BLE_PLUGIN_DIR}"
 "${VENV_DIR}/bin/python" -m pip install -e "${ZIGBEE_PLUGIN_DIR}"

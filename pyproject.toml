@@ -1,0 +1,17 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "rf-sentinel"
+version = "0.1.0"
+description = "RF Sentinel multi-protocol scanner orchestration"
+requires-python = ">=3.10"
+dependencies = []
+
+[project.scripts]
+rf-sentinel-scan = "rf_platform.scanner:main"
+rf_sentinel_scan = "rf_platform.scanner:main"
+
+[tool.setuptools.packages.find]
+include = ["rf_platform*"]
