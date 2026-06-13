@@ -12,6 +12,7 @@ BTC_BUILD_DIR="${BTC_PLUGIN_DIR}/build"
 BLE_PLUGIN_DIR="${ROOT_DIR}/rf_platform/plugins/bluetooth-lowenergy"
 ZIGBEE_PLUGIN_DIR="${ROOT_DIR}/rf_platform/plugins/zigbee-802154"
 SUBGHZ_PLUGIN_DIR="${ROOT_DIR}/rf_platform/plugins/subghz-stack"
+FM_PLUGIN_DIR="${ROOT_DIR}/rf_platform/plugins/fm-broadcast"
 
 venv_is_stale() {
   if [[ ! -x "${VENV_DIR}/bin/python" ]]; then
@@ -62,9 +63,10 @@ echo "[RF Sentinel] installing Python requirements"
 "${VENV_DIR}/bin/python" -m pip install -e "${BLE_PLUGIN_DIR}"
 "${VENV_DIR}/bin/python" -m pip install -e "${ZIGBEE_PLUGIN_DIR}"
 "${VENV_DIR}/bin/python" -m pip install -e "${SUBGHZ_PLUGIN_DIR}"
+"${VENV_DIR}/bin/python" -m pip install -e "${FM_PLUGIN_DIR}"
 
 echo "[RF Sentinel] verifying CLI entry points"
-for cli in rf_sentinel_scan rf_sentinel_pipeline rf_sentinel_ui bluetooth_classic ble_scanner zigbee_802154 tpms_stack; do
+for cli in rf_sentinel_scan rf_sentinel_pipeline rf_sentinel_ui bluetooth_classic ble_scanner zigbee_802154 tpms_stack fm_broadcast; do
   if [[ ! -x "${VENV_DIR}/bin/${cli}" ]]; then
     echo "error: expected CLI missing or not executable: ${VENV_DIR}/bin/${cli}" >&2
     exit 1

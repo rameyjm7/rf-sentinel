@@ -22,6 +22,7 @@
         --btc-blue: #64b5f6;
         --zigbee-purple: #7e3ff2;
         --wifi-green: #16a34a;
+        --fm-amber: #f59e0b;
         --shadow: 0 18px 60px rgba(23, 33, 27, 0.12);
       }
 
@@ -823,6 +824,12 @@
         background: linear-gradient(90deg, rgba(22, 163, 74, 0.12), rgba(255, 250, 240, 0.86) 34%);
       }
 
+      .detection-card.protocol-fm,
+      .candidate.protocol-fm {
+        border-left-color: var(--fm-amber);
+        background: linear-gradient(90deg, rgba(245, 158, 11, 0.13), rgba(255, 250, 240, 0.86) 34%);
+      }
+
       .wifi-topology {
         display: grid;
         gap: 10px;
@@ -1170,6 +1177,11 @@
         background: #bbf7d0;
       }
 
+      .chip.protocol-fm {
+        color: #431407;
+        background: #fed7aa;
+      }
+
       .brand-icon-inline {
         width: 1.25em;
         height: 1.25em;
@@ -1247,6 +1259,10 @@
 
       .candidate.protocol-wifi {
         border-left: 4px solid var(--wifi-green);
+      }
+
+      .candidate.protocol-fm {
+        border-left: 4px solid var(--fm-amber);
       }
 
       .candidate-top {
@@ -1356,6 +1372,7 @@
             <span class="toggle"><input id="zigbeeInput" type="checkbox" checked /> Zigbee</span>
             <span class="toggle"><input id="tpmsInput" type="checkbox" checked /> TPMS</span>
             <span class="toggle"><input id="wifiInput" type="checkbox" checked /> WiFi</span>
+            <span class="toggle"><input id="fmInput" type="checkbox" checked /> FM</span>
           </div>
         </label>
         <div class="auto-plan">
@@ -1404,6 +1421,7 @@
             <div class="metric"><span>Zigbee Frames</span><strong id="zigbeeMetric">0</strong></div>
             <div class="metric"><span>TPMS Frames</span><strong id="tpmsMetric">0</strong></div>
             <div class="metric"><span>WiFi Frames</span><strong id="wifiMetric">0</strong></div>
+            <div class="metric"><span>FM Stations</span><strong id="fmMetric">0</strong></div>
           </div>
           <div class="spectrum" id="spectrum"></div>
         </section>
@@ -1419,6 +1437,7 @@
                 <button class="tab-btn" id="zigbeeTabBtn" type="button">Zigbee</button>
                 <button class="tab-btn" id="tpmsTabBtn" type="button">TPMS</button>
                 <button class="tab-btn" id="wifiTabBtn" type="button">WiFi</button>
+                <button class="tab-btn" id="fmTabBtn" type="button">FM</button>
               </div>
               <select class="view-select" id="detectionViewSelect">
                 <option value="cards">Cards</option>
@@ -1438,6 +1457,7 @@
               <span class="legend-pill"><span class="legend-dot wifi"></span>WiFi 2.4 GHz channels</span>
               <span class="legend-pill"><span class="legend-dot zigbee"></span>Zigbee / 802.15.4 centers</span>
               <span class="legend-pill"><span class="legend-dot tpms"></span>TPMS is sub-GHz/off-chart</span>
+              <span class="legend-pill"><span class="legend-dot tpms" style="background: var(--fm-amber)"></span>FM broadcast is 87.5-108 MHz/off-chart</span>
             </div>
             <div class="channel-chart">
               <div class="db-axis">
@@ -1478,6 +1498,7 @@
       const zigbeeInput = document.getElementById("zigbeeInput");
       const tpmsInput = document.getElementById("tpmsInput");
       const wifiInput = document.getElementById("wifiInput");
+      const fmInput = document.getElementById("fmInput");
       const channelSelect = document.getElementById("channelSelect");
       const scanForm = document.getElementById("scanForm");
       const runToggleBtn = document.getElementById("runToggleBtn");
@@ -1500,6 +1521,7 @@
       const zigbeeTabBtn = document.getElementById("zigbeeTabBtn");
       const tpmsTabBtn = document.getElementById("tpmsTabBtn");
       const wifiTabBtn = document.getElementById("wifiTabBtn");
+      const fmTabBtn = document.getElementById("fmTabBtn");
       const candidatePanelTitle = document.getElementById("candidatePanelTitle");
       const candidatesEl = document.getElementById("candidates");
       const detectionViewSelect = document.getElementById("detectionViewSelect");
@@ -1520,6 +1542,7 @@
         zigbee: document.getElementById("zigbeeMetric"),
         tpms: document.getElementById("tpmsMetric"),
         wifi: document.getElementById("wifiMetric"),
+        fm: document.getElementById("fmMetric"),
       };
 
       const bars = Array.from({ length: 40 }, (_, idx) => {
@@ -1648,6 +1671,7 @@
         if (zigbeeInput.checked) protocols.push("zigbee");
         if (tpmsInput.checked) protocols.push("tpms");
         if (wifiInput.checked) protocols.push("wifi");
+        if (fmInput.checked) protocols.push("fm");
         return protocols;
       }
 
@@ -1671,6 +1695,7 @@
         zigbeeInput.checked = protocols.has("zigbee");
         tpmsInput.checked = protocols.has("tpms");
         wifiInput.checked = protocols.has("wifi");
+        fmInput.checked = protocols.has("fm");
       }
 
       function nextChannelValue() {
@@ -1823,6 +1848,7 @@
         if (value === "ZIGBEE") return "protocol-zigbee";
         if (value === "TPMS") return "protocol-tpms";
         if (value === "WIFI") return "protocol-wifi";
+        if (value === "FM") return "protocol-fm";
         return "protocol-rf";
       }
 
@@ -1840,7 +1866,9 @@
               ? materialIcon("radio_button_checked")
               : value === "WIFI"
                 ? materialIcon("wifi")
-                : materialIcon("sensors");
+                : value === "FM"
+                  ? materialIcon("radio")
+                  : materialIcon("sensors");
         return `<span class="chip ${protocolClass(value)}">${icon}${value}</span>`;
       }
 
@@ -2035,6 +2063,7 @@
         if (row.protocol === "ZIGBEE") return "Zigbee / 802.15.4";
         if (row.protocol === "TPMS") return "TPMS / Sub-GHz";
         if (row.protocol === "WIFI") return row.wifi_role === "ap" ? "WiFi Access Points" : "WiFi Stations";
+        if (row.protocol === "FM") return "FM Broadcast";
         const manufacturerName = canonicalBleVendorName(row.manufacturer?.company_name || "");
         if (manufacturerName) return manufacturerName;
         const uuidVendor = uuidVendorName(row);
@@ -2805,6 +2834,7 @@
           metrics.zigbee.textContent = Number(protocolDetections("ZIGBEE") || 0).toLocaleString();
           metrics.tpms.textContent = Number(protocolDetections("TPMS") || 0).toLocaleString();
           metrics.wifi.textContent = Number(protocolDetections("WIFI") || 0).toLocaleString();
+          metrics.fm.textContent = Number(protocolDetections("FM") || 0).toLocaleString();
           updateBtcTargetVisibility(Boolean((btcTargetMacInput.value || "").trim() || status.test_target));
           renderIdentityTable(status.discovery_table || []);
           renderCandidates(status.classic_candidates || [], status.classic_addresses || [], status.discovery_table || []);
@@ -3003,6 +3033,7 @@
           [zigbeeTabBtn, "ZIGBEE"],
           [tpmsTabBtn, "TPMS"],
           [wifiTabBtn, "WIFI"],
+          [fmTabBtn, "FM"],
         ].forEach(([button, value]) => button.classList.toggle("active", protocol === value));
         pollStatus();
       }
@@ -3013,6 +3044,7 @@
       zigbeeTabBtn.addEventListener("click", () => setDetectionTab("ZIGBEE"));
       tpmsTabBtn.addEventListener("click", () => setDetectionTab("TPMS"));
       wifiTabBtn.addEventListener("click", () => setDetectionTab("WIFI"));
+      fmTabBtn.addEventListener("click", () => setDetectionTab("FM"));
       btcInput.addEventListener("change", () => {
         setChannels();
         scheduleAutoHop();
@@ -3026,6 +3058,7 @@
       zigbeeInput.addEventListener("change", applyProtocolSelection);
       tpmsInput.addEventListener("change", applyProtocolSelection);
       wifiInput.addEventListener("change", applyProtocolSelection);
+      fmInput.addEventListener("change", applyProtocolSelection);
       identityTableWrap.addEventListener("contextmenu", handleFollowContextMenu);
       candidatesEl.addEventListener("contextmenu", handleFollowContextMenu);
       document.addEventListener("click", handleFollowClick);

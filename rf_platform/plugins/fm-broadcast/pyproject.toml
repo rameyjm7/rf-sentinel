@@ -1,0 +1,24 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "fm-broadcast"
+version = "0.1.0"
+description = "RF Sentinel FM broadcast discovery and station-quality plugin"
+requires-python = ">=3.10"
+dependencies = [
+  "numpy>=1.24",
+  "requests>=2.31",
+  "websocket-client>=1.6",
+]
+
+[project.scripts]
+fm-broadcast = "fm_broadcast.cli:main"
+fm_broadcast = "fm_broadcast.cli:main"
+
+[tool.setuptools]
+package-dir = {"" = "src"}
+
+[tool.setuptools.packages.find]
+where = ["src"]

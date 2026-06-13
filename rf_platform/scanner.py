@@ -25,6 +25,8 @@ DEFAULT_ZIGBEE_DISCOVERY_SWEEP_S = 2.0
 DEFAULT_ZIGBEE_ACTIVE_DWELL_S = 1.0
 DEFAULT_ZIGBEE_FOLLOW_SAMPLE_RATE_SPS = 8_000_000
 DEFAULT_WIFI_INTERFACE = "wlan0"
+DEFAULT_FM_SAMPLE_RATE_SPS = 20_000_000
+DEFAULT_FM_INTERVAL_S = 60.0
 
 
 @dataclass(frozen=True)
@@ -264,6 +266,38 @@ def _build_jobs(args: argparse.Namespace) -> tuple[list[ScanJob], list[ScanJob]]
             command.append("--no-set-channel")
         return ScanJob(name=name, protocol="wifi", dwell_s=args.wifi_slice_s, command=command)
 
+    def fm_job(name: str, device_id: str) -> ScanJob:
+        return ScanJob(
+            name=name,
+            protocol="fm",
+            dwell_s=args.fm_slice_s,
+            command=[
+                _bin("fm_broadcast"),
+                "scan",
+                "--device-id",
+                device_id,
+                "--json",
+                "--discovery-mode",
+                "wideband",
+                "--sample-rate-sps",
+                str(args.fm_sample_rate_sps),
+                "--discovery-dwell-s",
+                str(args.fm_discovery_dwell_s),
+                "--decode-dwell-s",
+                str(args.fm_decode_dwell_s),
+                "--active-threshold-db",
+                str(args.fm_active_threshold_db),
+                "--min-power-dbfs",
+                str(args.fm_min_power_dbfs),
+                "--max-stations",
+                str(args.fm_max_stations),
+                "--lna-gain-db",
+                str(args.fm_lna_gain_db),
+                "--vga-gain-db",
+                str(args.fm_vga_gain_db),
+            ],
+        )
+
     if bool(args.sweep_both_radios):
         radios = [
             ("radio_a", args.radio_a_device_id or args.btc_device_id, args.radio_a_btc_bandwidth_mhz, args.btc_lna_gain_db, args.btc_vga_gain_db),
@@ -280,6 +314,8 @@ def _build_jobs(args: argparse.Namespace) -> tuple[list[ScanJob], list[ScanJob]]
                 cycled.append(zigbee_job(f"{prefix}:zigbee", device_id))
             if not args.no_tpms:
                 cycled.append(tpms_job(f"{prefix}:tpms", device_id))
+            if not args.no_fm:
+                cycled.append(fm_job(f"{prefix}:fm", device_id))
         if not args.no_wifi:
             cycled.append(wifi_job("wifi"))
         return continuous, cycled
@@ -297,6 +333,9 @@ def _build_jobs(args: argparse.Namespace) -> tuple[list[ScanJob], list[ScanJob]]
     if not args.no_tpms:
         cycled.append(tpms_job("tpms", args.hop_device_id))
 
+    if not args.no_fm:
+        cycled.append(fm_job("fm", args.hop_device_id))
+
     if not args.no_wifi:
         cycled.append(wifi_job("wifi"))
 
@@ -304,7 +343,7 @@ def _build_jobs(args: argparse.Namespace) -> tuple[list[ScanJob], list[ScanJob]]
 
 
 def _configured_protocols(args: argparse.Namespace) -> set[str]:
-    protocols = {"btc", "ble", "zigbee", "tpms", "wifi"}
+    protocols = {"btc", "ble", "zigbee", "tpms", "wifi", "fm"}
     if args.no_btc:
         protocols.discard("btc")
     if args.no_ble:
@@ -315,6 +354,8 @@ def _configured_protocols(args: argparse.Namespace) -> set[str]:
         protocols.discard("tpms")
     if args.no_wifi:
         protocols.discard("wifi")
+    if args.no_fm:
+        protocols.discard("fm")
     return protocols
 
 
@@ -424,6 +465,12 @@ def _priority_protocol(args: argparse.Namespace, job: ScanJob) -> str:
     return "zigbee" if _zigbee_follow_channel(args) is not None and _is_follow_device_job(args, job) else ""
 
 
+def _job_interval_s(args: argparse.Namespace, job: ScanJob) -> float:
+    if job.protocol == "fm":
+        return max(1.0, float(args.fm_interval_s))
+    return 0.0
+
+
 def _run(args: argparse.Namespace) -> int:
     continuous, cycled = _build_jobs(args)
     supervisor = ProcessSupervisor()
@@ -445,6 +492,7 @@ def _run(args: argparse.Namespace) -> int:
     def cycle_jobs(name: str, jobs: list[ScanJob]) -> None:
         cycle_index = 0
         idle_notice = False
+        next_run_at: dict[str, float] = {}
         while jobs and not supervisor.stop_requested.is_set():
             job = jobs[cycle_index % len(jobs)]
             cycle_index += 1
@@ -459,12 +507,18 @@ def _run(args: argparse.Namespace) -> int:
                     idle_notice = True
                 time.sleep(0.15)
                 continue
+            interval_s = _job_interval_s(args, job)
+            if interval_s > 0.0 and time.time() < next_run_at.get(job.name, 0.0):
+                time.sleep(0.05)
+                continue
             idle_notice = False
             active_job, follow_marker = _materialize_job(args, job)
             print(
                 f"[rf-sentinel] hop group={name} job={active_job.name} dwell_s={active_job.dwell_s:.1f}: {_format_command(active_job.command)}",
                 flush=True,
             )
+            if interval_s > 0.0:
+                next_run_at[job.name] = time.time() + interval_s
             proc = supervisor.start(active_job)
             deadline = time.time() + max(1.0, float(active_job.dwell_s))
             proc_exited = False
@@ -513,6 +567,7 @@ def _run(args: argparse.Namespace) -> int:
 
         cycle_index = 0
         idle_notice = False
+        next_run_at: dict[str, float] = {}
         while not supervisor.stop_requested.is_set():
             job = cycled[cycle_index % len(cycled)]
             cycle_index += 1
@@ -527,12 +582,18 @@ def _run(args: argparse.Namespace) -> int:
                     idle_notice = True
                 time.sleep(0.15)
                 continue
+            interval_s = _job_interval_s(args, job)
+            if interval_s > 0.0 and time.time() < next_run_at.get(job.name, 0.0):
+                time.sleep(0.05)
+                continue
             idle_notice = False
             active_job, follow_marker = _materialize_job(args, job)
             print(
                 f"[rf-sentinel] hop job={active_job.name} dwell_s={active_job.dwell_s:.1f}: {_format_command(active_job.command)}",
                 flush=True,
             )
+            if interval_s > 0.0:
+                next_run_at[job.name] = time.time() + interval_s
             proc = supervisor.start(active_job)
             deadline = time.time() + max(1.0, float(active_job.dwell_s))
             proc_exited = False
@@ -625,11 +686,23 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--wifi-set-monitor", action="store_true", default=False)
     parser.add_argument("--wifi-set-channel", action="store_true", default=True)
 
+    parser.add_argument("--fm-slice-s", type=float, default=DEFAULT_JOB_DWELL_S)
+    parser.add_argument("--fm-interval-s", type=float, default=DEFAULT_FM_INTERVAL_S)
+    parser.add_argument("--fm-sample-rate-sps", type=int, default=DEFAULT_FM_SAMPLE_RATE_SPS)
+    parser.add_argument("--fm-discovery-dwell-s", type=float, default=0.18)
+    parser.add_argument("--fm-decode-dwell-s", type=float, default=0.35)
+    parser.add_argument("--fm-active-threshold-db", type=float, default=8.0)
+    parser.add_argument("--fm-min-power-dbfs", type=float, default=-55.0)
+    parser.add_argument("--fm-max-stations", type=int, default=12)
+    parser.add_argument("--fm-lna-gain-db", type=int, default=32)
+    parser.add_argument("--fm-vga-gain-db", type=int, default=32)
+
     parser.add_argument("--no-btc", action="store_true")
     parser.add_argument("--no-ble", action="store_true")
     parser.add_argument("--no-zigbee", action="store_true")
     parser.add_argument("--no-tpms", action="store_true")
     parser.add_argument("--no-wifi", action="store_true")
+    parser.add_argument("--no-fm", action="store_true")
     parser.add_argument("--control-file", default="", help="optional JSON file with a live protocols list")
     parser.add_argument("--once", action="store_true", help="run one BLE/Zigbee/TPMS cycle and exit")
     return parser

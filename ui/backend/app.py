@@ -68,7 +68,7 @@ _load_env_file(PROJECT_ROOT / "config" / "env.txt")
 DATA_DIR = Path(__file__).resolve().parent / "data"
 RF_SENTINEL_CONTROL_PATH = DATA_DIR / "rf_sentinel_control.json"
 RF_SENTINEL_NO_CHANGE = object()
-RF_SENTINEL_PROTOCOLS = {"btc", "ble", "zigbee", "tpms", "wifi"}
+RF_SENTINEL_PROTOCOLS = {"btc", "ble", "zigbee", "tpms", "wifi", "fm"}
 RF_SENTINEL_KEEP_BAD_FCS = os.getenv("RF_SENTINEL_KEEP_BAD_FCS", "0").strip().lower() in {"1", "true", "yes", "on"}
 BLE_IDENTITY_CACHE_PATH = DATA_DIR / "ble_identities.json"
 COMPANY_IDENTIFIERS_PATH = DATA_DIR / "company_identifiers.json"
@@ -2597,6 +2597,49 @@ def _scanner_json_to_events(source: str, payload: dict[str, Any]) -> list[dict[s
             }
         ]
 
+    if protocol == "fm" or source_protocol == "fm":
+        frequency_hz = payload.get("frequency_hz")
+        frequency_mhz = payload.get("frequency_mhz")
+        try:
+            frequency_hz_int = int(frequency_hz)
+        except (TypeError, ValueError):
+            try:
+                frequency_hz_int = int(float(frequency_mhz) * 1_000_000)
+            except (TypeError, ValueError):
+                frequency_hz_int = 0
+        label = str(payload.get("identity") or "").strip()
+        if not label and frequency_hz_int:
+            label = f"FM {frequency_hz_int / 1_000_000:.1f} MHz"
+        detail_bits = [
+            f"power {float(payload.get('power_dbfs')):.1f} dBFS" if payload.get("power_dbfs") is not None else "",
+            f"pilot {float(payload.get('pilot_db')):.1f} dB" if payload.get("pilot_db") is not None else "",
+            f"RDS {float(payload.get('rds_subcarrier_db')):.1f} dB" if payload.get("rds_subcarrier_db") is not None else "",
+        ]
+        return [
+            {
+                "kind": "fm_station",
+                "protocol": "FM",
+                "seen_at": now,
+                "identity": label or "FM station",
+                "mac": f"{frequency_hz_int}" if frequency_hz_int else label,
+                "detail": " · ".join(bit for bit in detail_bits if bit) or "FM broadcast station",
+                "device_type": "Broadcast FM",
+                "device_type_detail": "Stereo pilot detected" if payload.get("stereo_likely") else "Mono/unknown stereo",
+                "center_freq_hz": frequency_hz_int or None,
+                "frequency_hz": frequency_hz_int or None,
+                "frequency_mhz": payload.get("frequency_mhz"),
+                "last_rssi_dbfs": payload.get("rssi_dbfs") or payload.get("power_dbfs"),
+                "power_dbfs": payload.get("power_dbfs"),
+                "noise_dbfs": payload.get("noise_dbfs"),
+                "excess_db": payload.get("excess_db"),
+                "audio_rms": payload.get("audio_rms"),
+                "pilot_db": payload.get("pilot_db"),
+                "rds_subcarrier_db": payload.get("rds_subcarrier_db"),
+                "stereo_likely": payload.get("stereo_likely"),
+                "rds_likely": payload.get("rds_likely"),
+            }
+        ]
+
     return []
 
 
@@ -2625,6 +2668,7 @@ def _append_detections(events: list[dict[str, Any]], candidates: list[dict[str, 
                 "zigbee_frame": "zigbee",
                 "tpms_frame": "tpms",
                 "wifi_frame": "wifi",
+                "fm_station": "fm",
             }.get(str(event.get("kind") or ""))
             if mode_key:
                 rssi = _real_rssi(event.get("rssi_dbfs", event.get("last_rssi_dbfs")))
@@ -2640,7 +2684,7 @@ def _append_detections(events: list[dict[str, Any]], candidates: list[dict[str, 
                         state.noise_floor_dbfs = round((state.noise_floor_dbfs * 0.92) + (rssi * 0.08), 1)
                 except (TypeError, ValueError):
                     pass
-            if event["kind"] in {"ble_adv", "classic_lap", "zigbee_frame", "tpms_frame", "wifi_frame"}:
+            if event["kind"] in {"ble_adv", "classic_lap", "zigbee_frame", "tpms_frame", "wifi_frame", "fm_station"}:
                 _upsert_discovery_row(event)
             if event["kind"] == "classic_lap":
                 _upsert_classic_address(event)
@@ -2827,6 +2871,32 @@ def _upsert_discovery_row(event: dict[str, Any]) -> None:
             "rssi_dbm": event.get("rssi_dbm"),
             "channel": event.get("channel"),
             "center_freq_hz": event.get("center_freq_hz"),
+        }
+    elif event.get("kind") == "fm_station":
+        identity = str(event.get("identity") or "FM station")
+        frequency_hz = event.get("frequency_hz") or event.get("center_freq_hz")
+        row = {
+            "key": f"fm:{frequency_hz or identity}",
+            "protocol": "FM",
+            "identity": identity,
+            "mac": str(frequency_hz or identity),
+            "detail": str(event.get("detail") or "FM broadcast station"),
+            "device_type": str(event.get("device_type") or "Broadcast FM"),
+            "device_type_detail": str(event.get("device_type_detail") or ""),
+            "detections": 1,
+            "last_seen_at": now,
+            "last_rssi_dbfs": event.get("last_rssi_dbfs") or event.get("power_dbfs"),
+            "center_freq_hz": frequency_hz,
+            "frequency_hz": frequency_hz,
+            "frequency_mhz": event.get("frequency_mhz"),
+            "power_dbfs": event.get("power_dbfs"),
+            "noise_dbfs": event.get("noise_dbfs"),
+            "excess_db": event.get("excess_db"),
+            "audio_rms": event.get("audio_rms"),
+            "pilot_db": event.get("pilot_db"),
+            "rds_subcarrier_db": event.get("rds_subcarrier_db"),
+            "stereo_likely": event.get("stereo_likely"),
+            "rds_likely": event.get("rds_likely"),
         }
     else:
         return
@@ -3364,6 +3434,8 @@ def _start_rf_sentinel_engine(
         cmd.append("--no-tpms")
     if "wifi" not in protocols:
         cmd.append("--no-wifi")
+    if "fm" not in protocols:
+        cmd.append("--no-fm")
     control = _write_rf_sentinel_control(protocols, zigbee_follow_channel=None)
     cmd.extend(["--control-file", str(RF_SENTINEL_CONTROL_PATH)])
     env = os.environ.copy()
