@@ -24,6 +24,7 @@ DEFAULT_ZIGBEE_SLICE_S = 16.0
 DEFAULT_ZIGBEE_DISCOVERY_SWEEP_S = 2.0
 DEFAULT_ZIGBEE_ACTIVE_DWELL_S = 1.0
 DEFAULT_ZIGBEE_FOLLOW_SAMPLE_RATE_SPS = 8_000_000
+DEFAULT_WIFI_INTERFACE = "wlan0"
 
 
 @dataclass(frozen=True)
@@ -107,6 +108,10 @@ def _bin(name: str) -> str:
     found = shutil.which(name)
     if found:
         return found
+    if name == "wifi_scanner":
+        gateway_candidate = Path(__file__).resolve().parents[2] / "sdr-gateway" / ".venv" / "bin" / name
+        if gateway_candidate.exists():
+            return str(gateway_candidate)
     return str(candidate)
 
 
@@ -233,6 +238,32 @@ def _build_jobs(args: argparse.Namespace) -> tuple[list[ScanJob], list[ScanJob]]
             ],
         )
 
+    def wifi_job(name: str) -> ScanJob:
+        command = [
+            _bin("wifi_scanner"),
+            "--interface",
+            args.wifi_interface,
+            "--backend",
+            "gateway",
+            "--command",
+            args.wifi_command,
+            "--channels",
+            args.wifi_channels,
+            "--hop-interval-s",
+            str(args.wifi_hop_interval_s),
+            "--event-limit",
+            str(args.wifi_event_limit),
+            "--json",
+            "--replace-existing",
+        ]
+        if args.wifi_active_scan:
+            command.extend(["--active-scan", "--active-scan-interval-s", str(args.wifi_active_scan_interval_s)])
+        if not args.wifi_set_monitor:
+            command.append("--no-set-monitor")
+        if not args.wifi_set_channel:
+            command.append("--no-set-channel")
+        return ScanJob(name=name, protocol="wifi", dwell_s=args.wifi_slice_s, command=command)
+
     if bool(args.sweep_both_radios):
         radios = [
             ("radio_a", args.radio_a_device_id or args.btc_device_id, args.radio_a_btc_bandwidth_mhz, args.btc_lna_gain_db, args.btc_vga_gain_db),
@@ -249,6 +280,8 @@ def _build_jobs(args: argparse.Namespace) -> tuple[list[ScanJob], list[ScanJob]]
                 cycled.append(zigbee_job(f"{prefix}:zigbee", device_id))
             if not args.no_tpms:
                 cycled.append(tpms_job(f"{prefix}:tpms", device_id))
+        if not args.no_wifi:
+            cycled.append(wifi_job("wifi"))
         return continuous, cycled
 
     if not args.no_btc:
@@ -264,11 +297,14 @@ def _build_jobs(args: argparse.Namespace) -> tuple[list[ScanJob], list[ScanJob]]
     if not args.no_tpms:
         cycled.append(tpms_job("tpms", args.hop_device_id))
 
+    if not args.no_wifi:
+        cycled.append(wifi_job("wifi"))
+
     return continuous, cycled
 
 
 def _configured_protocols(args: argparse.Namespace) -> set[str]:
-    protocols = {"btc", "ble", "zigbee", "tpms"}
+    protocols = {"btc", "ble", "zigbee", "tpms", "wifi"}
     if args.no_btc:
         protocols.discard("btc")
     if args.no_ble:
@@ -277,6 +313,8 @@ def _configured_protocols(args: argparse.Namespace) -> set[str]:
         protocols.discard("zigbee")
     if args.no_tpms:
         protocols.discard("tpms")
+    if args.no_wifi:
+        protocols.discard("wifi")
     return protocols
 
 
@@ -576,10 +614,22 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--tpms-lna-gain-db", type=int, default=16)
     parser.add_argument("--tpms-vga-gain-db", type=int, default=20)
 
+    parser.add_argument("--wifi-slice-s", type=float, default=DEFAULT_JOB_DWELL_S)
+    parser.add_argument("--wifi-interface", default=os.getenv("RF_SENTINEL_WIFI_INTERFACE", DEFAULT_WIFI_INTERFACE))
+    parser.add_argument("--wifi-command", choices=("scapy", "tcpdump", "tshark"), default="scapy")
+    parser.add_argument("--wifi-channels", default="1,6,11")
+    parser.add_argument("--wifi-hop-interval-s", type=float, default=1.0)
+    parser.add_argument("--wifi-event-limit", type=int, default=500)
+    parser.add_argument("--wifi-active-scan", action="store_true")
+    parser.add_argument("--wifi-active-scan-interval-s", type=float, default=60.0)
+    parser.add_argument("--wifi-set-monitor", action="store_true", default=False)
+    parser.add_argument("--wifi-set-channel", action="store_true", default=True)
+
     parser.add_argument("--no-btc", action="store_true")
     parser.add_argument("--no-ble", action="store_true")
     parser.add_argument("--no-zigbee", action="store_true")
     parser.add_argument("--no-tpms", action="store_true")
+    parser.add_argument("--no-wifi", action="store_true")
     parser.add_argument("--control-file", default="", help="optional JSON file with a live protocols list")
     parser.add_argument("--once", action="store_true", help="run one BLE/Zigbee/TPMS cycle and exit")
     return parser

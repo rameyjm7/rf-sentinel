@@ -68,6 +68,7 @@ _load_env_file(PROJECT_ROOT / "config" / "env.txt")
 DATA_DIR = Path(__file__).resolve().parent / "data"
 RF_SENTINEL_CONTROL_PATH = DATA_DIR / "rf_sentinel_control.json"
 RF_SENTINEL_NO_CHANGE = object()
+RF_SENTINEL_PROTOCOLS = {"btc", "ble", "zigbee", "tpms", "wifi"}
 RF_SENTINEL_KEEP_BAD_FCS = os.getenv("RF_SENTINEL_KEEP_BAD_FCS", "0").strip().lower() in {"1", "true", "yes", "on"}
 BLE_IDENTITY_CACHE_PATH = DATA_DIR / "ble_identities.json"
 COMPANY_IDENTIFIERS_PATH = DATA_DIR / "company_identifiers.json"
@@ -2416,6 +2417,39 @@ def _printable_hex_text(hex_text: Any) -> str:
     return cleaned.decode("utf-8", errors="ignore").strip()
 
 
+def _is_broadcast_or_multicast_mac(mac: str) -> bool:
+    normalized = mac.strip().lower()
+    if not normalized or normalized in {"ff:ff:ff:ff:ff:ff", "00:00:00:00:00:00"}:
+        return True
+    try:
+        first_octet = int(normalized.split(":", 1)[0], 16)
+    except (ValueError, IndexError):
+        return False
+    return bool(first_octet & 0x01)
+
+
+def _wifi_role(frame_type: str, source_mac: str, destination_mac: str, bssid: str, ssid: str) -> str:
+    lowered = frame_type.lower()
+    if "beacon" in lowered or "probe_response" in lowered:
+        return "ap"
+    if bssid and source_mac and source_mac.lower() == bssid.lower():
+        return "ap"
+    if "probe_request" in lowered:
+        return "station"
+    if source_mac and not _is_broadcast_or_multicast_mac(source_mac):
+        return "station"
+    if destination_mac and not _is_broadcast_or_multicast_mac(destination_mac):
+        return "station"
+    return "ap" if ssid or bssid else "station"
+
+
+def _clean_wifi_ssid(value: Any) -> str:
+    text = str(value or "").replace("\x00", "").strip()
+    if not text:
+        return ""
+    return "".join(char for char in text if char in "\t " or 32 <= ord(char) <= 126).strip()
+
+
 def _real_rssi(value: Any) -> float | None:
     try:
         rssi = float(value)
@@ -2516,6 +2550,53 @@ def _scanner_json_to_events(source: str, payload: dict[str, Any]) -> list[dict[s
             }
         ]
 
+    if protocol == "wifi" or source_protocol == "wifi":
+        source_mac = str(payload.get("source") or payload.get("mac_sa") or "").strip()
+        destination_mac = str(payload.get("destination") or payload.get("mac_da") or "").strip()
+        bssid = str(payload.get("bssid") or "").strip()
+        ssid = _clean_wifi_ssid(payload.get("ssid"))
+        frame_type = str(payload.get("kind") or "wifi").strip()
+        role = _wifi_role(frame_type, source_mac, destination_mac, bssid, ssid)
+        ssid_visible = bool(ssid)
+        ap_identifier = bssid or source_mac or destination_mac
+        identity = ssid if role == "ap" and ssid_visible else (
+            f"Hidden SSID {ap_identifier}" if role == "ap" and ap_identifier else (
+                "Hidden SSID" if role == "ap" else (source_mac or destination_mac or bssid or "WiFi station")
+            )
+        )
+        device_type = "Access Point" if role == "ap" else "Station"
+        identity_source = (
+            "SSID advertised in 802.11 management frame."
+            if role == "ap" and ssid_visible
+            else "No SSID value observed; showing BSSID/MAC identifier."
+            if role == "ap"
+            else "Observed as WiFi station/client traffic."
+        )
+        return [
+            {
+                "kind": "wifi_frame",
+                "protocol": "WIFI",
+                "seen_at": now,
+                "identity": identity,
+                "mac": source_mac or bssid or destination_mac,
+                "wifi_role": role,
+                "source_address": source_mac,
+                "destination_address": destination_mac,
+                "bssid": bssid,
+                "ssid": ssid,
+                "ssid_visible": ssid_visible,
+                "identity_source": identity_source,
+                "detail": str(payload.get("raw") or frame_type),
+                "device_type": device_type,
+                "device_type_detail": frame_type,
+                "channel": payload.get("channel"),
+                "center_freq_hz": int(payload.get("frequency_mhz") or 0) * 1_000_000 if payload.get("frequency_mhz") else None,
+                "last_rssi_dbfs": payload.get("rssi_dbm"),
+                "rssi_dbm": payload.get("rssi_dbm"),
+                "count": payload.get("count"),
+            }
+        ]
+
     return []
 
 
@@ -2543,6 +2624,7 @@ def _append_detections(events: list[dict[str, Any]], candidates: list[dict[str, 
                 "classic_lap": "classic",
                 "zigbee_frame": "zigbee",
                 "tpms_frame": "tpms",
+                "wifi_frame": "wifi",
             }.get(str(event.get("kind") or ""))
             if mode_key:
                 rssi = _real_rssi(event.get("rssi_dbfs", event.get("last_rssi_dbfs")))
@@ -2558,7 +2640,7 @@ def _append_detections(events: list[dict[str, Any]], candidates: list[dict[str, 
                         state.noise_floor_dbfs = round((state.noise_floor_dbfs * 0.92) + (rssi * 0.08), 1)
                 except (TypeError, ValueError):
                     pass
-            if event["kind"] in {"ble_adv", "classic_lap", "zigbee_frame", "tpms_frame"}:
+            if event["kind"] in {"ble_adv", "classic_lap", "zigbee_frame", "tpms_frame", "wifi_frame"}:
                 _upsert_discovery_row(event)
             if event["kind"] == "classic_lap":
                 _upsert_classic_address(event)
@@ -2697,6 +2779,54 @@ def _upsert_discovery_row(event: dict[str, Any]) -> None:
             "center_freq_hz": event.get("center_freq_hz"),
             "confidence": event.get("confidence"),
             "payload_hex": event.get("payload_hex"),
+        }
+    elif event.get("kind") == "wifi_frame":
+        identity = str(event.get("identity") or event.get("ssid") or event.get("mac") or "WiFi frame")
+        ssid = _clean_wifi_ssid(event.get("ssid"))
+        ssid_visible = bool(event.get("ssid_visible")) and bool(ssid)
+        frame_type = str(event.get("device_type_detail") or event.get("detail") or "wifi").strip()
+        mac = str(event.get("mac") or "").strip()
+        bssid = str(event.get("bssid") or "").strip()
+        role = str(event.get("wifi_role") or "station").strip().lower()
+        if role not in {"ap", "station"}:
+            role = "station"
+        source_address = str(event.get("source_address") or "").strip()
+        destination_address = str(event.get("destination_address") or "").strip()
+        key_mac = (bssid or mac or source_address or identity) if role == "ap" else (source_address or mac or destination_address or identity)
+        device_type = "Access Point" if role == "ap" else "Station"
+        if role == "ap" and not ssid_visible:
+            identity = f"Hidden SSID {key_mac}".strip()
+        detail = (
+            f"Hidden/unnamed SSID · {frame_type}"
+            if role == "ap" and not ssid_visible
+            else f"{device_type} {frame_type}".strip()
+        )
+        identity_source = str(
+            event.get("identity_source")
+            or ("No SSID value observed; showing BSSID/MAC identifier." if role == "ap" and not ssid_visible else "")
+        )
+        row = {
+            "key": f"wifi:{role}:{key_mac}:{ssid if role == 'ap' else ''}",
+            "protocol": "WIFI",
+            "identity": identity,
+            "mac": mac or bssid,
+            "wifi_role": role,
+            "source_address": source_address,
+            "destination_address": destination_address,
+            "bssid": bssid,
+            "ssid": ssid,
+            "ssid_visible": ssid_visible,
+            "name": ssid if role == "ap" and ssid_visible else "",
+            "detail": detail,
+            "device_type": device_type,
+            "device_type_detail": f"Hidden/unnamed SSID · {frame_type}" if role == "ap" and not ssid_visible else frame_type,
+            "identity_source": identity_source,
+            "detections": 1,
+            "last_seen_at": now,
+            "last_rssi_dbfs": event.get("last_rssi_dbfs") or event.get("rssi_dbm"),
+            "rssi_dbm": event.get("rssi_dbm"),
+            "channel": event.get("channel"),
+            "center_freq_hz": event.get("center_freq_hz"),
         }
     else:
         return
@@ -3062,7 +3192,7 @@ def _write_rf_sentinel_control(
     DATA_DIR.mkdir(parents=True, exist_ok=True)
     payload = _read_rf_sentinel_control()
     if enabled_protocols is not None:
-        payload["protocols"] = sorted(enabled_protocols & {"btc", "ble", "zigbee", "tpms"})
+        payload["protocols"] = sorted(enabled_protocols & RF_SENTINEL_PROTOCOLS)
     if zigbee_follow_channel is not RF_SENTINEL_NO_CHANGE:
         follow = payload.get("follow")
         if not isinstance(follow, dict):
@@ -3139,15 +3269,27 @@ def _rf_sentinel_loop(proc: subprocess.Popen[str]) -> None:
             if not line:
                 continue
             source, body = _parse_rf_sentinel_line(line)
+            payload = None
+            if body.startswith("{"):
+                try:
+                    payload = json.loads(body)
+                except json.JSONDecodeError:
+                    payload = None
+            source_protocol = str(source or "").split(":", 1)[-1].lower()
+            payload_protocol = str((payload or {}).get("protocol") or "").lower()
+            payload_kind = str((payload or {}).get("kind") or "").lower()
+            noisy_packet_line = payload is not None and (
+                source_protocol in {"ble", "wifi"}
+                or payload_protocol in {"ble", "btle", "wifi"}
+                or payload_kind == "ble_adv"
+                or payload_kind.startswith(("mgmt.", "ctrl.", "data."))
+            )
             with state_lock:
-                _append_scanner_log(line)
+                if not noisy_packet_line:
+                    _append_scanner_log(line)
                 state.chunks_by_mode[source] = int(state.chunks_by_mode.get(source, 0)) + 1
                 state.chunks_seen += 1
-            if not body.startswith("{"):
-                continue
-            try:
-                payload = json.loads(body)
-            except json.JSONDecodeError:
+            if payload is None:
                 continue
             events = _scanner_json_to_events(source, payload)
             if events:
@@ -3211,7 +3353,7 @@ def _start_rf_sentinel_engine(
                 "20",
             ]
         )
-    protocols = enabled_protocols or {"btc", "ble", "zigbee", "tpms"}
+    protocols = enabled_protocols or set(RF_SENTINEL_PROTOCOLS)
     if "btc" not in protocols:
         cmd.append("--no-btc")
     if "ble" not in protocols:
@@ -3220,6 +3362,8 @@ def _start_rf_sentinel_engine(
         cmd.append("--no-zigbee")
     if "tpms" not in protocols:
         cmd.append("--no-tpms")
+    if "wifi" not in protocols:
+        cmd.append("--no-wifi")
     control = _write_rf_sentinel_control(protocols, zigbee_follow_channel=None)
     cmd.extend(["--control-file", str(RF_SENTINEL_CONTROL_PATH)])
     env = os.environ.copy()
@@ -3263,7 +3407,7 @@ def update_scan_protocols():
     if not isinstance(requested_protocols, list):
         return _json_error(400, "update_scan_protocols", error="protocols must be a list")
     enabled_protocols = {str(item).strip().lower() for item in requested_protocols}
-    enabled_protocols &= {"btc", "ble", "zigbee", "tpms"}
+    enabled_protocols &= RF_SENTINEL_PROTOCOLS
     _write_rf_sentinel_control(enabled_protocols)
     with state_lock:
         state.decoder_stats["enabled_protocols"] = sorted(enabled_protocols)
@@ -3532,8 +3676,8 @@ def start_scan():
     if isinstance(requested_protocols, list):
         enabled_protocols = {str(item).strip().lower() for item in requested_protocols}
     else:
-        enabled_protocols = {"btc", "ble", "zigbee", "tpms"}
-    enabled_protocols &= {"btc", "ble", "zigbee", "tpms"}
+        enabled_protocols = set(RF_SENTINEL_PROTOCOLS)
+    enabled_protocols &= RF_SENTINEL_PROTOCOLS
     sweep_both_radios = bool(payload.get("sweep_both_radios", mode == "sentinel"))
 
     if mode not in {"ble", "classic", "both", "sentinel"}:

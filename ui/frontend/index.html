@@ -21,6 +21,7 @@
         --ble-blue: #125fd8;
         --btc-blue: #64b5f6;
         --zigbee-purple: #7e3ff2;
+        --wifi-green: #16a34a;
         --shadow: 0 18px 60px rgba(23, 33, 27, 0.12);
       }
 
@@ -788,6 +789,12 @@
         border-left-color: #6b7280;
       }
 
+      .detection-card.protocol-wifi,
+      .candidate.protocol-wifi {
+        border-left-color: var(--wifi-green);
+        background: linear-gradient(90deg, rgba(22, 163, 74, 0.12), rgba(255, 250, 240, 0.86) 34%);
+      }
+
       .detection-card h3 {
         margin: 0 0 6px;
         font-size: 0.92rem;
@@ -939,6 +946,11 @@
         background: var(--zigbee-purple);
       }
 
+      .chip.protocol-wifi {
+        color: #052e16;
+        background: #bbf7d0;
+      }
+
       .brand-icon-inline {
         width: 1.25em;
         height: 1.25em;
@@ -1012,6 +1024,10 @@
 
       .candidate.protocol-tpms {
         border-left: 4px solid #6b7280;
+      }
+
+      .candidate.protocol-wifi {
+        border-left: 4px solid var(--wifi-green);
       }
 
       .candidate-top {
@@ -1120,12 +1136,13 @@
             <span class="toggle"><input id="btleInput" type="checkbox" checked /> BLE</span>
             <span class="toggle"><input id="zigbeeInput" type="checkbox" checked /> Zigbee</span>
             <span class="toggle"><input id="tpmsInput" type="checkbox" checked /> TPMS</span>
+            <span class="toggle"><input id="wifiInput" type="checkbox" checked /> WiFi</span>
           </div>
         </label>
         <div class="auto-plan">
           <strong>Two-SDR autonomous sweep</strong>
           <div class="plan-chips">
-            <span class="plan-chip">Both radios rotate enabled protocols</span>
+            <span class="plan-chip">Radios + WiFi adapter rotate enabled protocols</span>
             <span class="plan-chip">Uncheck noisy stacks anytime</span>
           </div>
         </div>
@@ -1167,6 +1184,7 @@
             <div class="metric"><span>BTC Evidence</span><strong id="classicMetric">0</strong></div>
             <div class="metric"><span>Zigbee Frames</span><strong id="zigbeeMetric">0</strong></div>
             <div class="metric"><span>TPMS Frames</span><strong id="tpmsMetric">0</strong></div>
+            <div class="metric"><span>WiFi Frames</span><strong id="wifiMetric">0</strong></div>
           </div>
           <div class="spectrum" id="spectrum"></div>
         </section>
@@ -1181,6 +1199,7 @@
                 <button class="tab-btn" id="btleTabBtn" type="button">BTLE</button>
                 <button class="tab-btn" id="zigbeeTabBtn" type="button">Zigbee</button>
                 <button class="tab-btn" id="tpmsTabBtn" type="button">TPMS</button>
+                <button class="tab-btn" id="wifiTabBtn" type="button">WiFi</button>
               </div>
               <select class="view-select" id="detectionViewSelect">
                 <option value="cards">Cards</option>
@@ -1237,6 +1256,7 @@
       const btleInput = document.getElementById("btleInput");
       const zigbeeInput = document.getElementById("zigbeeInput");
       const tpmsInput = document.getElementById("tpmsInput");
+      const wifiInput = document.getElementById("wifiInput");
       const channelSelect = document.getElementById("channelSelect");
       const scanForm = document.getElementById("scanForm");
       const runToggleBtn = document.getElementById("runToggleBtn");
@@ -1258,6 +1278,7 @@
       const btleTabBtn = document.getElementById("btleTabBtn");
       const zigbeeTabBtn = document.getElementById("zigbeeTabBtn");
       const tpmsTabBtn = document.getElementById("tpmsTabBtn");
+      const wifiTabBtn = document.getElementById("wifiTabBtn");
       const candidatePanelTitle = document.getElementById("candidatePanelTitle");
       const candidatesEl = document.getElementById("candidates");
       const detectionViewSelect = document.getElementById("detectionViewSelect");
@@ -1277,6 +1298,7 @@
         classic: document.getElementById("classicMetric"),
         zigbee: document.getElementById("zigbeeMetric"),
         tpms: document.getElementById("tpmsMetric"),
+        wifi: document.getElementById("wifiMetric"),
       };
 
       const bars = Array.from({ length: 40 }, (_, idx) => {
@@ -1385,6 +1407,7 @@
         if (btleInput.checked) protocols.push("ble");
         if (zigbeeInput.checked) protocols.push("zigbee");
         if (tpmsInput.checked) protocols.push("tpms");
+        if (wifiInput.checked) protocols.push("wifi");
         return protocols;
       }
 
@@ -1407,6 +1430,7 @@
         btleInput.checked = protocols.has("ble");
         zigbeeInput.checked = protocols.has("zigbee");
         tpmsInput.checked = protocols.has("tpms");
+        wifiInput.checked = protocols.has("wifi");
       }
 
       function nextChannelValue() {
@@ -1558,6 +1582,7 @@
         if (value === "BTC") return "protocol-btc";
         if (value === "ZIGBEE") return "protocol-zigbee";
         if (value === "TPMS") return "protocol-tpms";
+        if (value === "WIFI") return "protocol-wifi";
         return "protocol-rf";
       }
 
@@ -1573,7 +1598,9 @@
             ? iconImg("zigbee.png", "Zigbee")
             : value === "TPMS"
               ? materialIcon("radio_button_checked")
-              : materialIcon("sensors");
+              : value === "WIFI"
+                ? materialIcon("wifi")
+                : materialIcon("sensors");
         return `<span class="chip ${protocolClass(value)}">${icon}${value}</span>`;
       }
 
@@ -1661,10 +1688,16 @@
         return row[key];
       }
 
+      function isHiddenWifiAp(row) {
+        return row?.protocol === "WIFI" && row?.wifi_role === "ap" && row?.ssid_visible === false;
+      }
+
       function sortRows(rows) {
         const { key, direction } = tableSort;
         const sign = direction === "asc" ? 1 : -1;
         return [...rows].sort((a, b) => {
+          const hiddenDelta = Number(isHiddenWifiAp(a)) - Number(isHiddenWifiAp(b));
+          if (hiddenDelta) return hiddenDelta;
           const av = sortValue(a, key);
           const bv = sortValue(b, key);
           const an = Number(av);
@@ -1743,6 +1776,7 @@
       function manufacturerGroupLabel(row) {
         if (row.protocol === "ZIGBEE") return "Zigbee / 802.15.4";
         if (row.protocol === "TPMS") return "TPMS / Sub-GHz";
+        if (row.protocol === "WIFI") return row.wifi_role === "ap" ? "WiFi Access Points" : "WiFi Stations";
         const manufacturerName = canonicalBleVendorName(row.manufacturer?.company_name || "");
         if (manufacturerName) return manufacturerName;
         const uuidVendor = uuidVendorName(row);
@@ -1815,6 +1849,8 @@
           .sort(([a], [b]) => a.localeCompare(b))
           .map(([label, groupRows], index) => {
             const devices = [...groupRows].sort((a, b) => {
+              const hiddenDelta = Number(isHiddenWifiAp(a)) - Number(isHiddenWifiAp(b));
+              if (hiddenDelta) return hiddenDelta;
               const ai = String(a.identity || a.name || a.mac || "");
               const bi = String(b.identity || b.name || b.mac || "");
               return ai.localeCompare(bi);
@@ -2225,7 +2261,9 @@
           ? `Zigbee CH ${row.channel || "?"}`
           : row.protocol === "BTLE"
             ? `BLE CH ${row.channel || "?"}`
-            : row.protocol || "RF";
+            : row.protocol === "WIFI"
+              ? `WiFi CH ${row.channel || "?"}`
+              : row.protocol || "RF";
         point.labels.push(`${label}: ${detections} detections`);
         points[index] = point;
       }
@@ -2274,6 +2312,10 @@
           } else if (row.protocol === "BTC") {
             const ch = Number(row.channel);
             if (Number.isFinite(ch)) addProtocolChartActivity(protocolPoints, Math.max(0, Math.min(78, ch)), row);
+          } else if (row.protocol === "WIFI") {
+            const ch = Number(row.channel);
+            const wifiIndex = ch === 1 ? 10 : ch === 6 ? 35 : ch === 11 ? 60 : null;
+            addProtocolChartActivity(protocolPoints, wifiIndex, row);
           }
         });
         const maxHits = Math.max(
@@ -2339,6 +2381,7 @@
           metrics.classic.textContent = Number(protocolDetections("BTC") || status.classic_bursts_seen || 0).toLocaleString();
           metrics.zigbee.textContent = Number(protocolDetections("ZIGBEE") || 0).toLocaleString();
           metrics.tpms.textContent = Number(protocolDetections("TPMS") || 0).toLocaleString();
+          metrics.wifi.textContent = Number(protocolDetections("WIFI") || 0).toLocaleString();
           updateBtcTargetVisibility(Boolean((btcTargetMacInput.value || "").trim() || status.test_target));
           renderIdentityTable(status.discovery_table || []);
           renderCandidates(status.classic_candidates || [], status.classic_addresses || [], status.discovery_table || []);
@@ -2531,6 +2574,7 @@
           [btleTabBtn, "BTLE"],
           [zigbeeTabBtn, "ZIGBEE"],
           [tpmsTabBtn, "TPMS"],
+          [wifiTabBtn, "WIFI"],
         ].forEach(([button, value]) => button.classList.toggle("active", protocol === value));
         pollStatus();
       }
@@ -2540,6 +2584,7 @@
       btleTabBtn.addEventListener("click", () => setDetectionTab("BTLE"));
       zigbeeTabBtn.addEventListener("click", () => setDetectionTab("ZIGBEE"));
       tpmsTabBtn.addEventListener("click", () => setDetectionTab("TPMS"));
+      wifiTabBtn.addEventListener("click", () => setDetectionTab("WIFI"));
       btcInput.addEventListener("change", () => {
         setChannels();
         scheduleAutoHop();
@@ -2552,6 +2597,7 @@
       });
       zigbeeInput.addEventListener("change", applyProtocolSelection);
       tpmsInput.addEventListener("change", applyProtocolSelection);
+      wifiInput.addEventListener("change", applyProtocolSelection);
       identityTableWrap.addEventListener("contextmenu", handleFollowContextMenu);
       candidatesEl.addEventListener("contextmenu", handleFollowContextMenu);
       document.addEventListener("click", handleFollowClick);
