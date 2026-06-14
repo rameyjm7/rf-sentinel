@@ -1,0 +1,23 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "am-broadcast"
+version = "0.1.0"
+description = "RF Sentinel AM broadcast scanner plugin for SDRplay receivers"
+requires-python = ">=3.10"
+dependencies = [
+  "numpy>=1.24",
+]
+
+[project.scripts]
+am-broadcast = "am_broadcast.cli:main"
+am_broadcast = "am_broadcast.cli:main"
+am-scanner = "am_broadcast.cli:main"
+
+[tool.setuptools]
+package-dir = {"" = "src"}
+
+[tool.setuptools.packages.find]
+where = ["src"]
