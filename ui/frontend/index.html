@@ -948,6 +948,26 @@
         list-style: none;
       }
 
+      .detection-group-title {
+        display: inline-grid;
+        grid-template-columns: 84px minmax(0, 1fr);
+        align-items: center;
+        gap: 10px;
+        min-width: 0;
+      }
+
+      .detection-group-title > .chip {
+        justify-self: start;
+        min-width: 70px;
+        justify-content: center;
+      }
+
+      .detection-group-label {
+        overflow: hidden;
+        text-overflow: ellipsis;
+        white-space: nowrap;
+      }
+
       .detection-group summary::-webkit-details-marker {
         display: none;
       }
@@ -1344,6 +1364,11 @@
         background: var(--zigbee-purple);
       }
 
+      .chip.protocol-tpms {
+        color: #111827;
+        background: #e5e7eb;
+      }
+
       .chip.protocol-wifi {
         color: #052e16;
         background: #bbf7d0;
@@ -1352,6 +1377,27 @@
       .chip.protocol-fm {
         color: #431407;
         background: #fed7aa;
+      }
+
+      .chip.sdr-role-selected {
+        border: 2px solid currentColor;
+        box-shadow: 0 0 0 2px rgba(255, 253, 248, 0.18);
+      }
+
+      .chip.sdr-role-selected.protocol-zigbee {
+        border-color: #d8c7ff;
+      }
+
+      .chip.sdr-role-selected.protocol-tpms {
+        border-color: #f8fafc;
+      }
+
+      .chip.sdr-role-selected.protocol-wifi {
+        border-color: #22c55e;
+      }
+
+      .chip.sdr-role-selected.protocol-fm {
+        border-color: #f59e0b;
       }
 
       .brand-icon-inline {
@@ -2645,9 +2691,11 @@
             return `
               <details class="detection-group ${protocolClass(groupProtocol)}" data-group="${groupKey}" ${isOpen ? "open" : ""}>
                 <summary>
-                  <span>${brandIcon(label)}${label}</span>
-                  <span class="chips">
+                  <span class="detection-group-title">
                     ${groupProtocol ? protocolChip(groupProtocol) : ""}
+                    <span class="detection-group-label">${brandIcon(label)}${label}</span>
+                  </span>
+                  <span class="chips">
                     <span class="chip">${devices.length} device${devices.length === 1 ? "" : "s"}</span>
                     <span class="chip">${Number(detections || 0).toLocaleString()} detections</span>
                     <span class="chip">${fmtMaybeDb(bestRssi)}</span>
@@ -3092,7 +3140,34 @@
         const enabledProtocols = new Set(
           (status?.decoder_stats?.enabled_protocols || selectedProtocols()).map((item) => String(item).toLowerCase())
         );
+        function deviceRole(device) {
+          const id = String(device?.id || "");
+          const selectedClassic = String(status?.device_ids?.classic || status?.device_ids?.radio_a || selectedDeviceId(btcDeviceSelect) || "");
+          const selectedHop = String(status?.device_ids?.hop || status?.device_ids?.radio_b || selectedDeviceId(btleDeviceSelect) || "");
+          const isClassic = selectedClassic && id === selectedClassic;
+          const isHop = selectedHop && id === selectedHop;
+          const protocols = [];
+          if (isClassic && enabledProtocols.has("btc")) protocols.push("BTC");
+          if (isClassic && enabledProtocols.has("ble")) protocols.push("BTLE");
+          if (isHop && enabledProtocols.has("zigbee")) protocols.push("ZIGBEE");
+          if (isHop && enabledProtocols.has("tpms")) protocols.push("TPMS");
+          if (isHop && enabledProtocols.has("fm")) protocols.push("FM");
+          return { isClassic, isHop, protocols };
+        }
         function fallbackSdrBand(device) {
+          const role = deviceRole(device);
+          if (role.isClassic && enabledProtocols.has("btc") && enabledProtocols.has("ble")) {
+            const bw = Math.max(1, Math.round(Number(sampleRateInput.value || 60)));
+            const center = Math.max(2402, Math.min(2480, Number(btcCenterInput.value || 2442)));
+            return `2.4 GHz ISM shared BTC+BLE · center ${center.toFixed(3).replace(/\.?0+$/, "")} MHz / ${bw} MHz BW`;
+          }
+          if (role.isHop && role.protocols.length) {
+            const parts = [];
+            if (enabledProtocols.has("zigbee")) parts.push("Zigbee-ready 2405-2480 MHz");
+            if (enabledProtocols.has("tpms")) parts.push("TPMS 315/433.92 MHz");
+            if (enabledProtocols.has("fm")) parts.push("FM 87.7-107.9 MHz");
+            return parts.length ? parts.join(" · ") : "RF hopping";
+          }
           const minHz = Number(device.freq_min_hz || 0);
           const maxHz = Number(device.freq_max_hz || 0);
           const maxMsps = Number(device.max_sample_rate_sps || 0) / 1_000_000;
@@ -3137,7 +3212,17 @@
           if (protocol === "BTC" && /BTC\+BLE|BTC\+BTLE|shared/i.test(band)) {
             return `${protocolChip("BTC")}${protocolChip("BTLE")}`;
           }
-          return protocolChip(protocol || "RF");
+          return sdrRoleChip(protocol || "RF");
+        }
+        function sdrRoleChip(protocol) {
+          const value = String(protocol || "").toUpperCase();
+          const chip = protocolChip(value || "RF");
+          if (value === "BTC" || value === "BTLE") return chip;
+          return chip.replace('class="chip ', 'class="chip sdr-role-selected ');
+        }
+        function inferredSdrProtocolChips(device) {
+          const chips = deviceRole(device).protocols;
+          return chips.length ? chips.map((protocol) => sdrRoleChip(protocol)).join("") : "";
         }
         devices
           .filter((device) => String(device?.id || "").trim() && String(device?.id || "").trim() !== "wlan0")
@@ -3151,9 +3236,12 @@
             const driver = String(device.driver || "").toUpperCase();
             const scannerRunning = Boolean(status?.running || status?.worker_alive);
             const scannerOwned = scannerRunning || active || Boolean(device.occupied);
+            const inferredChips = inferredSdrProtocolChips(device);
             const pill = active
               ? `<span class="sdr-assignment-chips">${sdrProtocolChips(assignment)}</span>`
-              : `<span class="legend-pill">${scannerOwned ? "Scanning" : "Ready"}</span>`;
+              : inferredChips
+                ? `<span class="sdr-assignment-chips">${inferredChips}</span>`
+                : `<span class="legend-pill">${scannerOwned ? "Scanning" : "Ready"}</span>`;
             const center = active ? assignmentCenter(assignment) : "";
             const band = active
               ? `${assignment.band || "Scanning"}${center ? ` · center ${center}` : ""}`
