@@ -2341,6 +2341,8 @@
       }
 
       function zigbeeFollowChannel() {
+        const enabled = latestStatus?.decoder_stats?.enabled_protocols;
+        if (Array.isArray(enabled) && !enabled.map((item) => String(item).toLowerCase()).includes("zigbee")) return null;
         const channel = latestStatus?.follow_target?.zigbee?.channel ?? latestStatus?.decoder_stats?.follow?.zigbee?.channel;
         const numeric = Number(channel);
         return Number.isFinite(numeric) ? numeric : null;

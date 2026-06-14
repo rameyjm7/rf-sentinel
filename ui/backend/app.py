@@ -3340,6 +3340,14 @@ def _write_rf_sentinel_control(
     return payload
 
 
+def _follow_state_for_protocols(control: dict[str, Any], protocols: set[str]) -> dict[str, Any]:
+    if "zigbee" not in protocols:
+        return {}
+    follow = control.get("follow") if isinstance(control.get("follow"), dict) else {}
+    zigbee = follow.get("zigbee") if isinstance(follow.get("zigbee"), dict) else None
+    return {"zigbee": zigbee} if zigbee else {}
+
+
 def _read_ui_config() -> dict[str, Any]:
     try:
         payload = json.loads(RF_SENTINEL_UI_CONFIG_PATH.read_text(encoding="utf-8"))
@@ -3668,7 +3676,9 @@ def _start_rf_sentinel_engine(
     existing_control = _read_rf_sentinel_control()
     existing_follow = existing_control.get("follow") if isinstance(existing_control.get("follow"), dict) else {}
     zigbee_follow_channel = RF_SENTINEL_NO_CHANGE
-    if "zigbee" in protocols and not isinstance(existing_follow.get("zigbee"), dict):
+    if "zigbee" not in protocols:
+        zigbee_follow_channel = None
+    elif not isinstance(existing_follow.get("zigbee"), dict):
         zigbee_follow_channel = RF_SENTINEL_DEFAULT_ZIGBEE_FOLLOW_CHANNEL
     control = _write_rf_sentinel_control(
         protocols,
@@ -3732,9 +3742,15 @@ def update_scan_protocols():
     if "wifi" in enabled_protocols and not _has_wifi_device(devices_available, enabled_devices):
         enabled_protocols.discard("wifi")
     _write_ui_config(enabled_protocols, disabled_devices)
-    _write_rf_sentinel_control(enabled_protocols, enabled_devices=enabled_devices)
+    control = _write_rf_sentinel_control(
+        enabled_protocols,
+        enabled_devices=enabled_devices,
+        zigbee_follow_channel=RF_SENTINEL_NO_CHANGE if "zigbee" in enabled_protocols else None,
+    )
+    follow_state = _follow_state_for_protocols(control, enabled_protocols)
     with state_lock:
         state.decoder_stats["enabled_protocols"] = sorted(enabled_protocols)
+        state.decoder_stats["follow"] = follow_state
         _append_scanner_log(f"[ui] enabled protocols updated: {', '.join(sorted(enabled_protocols)) or 'none'}")
     return jsonify({"ok": True, "protocols": sorted(enabled_protocols)})
 
@@ -3989,9 +4005,15 @@ def update_config():
     if "wifi" in protocols and not _has_wifi_device(devices_available, enabled_devices):
         protocols.discard("wifi")
     config = _write_ui_config(protocols, disabled_devices)
-    _write_rf_sentinel_control(protocols, enabled_devices=enabled_devices)
+    control = _write_rf_sentinel_control(
+        protocols,
+        enabled_devices=enabled_devices,
+        zigbee_follow_channel=RF_SENTINEL_NO_CHANGE if "zigbee" in protocols else None,
+    )
+    follow_state = _follow_state_for_protocols(control, protocols)
     with state_lock:
         state.decoder_stats["enabled_protocols"] = sorted(protocols)
+        state.decoder_stats["follow"] = follow_state
         _append_scanner_log(f"[ui] config saved: {', '.join(sorted(protocols)) or 'none'}")
     return jsonify({"ok": True, **config})
 
@@ -4178,7 +4200,7 @@ def start_scan():
             state.decoder_stats["enabled_protocols"] = sorted(enabled_protocols)
             state.decoder_stats["sweep_both_radios"] = bool(sweep_both_radios)
             control = _read_rf_sentinel_control()
-            state.decoder_stats["follow"] = control.get("follow") if isinstance(control.get("follow"), dict) else {}
+            state.decoder_stats["follow"] = _follow_state_for_protocols(control, enabled_protocols)
         return jsonify(
             {
                 "ok": True,
@@ -4370,6 +4392,8 @@ def status():
     devices = _available_devices()
     ui_config = _read_ui_config()
     with state_lock:
+        enabled_protocols = {str(item).lower() for item in state.decoder_stats.get("enabled_protocols", ui_config.get("protocols", []))}
+        follow_target = _follow_state_for_protocols({"follow": state.decoder_stats.get("follow", {})}, enabled_protocols)
         return jsonify(
             {
                 "running": state.running,
@@ -4402,8 +4426,8 @@ def status():
                 "discovery_table": state.discovery_table[:120],
                 "classic_candidates": state.classic_candidates[:32],
                 "classic_addresses": state.classic_addresses[:64],
-                "decoder_stats": state.decoder_stats,
-                "follow_target": state.decoder_stats.get("follow", {}),
+                "decoder_stats": {**state.decoder_stats, "follow": follow_target},
+                "follow_target": follow_target,
                 "test_target": state.test_target,
                 "test_target_error": state.test_target_error,
                 "btc_engine": state.btc_engine,

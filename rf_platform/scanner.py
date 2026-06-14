@@ -490,6 +490,8 @@ def _materialize_job(args: argparse.Namespace, job: ScanJob) -> tuple[ScanJob, s
 
 
 def _priority_protocol(args: argparse.Namespace, job: ScanJob) -> str:
+    if "zigbee" not in _enabled_protocols(args):
+        return ""
     return "zigbee" if _zigbee_follow_channel(args) is not None and _is_follow_device_job(args, job) else ""
 
 
