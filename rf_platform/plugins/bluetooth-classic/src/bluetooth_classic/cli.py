@@ -5,17 +5,23 @@ import csv
 import json
 import os
 import platform
+import tempfile
 import shutil
 import signal
 import subprocess
 import sys
+import threading
 import time
 from pathlib import Path
 from typing import Any
 
+import requests
+import websocket
+
 
 PLUGIN_ROOT = Path(__file__).resolve().parents[2]
 DEFAULT_BINARY = PLUGIN_ROOT / "build" / "btcexplorer-sniffer"
+DEFAULT_GATEWAY_BINARY = PLUGIN_ROOT / "build" / "btcexplorer-sniffer-gateway"
 DEFAULT_LOG = PLUGIN_ROOT / "btcexplorer-sniffer.log"
 
 CSV_FIELDS = [
@@ -99,8 +105,7 @@ def _rebuild_reason(binary: Path) -> str | None:
     return None
 
 
-def _ensure_binary(auto_build: bool = True) -> Path:
-    binary = DEFAULT_BINARY
+def _ensure_binary(auto_build: bool = True, binary: Path = DEFAULT_BINARY) -> Path:
     reason = _rebuild_reason(binary)
     if reason is None:
         return binary
@@ -121,6 +126,134 @@ def _ensure_binary(auto_build: bool = True) -> Path:
         raise RuntimeError(f"cmake build failed\nstdout:\n{build.stdout[-4000:]}\nstderr:\n{build.stderr[-4000:]}")
     binary.chmod(binary.stat().st_mode | 0o111)
     return binary
+
+
+def _gateway_base(base_url: str | None = None) -> str:
+    return (base_url or os.getenv("SDR_GATEWAY_BASE_URL", "http://127.0.0.1:8080")).rstrip("/")
+
+
+def _gateway_token(token: str | None = None) -> str:
+    explicit = (token or "").strip()
+    if explicit:
+        return explicit
+    return (os.getenv("SDR_GATEWAY_API_TOKEN", "") or "").strip()
+
+
+def _gateway_headers(token: str | None = None) -> dict[str, str]:
+    resolved = _gateway_token(token)
+    return {"Authorization": f"Bearer {resolved}"} if resolved else {}
+
+
+def _ws_url_for_stream(base_url: str | None, stream_id: str, token: str | None = None) -> str:
+    base = _gateway_base(base_url)
+    ws_base = "wss://" + base[len("https://") :] if base.startswith("https://") else "ws://" + base[len("http://") :]
+    suffix = "?keep=1"
+    resolved_token = _gateway_token(token)
+    if resolved_token:
+        suffix += f"&token={resolved_token}"
+    return f"{ws_base}/ws/iq/{stream_id}{suffix}"
+
+
+def _start_gateway_stream(args: argparse.Namespace) -> str:
+    sample_rate_sps = int(args.bandwidth_mhz) * 1_000_000
+    payload = {
+        "device_id": args.device_id,
+        "center_freq_hz": int(round(float(args.center_mhz) * 1_000_000.0)),
+        "sample_rate_sps": sample_rate_sps,
+        "lna_gain_db": int(args.lna_gain_db),
+        "vga_gain_db": int(args.vga_gain_db),
+        "amp_enable": bool(args.amp_gain_db and float(args.amp_gain_db) > 0.0),
+        "baseband_filter_hz": sample_rate_sps,
+        "duration_seconds": None,
+        "num_samples": None,
+    }
+    resp = requests.post(
+        f"{_gateway_base(args.gateway_base_url)}/streams/start",
+        headers=_gateway_headers(args.gateway_token),
+        json=payload,
+        timeout=12,
+    )
+    try:
+        resp.raise_for_status()
+    except requests.HTTPError as exc:
+        detail = ""
+        try:
+            body = resp.json()
+            detail = str(body.get("detail") or body.get("error") or "")
+        except (ValueError, AttributeError):
+            detail = resp.text.strip()
+        message = f"sdr-gateway stream start failed: HTTP {resp.status_code}"
+        if detail:
+            message += f": {detail}"
+        raise RuntimeError(message) from exc
+    return str(resp.json()["stream_id"])
+
+
+def _stop_gateway_stream(base_url: str | None, token: str | None, stream_id: str) -> None:
+    try:
+        requests.post(f"{_gateway_base(base_url)}/streams/{stream_id}/stop", headers=_gateway_headers(token), timeout=5)
+    except requests.RequestException:
+        pass
+
+
+def _make_fifo() -> tuple[tempfile.TemporaryDirectory[str], Path]:
+    tmp = tempfile.TemporaryDirectory(prefix="bluetooth_classic_gateway_")
+    os.chmod(tmp.name, 0o755)
+    fifo_path = Path(tmp.name) / "btcsniffer.cs8"
+    os.mkfifo(fifo_path)
+    os.chmod(fifo_path, 0o666)
+    return tmp, fifo_path
+
+
+def _bridge_gateway_to_fifo(
+    *,
+    base_url: str | None,
+    token: str | None,
+    stream_id: str,
+    fifo_path: Path,
+    stop: threading.Event,
+    raw: bool,
+) -> None:
+    fifo = None
+    ws = None
+    chunks = 0
+    byte_count = 0
+    last_report = time.monotonic()
+    try:
+        fifo = open(fifo_path, "wb", buffering=0)
+        ws = websocket.create_connection(_ws_url_for_stream(base_url, stream_id, token), timeout=8)
+        ws.settimeout(1.0)
+        if raw:
+            print(f"gateway bridge stream_id={stream_id} fifo={fifo_path}", file=sys.stderr, flush=True)
+        while not stop.is_set():
+            try:
+                chunk = ws.recv()
+            except websocket.WebSocketTimeoutException:
+                continue
+            if not isinstance(chunk, (bytes, bytearray)):
+                continue
+            fifo.write(chunk)
+            chunks += 1
+            byte_count += len(chunk)
+            now = time.monotonic()
+            if raw and now - last_report >= 5.0:
+                print(f"gateway bridge chunks={chunks} bytes={byte_count}", file=sys.stderr, flush=True)
+                last_report = now
+    except Exception as exc:
+        if not stop.is_set():
+            print(f"gateway bridge error={exc}", file=sys.stderr, flush=True)
+            stop.set()
+    finally:
+        if ws is not None:
+            try:
+                ws.close()
+            except Exception:
+                pass
+        if fifo is not None:
+            try:
+                fifo.close()
+            except Exception:
+                pass
 
 
 def _csv_row(event: dict[str, Any], args: argparse.Namespace, packet: str) -> dict[str, Any]:
@@ -145,8 +278,33 @@ def _csv_row(event: dict[str, Any], args: argparse.Namespace, packet: str) -> di
 
 
 def _run_listen(args: argparse.Namespace) -> int:
-    binary = _ensure_binary(auto_build=not args.no_auto_build)
+    binary = _ensure_binary(
+        auto_build=not args.no_auto_build,
+        binary=DEFAULT_GATEWAY_BINARY if args.source == "gateway" else DEFAULT_BINARY,
+    )
     driver = _device_driver(args.device_id, args.driver)
+    gateway_stream_id = ""
+    gateway_tmp: tempfile.TemporaryDirectory[str] | None = None
+    gateway_stop = threading.Event()
+    gateway_thread: threading.Thread | None = None
+    gateway_fifo: Path | None = None
+    if args.source == "gateway":
+        gateway_stream_id = _start_gateway_stream(args)
+        gateway_tmp, gateway_fifo = _make_fifo()
+        gateway_thread = threading.Thread(
+            target=_bridge_gateway_to_fifo,
+            kwargs={
+                "base_url": args.gateway_base_url,
+                "token": args.gateway_token,
+                "stream_id": gateway_stream_id,
+                "fifo_path": gateway_fifo,
+                "stop": gateway_stop,
+                "raw": bool(args.raw),
+            },
+            daemon=True,
+        )
+        gateway_thread.start()
+
     cmd = [
         str(binary),
         "--driver",
@@ -167,6 +325,8 @@ def _run_listen(args: argparse.Namespace) -> int:
         str(args.log),
         "--jsonl-stdout",
     ]
+    if gateway_fifo is not None:
+        cmd.extend(["--input-fifo", str(gateway_fifo), "--input-format", "cs8"])
     if args.show_init_failed:
         cmd.append("--show-init-failed")
     if args.events_path:
@@ -178,7 +338,7 @@ def _run_listen(args: argparse.Namespace) -> int:
     else:
         writer = None
         print(
-            f"using device={args.device_id} driver={driver} center={float(args.center_mhz):.3f}MHz "
+            f"using source={args.source} device={args.device_id} driver={driver} center={float(args.center_mhz):.3f}MHz "
             f"bandwidth={int(args.bandwidth_mhz)}MHz lna={args.lna_gain_db} vga={args.vga_gain_db} amp={args.amp_gain_db}",
             file=sys.stderr,
             flush=True,
@@ -189,6 +349,7 @@ def _run_listen(args: argparse.Namespace) -> int:
     def _stop(_signum: int, _frame: Any) -> None:
         nonlocal stop_requested
         stop_requested = True
+        gateway_stop.set()
         if proc.poll() is None:
             proc.terminate()
 
@@ -243,8 +404,15 @@ def _run_listen(args: argparse.Namespace) -> int:
                 )
         return proc.wait()
     finally:
+        gateway_stop.set()
         if stop_requested and proc.poll() is None:
             proc.terminate()
+        if gateway_stream_id:
+            _stop_gateway_stream(args.gateway_base_url, args.gateway_token, gateway_stream_id)
+        if gateway_thread is not None:
+            gateway_thread.join(timeout=1.0)
+        if gateway_tmp is not None:
+            gateway_tmp.cleanup()
 
 
 def _build_parser() -> argparse.ArgumentParser:
@@ -253,6 +421,9 @@ def _build_parser() -> argparse.ArgumentParser:
     listen = subparsers.add_parser("listen", help="run the Bluetooth Classic native sniffer")
     listen.add_argument("--device-id", default="hackrf:0")
     listen.add_argument("--driver", default="hackrf", help="SoapySDR driver fallback if --device-id is generic")
+    listen.add_argument("--source", choices=("sdr", "gateway"), default="sdr", help="read directly from SDR or from an sdr-gateway stream")
+    listen.add_argument("--gateway-base-url", default=None)
+    listen.add_argument("--gateway-token", default=None)
     listen.add_argument("--center-mhz", type=float, default=2442.0)
     listen.add_argument("--bandwidth-mhz", type=int, default=20)
     listen.add_argument("--seconds", type=float, default=0.5, help="IQ buffer seconds per processing pass")

@@ -284,20 +284,105 @@
         background: #fffdf8;
       }
 
-      .radio-select {
-        min-width: 230px;
-        flex: 1 1 230px;
-      }
-
       .protocol-select {
         flex: 2 1 420px;
+      }
+
+      .config-menu {
+        position: relative;
+        flex: 0 0 auto;
+      }
+
+      .config-menu summary {
+        display: inline-flex;
+        align-items: center;
+        gap: 8px;
+        min-height: 38px;
+        padding: 0 16px;
+        border: 1px solid var(--line);
+        border-radius: 999px;
+        color: var(--ink);
+        background: rgba(255, 253, 248, 0.08);
+        font-weight: 800;
+        cursor: pointer;
+        list-style: none;
+      }
+
+      .config-menu summary::-webkit-details-marker {
+        display: none;
+      }
+
+      .config-panel {
+        position: absolute;
+        z-index: 30;
+        top: calc(100% + 8px);
+        right: 0;
+        width: min(560px, calc(100vw - 36px));
+        padding: 12px;
+        border: 1px solid var(--line);
+        border-radius: 8px;
+        background: #2e2100;
+        box-shadow: 0 18px 50px rgba(0, 0, 0, 0.35);
+      }
+
+      .config-section + .config-section {
+        margin-top: 12px;
+        padding-top: 12px;
+        border-top: 1px solid rgba(215, 208, 191, 0.22);
+      }
+
+      .config-title {
+        margin-bottom: 8px;
+        color: var(--muted);
+        text-transform: uppercase;
+        font-size: 0.72rem;
+        font-weight: 900;
+      }
+
+      .sdr-config-list {
+        display: grid;
+        grid-template-columns: repeat(auto-fit, minmax(210px, 1fr));
+        gap: 8px;
+      }
+
+      .sdr-toggle {
+        display: grid;
+        grid-template-columns: auto minmax(0, 1fr);
+        gap: 8px;
+        align-items: center;
+        min-height: 48px;
+        padding: 8px;
+        border: 1px solid rgba(215, 208, 191, 0.4);
+        border-radius: 6px;
+        background: rgba(255, 253, 248, 0.06);
+      }
+
+      .sdr-toggle input {
+        width: 18px;
+        min-height: 18px;
+        accent-color: var(--teal);
+      }
+
+      .sdr-toggle strong,
+      .sdr-toggle span {
+        display: block;
+        overflow: hidden;
+        text-overflow: ellipsis;
+        white-space: nowrap;
+      }
+
+      .sdr-toggle span {
+        color: var(--muted);
+        font-size: 0.76rem;
       }
 
       .auto-plan {
         display: flex;
         align-items: center;
+        flex-wrap: wrap;
         gap: 10px;
         min-width: 0;
+        flex: 1 1 360px;
       }
 
       .auto-plan strong {
@@ -381,6 +466,54 @@
         font-size: 1.05rem;
         font-variant-numeric: tabular-nums;
         line-height: 1;
+      }
+
+      .sdr-assignment-list {
+        display: grid;
+        gap: 6px;
+        padding: 0 10px 10px;
+      }
+
+      .sdr-assignment {
+        display: grid;
+        gap: 4px;
+        padding: 8px;
+        border: 1px solid var(--line);
+        border-radius: 6px;
+        background: #fffdf8;
+      }
+
+      .sdr-assignment-top {
+        display: flex;
+        align-items: center;
+        justify-content: space-between;
+        gap: 8px;
+      }
+
+      .sdr-assignment-title {
+        font-size: 0.8rem;
+        font-weight: 800;
+        word-break: break-word;
+      }
+
+      .sdr-assignment-meta {
+        color: var(--muted);
+        font-size: 0.72rem;
+      }
+
+      .sdr-assignment-band {
+        color: var(--ink);
+        font-size: 0.76rem;
+        font-weight: 700;
+      }
+
+      .sdr-assignment-empty {
+        padding: 8px;
+        border: 1px dashed var(--line);
+        border-radius: 6px;
+        color: var(--muted);
+        font-size: 0.76rem;
+        background: rgba(255, 253, 248, 0.5);
       }
 
       .hidden {
@@ -1352,48 +1485,27 @@
       </header>
 
       <form class="toolbar" id="scanForm">
-        <label class="radio-select">
-          Radio A
-          <select id="btcDeviceSelect"></select>
-        </label>
-        <label class="radio-select">
-          Radio B
-          <select id="btleDeviceSelect"></select>
-        </label>
+        <select id="btcDeviceSelect" hidden></select>
+        <select id="btleDeviceSelect" hidden></select>
         <select id="btcEngineSelect" hidden>
           <option value="btcsniffer">btcsniffer C++</option>
           <option value="python">Python C++-style</option>
         </select>
-        <label class="protocol-select">
-          Protocol Sweep
-          <div class="protocol-toggles">
-            <span class="toggle"><input id="btcInput" type="checkbox" checked /> BTC</span>
-            <span class="toggle"><input id="btleInput" type="checkbox" checked /> BLE</span>
-            <span class="toggle"><input id="zigbeeInput" type="checkbox" checked /> Zigbee</span>
-            <span class="toggle"><input id="tpmsInput" type="checkbox" checked /> TPMS</span>
-            <span class="toggle"><input id="wifiInput" type="checkbox" checked /> WiFi</span>
-            <span class="toggle"><input id="fmInput" type="checkbox" checked /> FM</span>
-          </div>
-        </label>
         <div class="auto-plan">
-          <strong>Two-SDR autonomous sweep</strong>
-          <div class="plan-chips">
-            <span class="plan-chip">Radios + WiFi adapter rotate enabled protocols</span>
-            <span class="plan-chip">Uncheck noisy stacks anytime</span>
-          </div>
+          <strong>Multi-SDR autonomous sweep</strong>
         </div>
         <input id="btcCenterInput" type="number" min="2402" max="2480" step="0.5" value="2442" hidden />
         <input id="sampleRateInput" type="number" min="1" max="60" step="1" value="60" hidden />
         <input id="btcTargetMacInput" type="text" inputmode="latin" value="" hidden />
         <label class="span-2 hidden">
-          Dedicated SDR Gain
+          SDR Gain Profile A
           <span class="slider-control">
             <input id="btcGainInput" type="range" min="0" max="102" step="1" value="72" />
             <span class="control-value" id="btcGainValue">L32 V40</span>
           </span>
         </label>
         <label class="span-2 hidden">
-          Hop SDR Gain
+          SDR Gain Profile B
           <span class="slider-control">
             <input id="btleGainInput" type="range" min="0" max="102" step="1" value="56" />
             <span class="control-value" id="btleGainValue">L40 V16</span>
@@ -1403,6 +1515,26 @@
         <select id="channelSelect" hidden></select>
         <input id="btcSweepInput" type="checkbox" checked hidden />
         <div class="toolbar-actions">
+          <details class="config-menu" id="configMenu">
+            <summary><span class="material-symbols-rounded">tune</span>Config</summary>
+            <div class="config-panel">
+              <div class="config-section">
+                <div class="config-title">Protocols</div>
+                <div class="protocol-toggles">
+                  <span class="toggle"><input id="btcInput" type="checkbox" checked /> BTC</span>
+                  <span class="toggle"><input id="btleInput" type="checkbox" checked /> BLE</span>
+                  <span class="toggle"><input id="zigbeeInput" type="checkbox" checked /> Zigbee</span>
+                  <span class="toggle"><input id="tpmsInput" type="checkbox" checked /> TPMS</span>
+                  <span class="toggle"><input id="wifiInput" type="checkbox" checked /> WiFi</span>
+                  <span class="toggle"><input id="fmInput" type="checkbox" checked /> FM</span>
+                </div>
+              </div>
+              <div class="config-section">
+                <div class="config-title">SDRs</div>
+                <div class="sdr-config-list" id="sdrConfigList"></div>
+              </div>
+            </div>
+          </details>
           <button id="runToggleBtn" type="submit"><span class="material-symbols-rounded">play_arrow</span><span id="runToggleText">Start</span></button>
           <button id="clearBtn" class="secondary" type="button"><span class="material-symbols-rounded">delete_sweep</span>Clear</button>
         </div>
@@ -1412,8 +1544,8 @@
         <section class="panel">
           <h2>RF Health</h2>
           <div class="metrics">
-            <div class="metric"><span>Dedicated SDR RSSI</span><strong id="btcRssiMetric">-120.0</strong></div>
-            <div class="metric"><span>Hop SDR RSSI</span><strong id="btleRssiMetric">-120.0</strong></div>
+            <div class="metric"><span>Best SDR RSSI</span><strong id="btcRssiMetric">-120.0</strong></div>
+            <div class="metric"><span>Noise Floor</span><strong id="btleRssiMetric">-120.0</strong></div>
             <div class="metric"><span>Total Detections</span><strong id="detectionsMetric">0</strong></div>
             <div class="metric"><span>RF Bursts</span><strong id="burstsMetric">0</strong></div>
             <div class="metric"><span>BLE Devices</span><strong id="bleMetric">0</strong></div>
@@ -1423,6 +1555,7 @@
             <div class="metric"><span>WiFi Frames</span><strong id="wifiMetric">0</strong></div>
             <div class="metric"><span>FM Stations</span><strong id="fmMetric">0</strong></div>
           </div>
+          <div class="sdr-assignment-list" id="sdrAssignmentList"></div>
           <div class="spectrum" id="spectrum"></div>
         </section>
 
@@ -1499,6 +1632,7 @@
       const tpmsInput = document.getElementById("tpmsInput");
       const wifiInput = document.getElementById("wifiInput");
       const fmInput = document.getElementById("fmInput");
+      const sdrConfigList = document.getElementById("sdrConfigList");
       const channelSelect = document.getElementById("channelSelect");
       const scanForm = document.getElementById("scanForm");
       const runToggleBtn = document.getElementById("runToggleBtn");
@@ -1513,6 +1647,7 @@
       const liveDot = document.getElementById("liveDot");
       const runState = document.getElementById("runState");
       const spectrum = document.getElementById("spectrum");
+      const sdrAssignmentList = document.getElementById("sdrAssignmentList");
       const channelChart = document.getElementById("channelChart");
       const identityTableWrap = document.getElementById("identityTableWrap");
       const allTabBtn = document.getElementById("allTabBtn");
@@ -1528,6 +1663,8 @@
       const followMenu = document.getElementById("followMenu");
       let devicesReady = false;
       let latestStatus = null;
+      let knownSdrDevices = [];
+      const disabledSdrIds = new Set();
       let activeDetectionTab = "ALL";
       let tableSort = { key: "last_seen_at", direction: "desc" };
       const detectionGroupOpen = new Map();
@@ -1675,11 +1812,76 @@
         return protocols;
       }
 
+      function selectedSdrIds() {
+        return knownSdrDevices
+          .map((dev) => String(dev?.id || "").trim())
+          .filter((id) => id && !disabledSdrIds.has(id));
+      }
+
+      function selectedSdrPayload() {
+        return disabledSdrIds.size ? selectedSdrIds() : null;
+      }
+
+      function isSidekiqDeviceId(id) {
+        return String(id || "").trim().toLowerCase().startsWith("sidekiq:");
+      }
+
+      function sameSdrList(a, b) {
+        const ids = (items) => (Array.isArray(items) ? items : [])
+          .map((dev) => String(dev?.id || "").trim())
+          .filter(Boolean)
+          .sort()
+          .join("|");
+        return ids(a) === ids(b);
+      }
+
+      function renderSdrConfigList(devices = knownSdrDevices, { preserveOnEmpty = true, force = false } = {}) {
+        const nextDevices = Array.isArray(devices) ? devices.filter((dev) => String(dev?.id || "").trim()) : [];
+        if (!nextDevices.length && preserveOnEmpty && knownSdrDevices.length) return;
+        if (!force && sameSdrList(nextDevices, knownSdrDevices) && sdrConfigList.children.length) return;
+        knownSdrDevices = nextDevices;
+        sdrConfigList.innerHTML = knownSdrDevices.length
+          ? knownSdrDevices.map((dev) => {
+              const id = String(dev.id || "").trim();
+              const label = dev.label || id;
+              const driver = String(dev.driver || "").toUpperCase();
+              const rate = (Number(dev.max_sample_rate_sps || 0) / 1_000_000).toFixed(1);
+              return `
+                <label class="sdr-toggle">
+                  <input type="checkbox" data-sdr-id="${id}" ${disabledSdrIds.has(id) ? "" : "checked"} />
+                  <span>
+                    <strong>${label}</strong>
+                    <span>${id} · ${driver} · ${rate} Msps</span>
+                  </span>
+                </label>
+              `;
+            }).join("")
+          : `<div class="sdr-assignment-empty">No SDRs visible from sdr-gateway.</div>`;
+      }
+
       function selectedDeviceId(select) {
         const value = String(select.value || "").trim();
         const lower = value.toLowerCase();
         if (!value || lower === "loading..." || lower.includes("unavailable") || lower.includes("no devices")) return "";
         return value;
+      }
+
+      function autoSdrCount(status = null) {
+        const devices = Array.isArray(status?.available_devices) ? status.available_devices : [];
+        if (devices.length) return devices.filter((item) => String(item?.id || "").trim() && !disabledSdrIds.has(String(item.id))).length;
+        return Math.max(0, btcDeviceSelect.options.length || 0);
+      }
+
+      function protocolLabel(protocol) {
+        const map = {
+          btc: "BTC",
+          ble: "BLE",
+          zigbee: "Zigbee",
+          tpms: "TPMS",
+          wifi: "WiFi",
+          fm: "FM",
+        };
+        return map[String(protocol || "").toLowerCase()] || String(protocol || "Idle");
       }
 
       function syncModeCheckboxes(mode) {
@@ -1732,6 +1934,7 @@
               select.appendChild(opt);
             });
           });
+          renderSdrConfigList(data, { preserveOnEmpty: false, force: true });
           const selectMatch = (select, pattern) => {
             const option = Array.from(select.options).find((opt) => opt.value.toLowerCase().includes(pattern) || opt.textContent.toLowerCase().includes(pattern));
             if (option) select.value = option.value;
@@ -1749,6 +1952,7 @@
         } catch (err) {
           btcDeviceSelect.innerHTML = `<option>${err.message}</option>`;
           btleDeviceSelect.innerHTML = `<option>${err.message}</option>`;
+          renderSdrConfigList([], { preserveOnEmpty: true });
           devicesReady = false;
         } finally {
           runToggleBtn.disabled = !devicesReady;
@@ -2721,27 +2925,91 @@
 
       function plannedStatusLabel() {
         const protocols = selectedProtocols().map((item) => item.toUpperCase()).join("+") || "no protocols";
-        const radioA = selectedDeviceId(btcDeviceSelect) || "Radio A";
-        const radioB = selectedDeviceId(btleDeviceSelect) || "Radio B";
-        return `Ready: ${protocols} across ${radioA} + ${radioB}`;
+        const sdrs = autoSdrCount(latestStatus);
+        return `Ready: ${protocols} across ${sdrs || "available"} SDRs`;
       }
 
       function statusLabel(status) {
         if (!status.running) return plannedStatusLabel();
         if (status.mode === "sentinel") {
-          const radioA = status.device_ids?.radio_a || status.device_ids?.classic || "radio A";
-          const radioB = status.device_ids?.radio_b || status.device_ids?.hop || "radio B";
+          const sdrs = autoSdrCount(status);
+          const active = Object.keys(status.scanner_assignments || {}).length;
           const followChannel = status.follow_target?.zigbee?.channel ?? status.decoder_stats?.follow?.zigbee?.channel;
           if (followChannel !== undefined && followChannel !== null) {
-            return `RF Sentinel two-SDR sweep · ${radioA} + ${radioB} · Zigbee locked CH ${followChannel}`;
+            return `RF Sentinel multi-SDR sweep · ${active || sdrs || 0}/${sdrs || 0} radios active · Zigbee locked CH ${followChannel}`;
           }
-          return `RF Sentinel two-SDR sweep · ${radioA} + ${radioB}`;
+          return `RF Sentinel multi-SDR sweep · ${active || sdrs || 0}/${sdrs || 0} radios active`;
         }
         if (status.mode === "classic" || status.mode === "both") {
           const rateMhz = Math.max(1, Math.round(Number(status.sample_rate_sps || 0) / 1_000_000) || 60);
           return `${status.mode === "both" ? "BTC+BTLE" : "CLASSIC"} ${fmtFreqCompact(status.center_freq_hz)} / ${rateMhz} MHz`;
         }
         return `BTLE CH ${status.channel} / 2 MHz`;
+      }
+
+      function renderSdrAssignments(status) {
+        const assignments = status?.scanner_assignments || {};
+        const devices = Array.isArray(status?.available_devices) ? status.available_devices : [];
+        const cards = [];
+        const enabledProtocols = new Set(
+          (status?.decoder_stats?.enabled_protocols || selectedProtocols()).map((item) => String(item).toLowerCase())
+        );
+        function fallbackSdrBand(device) {
+          const minHz = Number(device.freq_min_hz || 0);
+          const maxHz = Number(device.freq_max_hz || 0);
+          const maxMsps = Number(device.max_sample_rate_sps || 0) / 1_000_000;
+          const can24 = minHz <= 2_402_000_000 && maxHz >= 2_480_000_000;
+          const canFm = minHz <= 87_700_000 && maxHz >= 107_900_000;
+          const canTpms = minHz <= 315_000_000 && maxHz >= 433_920_000;
+          const bands = [];
+          if (can24) {
+            const ism = [];
+            if (enabledProtocols.has("btc")) ism.push("BTC");
+            if (enabledProtocols.has("ble")) ism.push("BLE");
+            if (enabledProtocols.has("zigbee")) ism.push("Zigbee");
+            if (enabledProtocols.has("wifi")) ism.push("WiFi");
+            if (ism.length) bands.push(`2.4 GHz ${ism.join("+")}`);
+          }
+          if (canTpms && enabledProtocols.has("tpms")) bands.push("TPMS 315/433.92 MHz");
+          if (canFm && enabledProtocols.has("fm")) bands.push("FM 87.7-107.9 MHz");
+          if (bands.length) return `${bands.slice(0, 2).join(" · ")}${bands.length > 2 ? " · more" : ""}`;
+          if (maxMsps > 0) return `RF sweep up to ${maxMsps.toFixed(1)} Msps`;
+          return "RF Sentinel scanning";
+        }
+        devices
+          .filter((device) => String(device?.id || "").trim() && String(device?.id || "").trim() !== "wlan0")
+          .sort((a, b) => String(a.id || "").localeCompare(String(b.id || "")))
+          .forEach((device) => {
+            const assignment = assignments[device.id] || null;
+            const active = Boolean(assignment);
+            const disabled = disabledSdrIds.has(String(device.id || ""));
+            const title = device.label || device.id;
+            const driver = String(device.driver || "").toUpperCase();
+            const scannerRunning = Boolean(status?.running || status?.worker_alive);
+            const scannerOwned = !disabled && (scannerRunning || active || Boolean(device.occupied));
+            const pill = active
+              ? protocolChip(String(assignment.protocol || "").toUpperCase())
+              : `<span class="legend-pill">${disabled ? "Disabled" : scannerOwned ? "Scanning" : "Ready"}</span>`;
+            const band = active
+              ? (assignment.band || "Scanning")
+              : disabled
+                ? "Disabled in Config"
+                : fallbackSdrBand(device);
+            const when = active && assignment.seen_at ? `${Math.max(0, Math.round(Date.now() / 1000 - Number(assignment.seen_at)))}s ago` : "";
+            cards.push(`
+              <div class="sdr-assignment">
+                <div class="sdr-assignment-top">
+                  <div class="sdr-assignment-title">${title}</div>
+                  ${pill}
+                </div>
+                <div class="sdr-assignment-band">${band}</div>
+                <div class="sdr-assignment-meta">${device.id} · ${driver} · max ${(Number(device.max_sample_rate_sps || 0) / 1_000_000).toFixed(1)} Msps${when ? ` · ${when}` : ""}</div>
+              </div>
+            `);
+          });
+        sdrAssignmentList.innerHTML = cards.length
+          ? cards.join("")
+          : `<div class="sdr-assignment-empty">No SDR assignment data yet. Start a scan and RF Sentinel will show live radio roles here.</div>`;
       }
 
       function refreshPlannedStatusLabel() {
@@ -2820,13 +3088,16 @@
           runToggleBtn.querySelector(".material-symbols-rounded").textContent = status.running ? "stop" : "play_arrow";
           if (status.running) syncModeCheckboxes(status.mode);
           if (status.running) syncProtocolCheckboxes(status);
+          if (Array.isArray(status.available_devices)) renderSdrConfigList(status.available_devices, { preserveOnEmpty: true });
           const rows = status.discovery_table || [];
           const detectionTotal = rows.reduce((sum, row) => sum + Number(row.detections || 0), 0);
           const protocolDetections = (protocol) => rows
             .filter((row) => row.protocol === protocol)
             .reduce((sum, row) => sum + Number(row.detections || 0), 0);
-          metrics.btcRssi.textContent = fmtDb(status.rssi_by_mode?.classic);
-          metrics.btleRssi.textContent = fmtDb(status.rssi_by_mode?.ble);
+          const rssiValues = Object.values(status.rssi_by_mode || {}).map((value) => Number(value)).filter((value) => Number.isFinite(value));
+          const bestRssi = rssiValues.length ? Math.max(...rssiValues) : Number(status.last_rssi_dbfs ?? -120);
+          metrics.btcRssi.textContent = fmtDb(bestRssi);
+          metrics.btleRssi.textContent = fmtDb(status.noise_floor_dbfs);
           metrics.detections.textContent = Number(detectionTotal || 0).toLocaleString();
           metrics.bursts.textContent = Number(status.bursts_seen || 0).toLocaleString();
           metrics.ble.textContent = Number(rows.filter((row) => row.protocol === "BTLE").length || 0).toLocaleString();
@@ -2838,6 +3109,7 @@
           updateBtcTargetVisibility(Boolean((btcTargetMacInput.value || "").trim() || status.test_target));
           renderIdentityTable(status.discovery_table || []);
           renderCandidates(status.classic_candidates || [], status.classic_addresses || [], status.discovery_table || []);
+          renderSdrAssignments(status);
           renderBars(status);
           renderChannelActivity(status);
         } catch {
@@ -2854,7 +3126,7 @@
           const resp = await fetch("/api/scan/protocols", {
             method: "POST",
             headers: { "Content-Type": "application/json" },
-            body: JSON.stringify({ protocols }),
+            body: JSON.stringify({ protocols, devices: selectedSdrPayload() }),
           });
           const data = await resp.json().catch(() => ({}));
           if (!resp.ok) throw new Error(data.error || data.detail || "Protocol update failed");
@@ -2933,8 +3205,12 @@
         const btcGain = splitGain(btcGainInput.value || 72);
         const btleGain = splitGain(btleGainInput.value || 56);
         const protocols = selectedProtocols();
+        const devices = selectedSdrIds();
         if (!protocols.length) {
           throw new Error("Select at least one protocol");
+        }
+        if (!devices.length) {
+          throw new Error("Select at least one SDR");
         }
         const resp = await fetch("/api/scan/start", {
           method: "POST",
@@ -2959,7 +3235,8 @@
             btle_vga_gain_db: btleGain.vga,
             preserve_detections: preserve,
             protocols,
-            sweep_both_radios: true,
+            devices: selectedSdrPayload(),
+            sweep_both_radios: false,
           }),
         });
         if (!resp.ok) {
@@ -3019,6 +3296,16 @@
       sampleRateInput.addEventListener("input", refreshPlannedStatusLabel);
       detectionViewSelect.addEventListener("change", pollStatus);
       hopDwellInput.addEventListener("change", scheduleAutoHop);
+      sdrConfigList.addEventListener("change", async (event) => {
+        const input = event.target.closest("[data-sdr-id]");
+        if (!input) return;
+        const id = String(input.dataset.sdrId || "").trim();
+        if (!id) return;
+        if (input.checked) disabledSdrIds.delete(id);
+        else disabledSdrIds.add(id);
+        await applyProtocolSelection();
+        refreshPlannedStatusLabel();
+      });
       function setDetectionTab(protocol) {
         activeDetectionTab = protocol;
         if (protocol === "WIFI" && detectionViewSelect.value === "cards") {

@@ -42,6 +42,7 @@ typedef std::complex<float> iqsamp_t;
 #include <atomic>
 #include <cctype>
 #include <cstring>
+#include <stdint.h>
 #include <unistd.h>
 
 #include <iostream>
@@ -1401,6 +1402,10 @@ int SAFE_MAIN(int argc, char *argv[])
     unsigned int bins = 0;
     std::string driver = "hackrf";
     std::string fifo_path = "";
+#ifdef BTC_GATEWAY_FIFO
+    std::string input_fifo_path = "";
+    std::string input_format = "cs8";
+#endif
     std::string log_path = "btsniffer.log";
     std::string events_path = "";
     double lna_gain_db = 40.0;
@@ -1418,6 +1423,10 @@ int SAFE_MAIN(int argc, char *argv[])
             ("bins", po::value<unsigned int>(), "deprecated alias for --bandwidth-mhz")
             ("seconds", po::value<double>(&seconds)->default_value(seconds), "seconds of IQ to buffer per processing pass")
             ("fifo", po::value<std::string>(&fifo_path)->default_value(fifo_path), "optional path for raw CF32 IQ output")
+#ifdef BTC_GATEWAY_FIFO
+            ("input-fifo", po::value<std::string>(&input_fifo_path)->default_value(input_fifo_path), "read IQ from this FIFO/file instead of opening an SDR")
+            ("input-format", po::value<std::string>(&input_format)->default_value(input_format), "input FIFO format: cs8 or cf32")
+#endif
             ("log", po::value<std::string>(&log_path)->default_value(log_path), "diagnostic log path, overwritten each run")
             ("events", po::value<std::string>(&events_path)->default_value(events_path), "optional JSONL event path, overwritten each run")
             ("lna-gain-db", po::value<double>(&lna_gain_db)->default_value(lna_gain_db), "RX LNA gain in dB when the SDR exposes an LNA gain element")
@@ -1495,102 +1504,93 @@ int SAFE_MAIN(int argc, char *argv[])
     if (g_record_only && fifo_path.empty()) {
         throw std::runtime_error("--record-only requires --fifo");
     }
+#ifdef BTC_GATEWAY_FIFO
+    boost::algorithm::to_lower(input_format);
+    const bool use_input_fifo = !input_fifo_path.empty();
+    if (use_input_fifo && input_format != "cs8" && input_format != "cf32") {
+        throw std::runtime_error("--input-format must be cs8 or cf32");
+    }
+#else
+    const bool use_input_fifo = false;
+#endif
 
-    // 0. enumerate devices (list all devices' information)
-    SoapySDR::KwargsList results = SoapySDR::Device::enumerate();
-    SoapySDR::Kwargs::iterator it;
+    SoapySDR::Device *sdr = NULL;
+    SoapySDR::Stream *rx_stream = NULL;
+    if (use_input_fifo) {
+#ifdef BTC_GATEWAY_FIFO
+        std::cout << "Opening IQ FIFO=" << input_fifo_path
+                  << " format=" << input_format
+                  << " at " << (freq / 1.0e6) << " MHz, "
+                  << (rate / 1.0e6) << " Msps, "
+                  << decfactor << " bins" << std::endl;
+        log_event(boost::format("opening input_fifo=%s input_format=%s center_mhz=%.3f rate_msps=%.3f bins=%u")
+                  % input_fifo_path % input_format % (freq / 1.0e6) % (rate / 1.0e6) % decfactor);
+#endif
+    } else {
+        SoapySDR::Kwargs args;
+        args["driver"] = driver;
+        std::cout << "Opening SoapySDR driver=" << driver
+                  << " at " << (freq / 1.0e6) << " MHz, "
+                  << (rate / 1.0e6) << " Msps, "
+                  << decfactor << " bins" << std::endl;
+        log_event(boost::format("opening driver=%s center_mhz=%.3f rate_msps=%.3f bins=%u")
+                  % driver % (freq / 1.0e6) % (rate / 1.0e6) % decfactor);
 
-    for( int i = 0; i < results.size(); ++i)
-    {
-        printf("Found device #%d: ", i);
-        for( it = results[i].begin(); it != results[i].end(); ++it)
+        //	1.2 make device
+        sdr = SoapySDR::Device::make(args);
+
+        if( sdr == NULL )
         {
-            printf("%s = %s\n", it->first.c_str(), it->second.c_str());
-            log_event(boost::format("device[%d] %s=%s") % i % it->first % it->second);
+            fprintf(stderr, "SoapySDR::Device::make failed\n");
+            return EXIT_FAILURE;
         }
-        printf("\n");
-    }
 
-    // 1. create device instance
+        // 2. query device info
+        std::vector< std::string > str_list;	//string list
 
-    if (results.empty()) {
-        throw std::runtime_error("No SoapySDR devices found");
-    }
-
-    SoapySDR::Kwargs args;
-    bool found_requested_driver = false;
-    for (size_t i = 0; i < results.size(); ++i) {
-        SoapySDR::Kwargs::const_iterator driver_it = results[i].find("driver");
-        if (driver_it != results[i].end() && driver_it->second == driver) {
-            args = results[i];
-            found_requested_driver = true;
-            break;
-        }
-    }
-    if (!found_requested_driver) {
-        throw std::runtime_error("Requested SoapySDR driver not found: " + driver);
-    }
-    std::cout << "Opening SoapySDR driver=" << driver
-              << " at " << (freq / 1.0e6) << " MHz, "
-              << (rate / 1.0e6) << " Msps, "
-              << decfactor << " bins" << std::endl;
-    log_event(boost::format("opening driver=%s center_mhz=%.3f rate_msps=%.3f bins=%u")
-              % driver % (freq / 1.0e6) % (rate / 1.0e6) % decfactor);
-
-    //	1.2 make device
-    SoapySDR::Device *sdr = SoapySDR::Device::make(args);
-
-    if( sdr == NULL )
-    {
-        fprintf(stderr, "SoapySDR::Device::make failed\n");
-        return EXIT_FAILURE;
-    }
-
-    // 2. query device info
-    std::vector< std::string > str_list;	//string list
-
-    //	2.1 antennas
-    str_list = sdr->listAntennas( SOAPY_SDR_RX, 0);
+        //	2.1 antennas
+        str_list = sdr->listAntennas( SOAPY_SDR_RX, 0);
 //    printf("Rx antennas: ");
 //    for(int i = 0; i < str_list.size(); ++i)
 //        printf("%s,", str_list[i].c_str());
 //    printf("\n");
 
-    //	2.2 gains
-    str_list = sdr->listGains( SOAPY_SDR_RX, 0);
+        //	2.2 gains
+        str_list = sdr->listGains( SOAPY_SDR_RX, 0);
 //    printf("Rx Gains: ");
 //    for(int i = 0; i < str_list.size(); ++i)
 //        printf("%s, ", str_list[i].c_str());
 //    printf("\n");
 
-    //	2.3. ranges(frequency ranges)
-    SoapySDR::RangeList ranges = sdr->getFrequencyRange( SOAPY_SDR_RX, 0);
+        //	2.3. ranges(frequency ranges)
+        SoapySDR::RangeList ranges = sdr->getFrequencyRange( SOAPY_SDR_RX, 0);
 //    printf("Rx freq ranges: ");
 //    for(int i = 0; i < ranges.size(); ++i)
 //        printf("[%g MHz -> %g MHz], ", ranges[i].minimum()/1.0e6, ranges[i].maximum()/1.0e6);
 //    printf("\n");
 
-    // 3. apply settings
-    sdr->setSampleRate( SOAPY_SDR_RX, 0, rate);
-    sdr->setFrequency( SOAPY_SDR_RX, 0, freq);
-    sdr->setBandwidth( SOAPY_SDR_RX, 0, rate);
-    str_list = sdr->listGains(SOAPY_SDR_RX, 0);
-    if (std::find(str_list.begin(), str_list.end(), "LNA") != str_list.end())
-        sdr->setGain(SOAPY_SDR_RX, 0, "LNA", lna_gain_db);
-    if (std::find(str_list.begin(), str_list.end(), "VGA") != str_list.end())
-        sdr->setGain(SOAPY_SDR_RX, 0, "VGA", vga_gain_db);
-    if (std::find(str_list.begin(), str_list.end(), "AMP") != str_list.end())
-        sdr->setGain(SOAPY_SDR_RX, 0, "AMP", amp_gain_db);
+        // 3. apply settings
+        sdr->setSampleRate( SOAPY_SDR_RX, 0, rate);
+        sdr->setFrequency( SOAPY_SDR_RX, 0, freq);
+        sdr->setBandwidth( SOAPY_SDR_RX, 0, rate);
+        str_list = sdr->listGains(SOAPY_SDR_RX, 0);
+        if (std::find(str_list.begin(), str_list.end(), "LNA") != str_list.end())
+            sdr->setGain(SOAPY_SDR_RX, 0, "LNA", lna_gain_db);
+        if (std::find(str_list.begin(), str_list.end(), "VGA") != str_list.end())
+            sdr->setGain(SOAPY_SDR_RX, 0, "VGA", vga_gain_db);
+        if (std::find(str_list.begin(), str_list.end(), "AMP") != str_list.end())
+            sdr->setGain(SOAPY_SDR_RX, 0, "AMP", amp_gain_db);
 
-    // 4. setup a stream matching iqsamp_t.
-    SoapySDR::Stream *rx_stream = sdr->setupStream( SOAPY_SDR_RX, SOAPY_SDR_CF32);
-    if( rx_stream == NULL)
-    {
-        fprintf( stderr, "Failed\n");
-        SoapySDR::Device::unmake( sdr );
-        return EXIT_FAILURE;
+        // 4. setup a stream matching iqsamp_t.
+        rx_stream = sdr->setupStream( SOAPY_SDR_RX, SOAPY_SDR_CF32);
+        if( rx_stream == NULL)
+        {
+            fprintf( stderr, "Failed\n");
+            SoapySDR::Device::unmake( sdr );
+            return EXIT_FAILURE;
+        }
+        sdr->activateStream( rx_stream, 0, 0, 0);
     }
-    sdr->activateStream( rx_stream, 0, 0, 0);
 
     // 5. create a re-usable buffer for rx samples
 
@@ -1640,7 +1640,18 @@ int SAFE_MAIN(int argc, char *argv[])
     bankptr = &bankA.front();
     printf("main: selecting bank A\n");
     FILE* fp = NULL;
+    FILE* input_fp = NULL;
 //    printf("%d\n",bankptr);
+#ifdef BTC_GATEWAY_FIFO
+    if(use_input_fifo){
+        printf("Reading IQ samples from %s\n", input_fifo_path.c_str());
+        input_fp = fopen(input_fifo_path.c_str(),"rb");
+        if(input_fp == NULL){
+            printf("# Failed to open the input file %s for reading.. exiting!\n", input_fifo_path.c_str());
+            return 1;
+        }
+    }
+#endif
     if(save_to_file){
         printf("Saving IQ samples to %s\n", fifo_path.c_str());
         fp = fopen(fifo_path.c_str(),"wb");
@@ -1707,7 +1718,30 @@ int SAFE_MAIN(int argc, char *argv[])
 
 
 //            printf("n: %d\n",n);
-            num_rx_samps = sdr->readStream( rx_stream, buffs, usrp_bufsize, flags, time_ns, 1e5);
+#ifdef BTC_GATEWAY_FIFO
+            if (use_input_fifo) {
+                if (input_format == "cf32") {
+                    num_rx_samps = fread(buff, sizeof(iqsamp_t), usrp_bufsize, input_fp);
+                } else {
+                    unsigned char raw_iq[usrp_bufsize * 2];
+                    const size_t raw_read = fread(raw_iq, 2, usrp_bufsize, input_fp);
+                    num_rx_samps = (unsigned long) raw_read;
+                    for (size_t idx = 0; idx < raw_read; idx++) {
+                        const int8_t i_sample = (int8_t) raw_iq[idx * 2];
+                        const int8_t q_sample = (int8_t) raw_iq[(idx * 2) + 1];
+                        buff[idx] = iqsamp_t((float) i_sample / 127.0f, (float) q_sample / 127.0f);
+                    }
+                }
+                if (num_rx_samps == 0) {
+                    if (feof(input_fp)) clearerr(input_fp);
+                    usleep(1000);
+                    continue;
+                }
+            } else
+#endif
+            {
+                num_rx_samps = sdr->readStream( rx_stream, buffs, usrp_bufsize, flags, time_ns, 1e5);
+            }
             if ((long)num_rx_samps <= 0) {
                 continue;
             }
@@ -1753,15 +1787,22 @@ int SAFE_MAIN(int argc, char *argv[])
     log_event("streaming stopped");
 
     // 7. shutdown the stream
-    sdr->deactivateStream( rx_stream, 0, 0);	//stop streaming
-    sdr->closeStream( rx_stream );
+    if (rx_stream != NULL && sdr != NULL) {
+        sdr->deactivateStream( rx_stream, 0, 0);	//stop streaming
+        sdr->closeStream( rx_stream );
+    }
 
     if(save_to_file && fp != NULL){
        fclose(fp);
     }
+    if(input_fp != NULL){
+       fclose(input_fp);
+    }
 
     // 8. cleanup device handle
-    SoapySDR::Device::unmake( sdr );
+    if (sdr != NULL) {
+        SoapySDR::Device::unmake( sdr );
+    }
     printf("Done\n");
     log_event("btsniffer run finished");
     fclose(g_log);

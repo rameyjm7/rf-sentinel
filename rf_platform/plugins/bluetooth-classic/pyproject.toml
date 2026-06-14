@@ -7,6 +7,10 @@ name = "bluetooth-classic"
 version = "0.1.0"
 description = "RF Sentinel Bluetooth Classic discovery receiver plugin"
 requires-python = ">=3.10"
+dependencies = [
+  "requests>=2.31",
+  "websocket-client>=1.6",
+]
 
 [project.scripts]
 bluetooth-classic = "bluetooth_classic.cli:main"

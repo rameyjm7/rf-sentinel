@@ -69,6 +69,7 @@ DATA_DIR = Path(__file__).resolve().parent / "data"
 RF_SENTINEL_CONTROL_PATH = DATA_DIR / "rf_sentinel_control.json"
 RF_SENTINEL_NO_CHANGE = object()
 RF_SENTINEL_PROTOCOLS = {"btc", "ble", "zigbee", "tpms", "wifi", "fm"}
+RF_SENTINEL_DEFAULT_ZIGBEE_FOLLOW_CHANNEL = 25
 RF_SENTINEL_KEEP_BAD_FCS = os.getenv("RF_SENTINEL_KEEP_BAD_FCS", "0").strip().lower() in {"1", "true", "yes", "on"}
 BLE_IDENTITY_CACHE_PATH = DATA_DIR / "ble_identities.json"
 COMPANY_IDENTIFIERS_PATH = DATA_DIR / "company_identifiers.json"
@@ -185,6 +186,7 @@ class ExplorerState:
     btc_engine_command: list[str] = field(default_factory=list)
     btc_engine_log: str = ""
     scanner_log: list[str] = field(default_factory=list)
+    scanner_assignments: dict[str, dict[str, Any]] = field(default_factory=dict)
 
 
 @dataclass
@@ -2477,7 +2479,7 @@ def _scanner_json_to_events(source: str, payload: dict[str, Any]) -> list[dict[s
     now = float(payload.get("timestamp") or payload.get("seen_at") or time.time())
     protocol = str(payload.get("protocol") or "").lower()
     kind = str(payload.get("kind") or "").lower()
-    source_protocol = str(source or "").split(":", 1)[-1].lower()
+    source_protocol = str(source or "").rsplit(":", 1)[-1].lower()
 
     if kind == "ble_adv" or protocol in {"ble", "btle"}:
         payload.setdefault("kind", "ble_adv")
@@ -3257,12 +3259,17 @@ def _read_rf_sentinel_control() -> dict[str, Any]:
 def _write_rf_sentinel_control(
     enabled_protocols: set[str] | None = None,
     *,
+    enabled_devices: set[str] | None = None,
     zigbee_follow_channel: int | None | object = RF_SENTINEL_NO_CHANGE,
 ) -> dict[str, Any]:
     DATA_DIR.mkdir(parents=True, exist_ok=True)
     payload = _read_rf_sentinel_control()
     if enabled_protocols is not None:
         payload["protocols"] = sorted(enabled_protocols & RF_SENTINEL_PROTOCOLS)
+    if enabled_devices is not None:
+        payload["devices"] = sorted(str(item).strip() for item in enabled_devices if str(item).strip())
+    elif enabled_protocols is not None:
+        payload.pop("devices", None)
     if zigbee_follow_channel is not RF_SENTINEL_NO_CHANGE:
         follow = payload.get("follow")
         if not isinstance(follow, dict):
@@ -3312,6 +3319,114 @@ def _append_scanner_log(line: str) -> None:
     print(text, flush=True)
     state.scanner_log.append(text)
     state.scanner_log = state.scanner_log[-300:]
+    assignment = _parse_scanner_assignment(text)
+    if assignment:
+        state.scanner_assignments[assignment["device_id"]] = assignment
+
+
+def _scanner_protocol_from_job_name(job_name: str) -> str:
+    parts = [part for part in str(job_name or "").split(":") if part]
+    if not parts:
+        return ""
+    protocol = parts[-1]
+    if protocol.startswith("follow"):
+        protocol = "zigbee"
+    return protocol.lower()
+
+
+def _scanner_band_from_command(command: str, protocol: str) -> str:
+    text = str(command or "")
+    if protocol == "btc":
+        match = re.search(r"--center-mhz\s+([0-9.]+)\s+--bandwidth-mhz\s+([0-9]+)", text)
+        if match:
+            return f"{match.group(1)} MHz / {match.group(2)} MHz BW"
+    if protocol == "ble":
+        if "iq-sweep" in text:
+            return "BLE adv 37/38/39"
+        match = re.search(r"--channel\s+([0-9]+)", text)
+        if match:
+            return f"BLE CH {match.group(1)}"
+    if protocol == "zigbee":
+        match = re.search(r"--channel\s+([0-9]+)", text)
+        if match:
+            return f"Zigbee CH {match.group(1)}"
+        match = re.search(r"--sample-rate-sps\s+([0-9]+)", text)
+        if match:
+            return f"Zigbee wideband {int(match.group(1)) / 1_000_000:.1f} Msps"
+        return "Zigbee wideband"
+    if protocol == "tpms":
+        if "--auto-hop-known" in text:
+            return "315 / 433.92 MHz"
+    if protocol == "fm":
+        return "87.7-107.9 MHz"
+    if protocol == "wifi":
+        match = re.search(r"--channels\s+([0-9,]+)", text)
+        if match:
+            return f"WiFi CH {match.group(1)}"
+        return "WiFi monitor"
+    return ""
+
+
+def _parse_scanner_assignment(line: str) -> dict[str, Any] | None:
+    text = str(line or "").strip()
+    auto_match = re.search(
+        r"^\[rf-sentinel\]\s+auto\s+device=(?P<device>\S+)\s+job=(?P<job>\S+)\s+dwell_s=(?P<dwell>[0-9.]+):\s+(?P<command>.+)$",
+        text,
+    )
+    if auto_match:
+        job_name = auto_match.group("job")
+        protocol = _scanner_protocol_from_job_name(job_name)
+        command = auto_match.group("command")
+        return {
+            "device_id": auto_match.group("device"),
+            "job_name": job_name,
+            "protocol": protocol,
+            "band": _scanner_band_from_command(command, protocol),
+            "command": command,
+            "dwell_s": float(auto_match.group("dwell")),
+            "seen_at": time.time(),
+            "mode": "auto",
+        }
+    cont_match = re.search(r"^\[rf-sentinel\]\s+starting\s+continuous\s+(?P<job>\S+):\s+(?P<command>.+)$", text)
+    if cont_match:
+        command = cont_match.group("command")
+        device_match = re.search(r"--device-id\s+(\S+)", command)
+        if not device_match:
+            return None
+        job_name = cont_match.group("job")
+        protocol = _scanner_protocol_from_job_name(job_name)
+        return {
+            "device_id": device_match.group(1),
+            "job_name": job_name,
+            "protocol": protocol,
+            "band": _scanner_band_from_command(command, protocol),
+            "command": command,
+            "dwell_s": 0.0,
+            "seen_at": time.time(),
+            "mode": "continuous",
+        }
+    hop_match = re.search(
+        r"^\[rf-sentinel\]\s+hop\s+group=(?P<group>\S+)\s+job=(?P<job>\S+)\s+dwell_s=(?P<dwell>[0-9.]+):\s+(?P<command>.+)$",
+        text,
+    )
+    if hop_match:
+        command = hop_match.group("command")
+        device_match = re.search(r"--device-id\s+(\S+)", command)
+        if not device_match:
+            return None
+        job_name = hop_match.group("job")
+        protocol = _scanner_protocol_from_job_name(job_name)
+        return {
+            "device_id": device_match.group(1),
+            "job_name": job_name,
+            "protocol": protocol,
+            "band": _scanner_band_from_command(command, protocol),
+            "command": command,
+            "dwell_s": float(hop_match.group("dwell")),
+            "seen_at": time.time(),
+            "mode": "hop",
+        }
+    return None
 
 
 def _clean_device_id(value: Any) -> str:
@@ -3345,7 +3460,7 @@ def _rf_sentinel_loop(proc: subprocess.Popen[str]) -> None:
                     payload = json.loads(body)
                 except json.JSONDecodeError:
                     payload = None
-            source_protocol = str(source or "").split(":", 1)[-1].lower()
+            source_protocol = str(source or "").rsplit(":", 1)[-1].lower()
             payload_protocol = str((payload or {}).get("protocol") or "").lower()
             payload_kind = str((payload or {}).get("kind") or "").lower()
             noisy_packet_line = payload is not None and (
@@ -3386,6 +3501,7 @@ def _start_rf_sentinel_engine(
     hop_lna_gain_db: int,
     hop_vga_gain_db: int,
     enabled_protocols: set[str] | None = None,
+    enabled_devices: set[str] | None = None,
     sweep_both_radios: bool = False,
 ) -> dict[str, Any]:
     global rf_sentinel_process, rf_sentinel_thread
@@ -3424,6 +3540,9 @@ def _start_rf_sentinel_engine(
             ]
         )
     protocols = enabled_protocols or set(RF_SENTINEL_PROTOCOLS)
+    devices = enabled_devices or set()
+    for device_id in sorted(devices):
+        cmd.extend(["--allowed-device-id", device_id])
     if "btc" not in protocols:
         cmd.append("--no-btc")
     if "ble" not in protocols:
@@ -3436,7 +3555,16 @@ def _start_rf_sentinel_engine(
         cmd.append("--no-wifi")
     if "fm" not in protocols:
         cmd.append("--no-fm")
-    control = _write_rf_sentinel_control(protocols, zigbee_follow_channel=None)
+    existing_control = _read_rf_sentinel_control()
+    existing_follow = existing_control.get("follow") if isinstance(existing_control.get("follow"), dict) else {}
+    zigbee_follow_channel = RF_SENTINEL_NO_CHANGE
+    if "zigbee" in protocols and not isinstance(existing_follow.get("zigbee"), dict):
+        zigbee_follow_channel = RF_SENTINEL_DEFAULT_ZIGBEE_FOLLOW_CHANNEL
+    control = _write_rf_sentinel_control(
+        protocols,
+        enabled_devices=devices,
+        zigbee_follow_channel=zigbee_follow_channel,
+    )
     cmd.extend(["--control-file", str(RF_SENTINEL_CONTROL_PATH)])
     env = os.environ.copy()
     env["PYTHONUNBUFFERED"] = "1"
@@ -3480,7 +3608,11 @@ def update_scan_protocols():
         return _json_error(400, "update_scan_protocols", error="protocols must be a list")
     enabled_protocols = {str(item).strip().lower() for item in requested_protocols}
     enabled_protocols &= RF_SENTINEL_PROTOCOLS
-    _write_rf_sentinel_control(enabled_protocols)
+    requested_devices = payload.get("devices")
+    enabled_devices = None
+    if isinstance(requested_devices, list):
+        enabled_devices = {str(item).strip() for item in requested_devices if str(item).strip()}
+    _write_rf_sentinel_control(enabled_protocols, enabled_devices=enabled_devices)
     with state_lock:
         state.decoder_stats["enabled_protocols"] = sorted(enabled_protocols)
         _append_scanner_log(f"[ui] enabled protocols updated: {', '.join(sorted(enabled_protocols)) or 'none'}")
@@ -3639,6 +3771,8 @@ def _stop_scan(stop_gateway: bool = True) -> None:
         state.btc_engine_log = ""
         state.worker_errors = {}
         state.gateway_start_response = None
+        state.decoder_stats["follow"] = {}
+        state.scanner_assignments = {}
         state.test_target = None
         state.test_target_error = ""
 
@@ -3730,7 +3864,9 @@ def start_scan():
         return _json_error(400, "start_scan", error="invalid JSON payload", detail=str(exc))
     device_id = _clean_device_id(payload.get("device_id", ""))
     btc_device_id = _clean_device_id(payload.get("btc_device_id", ""))
-    btle_device_id = _clean_device_id(payload.get("btle_device_id", "") or payload.get("hop_device_id", ""))
+    raw_btle_device_id = payload.get("btle_device_id", "") or payload.get("hop_device_id", "")
+    btle_device_id = _clean_device_id(raw_btle_device_id)
+    explicit_btle_device = bool(_clean_device_id(raw_btle_device_id))
     mode = str(payload.get("mode", "classic")).strip().lower()
     channel = int(payload.get("channel", 37 if mode != "classic" else 0))
     btc_center_mhz = float(payload.get("btc_center_mhz", 2442.0))
@@ -3750,7 +3886,13 @@ def start_scan():
     else:
         enabled_protocols = set(RF_SENTINEL_PROTOCOLS)
     enabled_protocols &= RF_SENTINEL_PROTOCOLS
+    requested_devices = payload.get("devices")
+    if isinstance(requested_devices, list):
+        enabled_devices = {str(item).strip() for item in requested_devices if str(item).strip()}
+    else:
+        enabled_devices = {str(item.get("id") or "").strip() for item in _available_devices() if str(item.get("id") or "").strip()}
     sweep_both_radios = bool(payload.get("sweep_both_radios", mode == "sentinel"))
+    single_radio_bluetooth_requested = bool(payload.get("single_radio_bluetooth") or payload.get("bluetooth_single_radio"))
 
     if mode not in {"ble", "classic", "both", "sentinel"}:
         return _json_error(400, "start_scan", error="mode must be ble, classic, both, or sentinel")
@@ -3769,6 +3911,8 @@ def start_scan():
         btc_device_id = _pick_device(devices_available, "bladerf")
     if mode in {"ble", "both", "sentinel"} and not btle_device_id:
         btle_device_id = _pick_device(devices_available, "hackrf", device_id or "sidekiq")
+    if mode == "both" and btc_engine == "python" and btc_device_id and (single_radio_bluetooth_requested or not explicit_btle_device):
+        btle_device_id = btc_device_id
     if mode == "classic" and not btc_device_id:
         return _json_error(400, "start_scan", error="btc_device_id is required")
     if mode == "ble" and not btle_device_id:
@@ -3786,6 +3930,7 @@ def start_scan():
     btc_center_freq_hz = int(round(btc_center_mhz * 1_000_000.0))
     btc_bank_start_channel = _btc_bank_start_from_center(btc_center_freq_hz, btc_bandwidth_mhz)
     center_freq_hz = btc_center_freq_hz if mode in {"classic", "both"} else _channel_freq(mode, channel)
+    single_radio_bluetooth = mode == "both" and btc_engine == "python" and bool(btc_device_id) and btc_device_id == btle_device_id
     if state.running:
         _stop_scan()
     if btc_device_id:
@@ -3815,6 +3960,7 @@ def start_scan():
                 hop_lna_gain_db=btle_lna_gain_db,
                 hop_vga_gain_db=btle_vga_gain_db,
                 enabled_protocols=enabled_protocols,
+                enabled_devices=enabled_devices,
                 sweep_both_radios=sweep_both_radios,
             )
         except RuntimeError as exc:
@@ -3830,6 +3976,7 @@ def start_scan():
             state.stream_ids = {}
             state.device_id = btc_device_id
             state.device_ids = {"classic": btc_device_id, "hop": btle_device_id, "radio_a": btc_device_id, "radio_b": btle_device_id}
+            state.scanner_assignments = {}
             state.center_freq_hz = btc_center_freq_hz
             state.sample_rate_sps = btc_bandwidth_mhz * 1_000_000
             state.lna_gain_db = btc_lna_gain_db
@@ -3865,7 +4012,26 @@ def start_scan():
 
     try:
         started: dict[str, dict[str, Any]] = {}
-        if mode in {"classic", "both"}:
+        if single_radio_bluetooth:
+            body, actual_rate, actual_lna, actual_vga = _start_gateway_stream(
+                btc_device_id,
+                center_freq_hz,
+                sample_rate_sps,
+                btc_lna_gain_db,
+                btc_vga_gain_db,
+            )
+            started["both"] = {
+                "engine": "python-combined",
+                "body": body,
+                "stream_id": body["stream_id"],
+                "device_id": btc_device_id,
+                "center_freq_hz": center_freq_hz,
+                "sample_rate_sps": actual_rate,
+                "lna_gain_db": actual_lna,
+                "vga_gain_db": actual_vga,
+                "channel": btc_bank_start_channel,
+            }
+        elif mode in {"classic", "both"}:
             if btc_engine == "btcsniffer":
                 started["classic"] = _start_btcsniffer_engine(
                     btc_device_id,
@@ -3892,7 +4058,7 @@ def start_scan():
                     "vga_gain_db": actual_vga,
                     "channel": btc_bank_start_channel,
                 }
-        if mode in {"ble", "both"}:
+        if mode in {"ble", "both"} and not single_radio_bluetooth:
             ble_channel = int(payload.get("ble_channel", 37))
             ble_center = BLE_ADV_CHANNELS.get(ble_channel, BLE_ADV_CHANNELS[37])
             body, actual_rate, actual_lna, actual_vga = _start_gateway_stream(
@@ -3927,19 +4093,40 @@ def start_scan():
             _reset_stats()
         state.running = True
         state.mode = mode
-        primary = started.get("classic") or started.get("ble")
+        primary = started.get("classic") or started.get("ble") or started.get("both")
         state.stream_id = primary["stream_id"] if primary else None
-        state.stream_ids = {key: value["stream_id"] for key, value in started.items()}
+        if "both" in started:
+            state.stream_ids = {
+                "both": started["both"]["stream_id"],
+                "classic": started["both"]["stream_id"],
+                "ble": started["both"]["stream_id"],
+            }
+        else:
+            state.stream_ids = {key: value["stream_id"] for key, value in started.items()}
         state.device_id = primary["device_id"] if primary else None
-        state.device_ids = {key: value["device_id"] for key, value in started.items()}
+        if "both" in started:
+            state.device_ids = {
+                "both": started["both"]["device_id"],
+                "classic": started["both"]["device_id"],
+                "ble": started["both"]["device_id"],
+            }
+        else:
+            state.device_ids = {key: value["device_id"] for key, value in started.items()}
         state.center_freq_hz = int(primary["center_freq_hz"]) if primary else center_freq_hz
         state.sample_rate_sps = int(primary["sample_rate_sps"]) if primary else sample_rate_sps
         state.lna_gain_db = int(primary["lna_gain_db"]) if primary else lna_gain_db
         state.vga_gain_db = int(primary["vga_gain_db"]) if primary else vga_gain_db
         state.channel = btc_bank_start_channel if mode in {"classic", "both"} else channel
-        state.channels_by_mode = {key: int(value["channel"]) for key, value in started.items()}
+        if "both" in started:
+            state.channels_by_mode = {
+                "both": btc_bank_start_channel,
+                "classic": btc_bank_start_channel,
+                "ble": 0,
+            }
+        else:
+            state.channels_by_mode = {key: int(value["channel"]) for key, value in started.items()}
         state.gateway_start_response = {key: value["body"] for key, value in started.items()}
-        state.btc_engine = str(started.get("classic", {}).get("engine", "")) if "classic" in started else ""
+        state.btc_engine = str((started.get("classic") or started.get("both") or {}).get("engine", "")) if mode in {"classic", "both"} else ""
         state.btc_engine_command = list(started.get("classic", {}).get("body", {}).get("command", []))
         state.btc_engine_log = str(started.get("classic", {}).get("body", {}).get("log", ""))
         state.worker_error = ""
@@ -3957,7 +4144,7 @@ def start_scan():
             continue
         stop = threading.Event()
         worker_stops[protocol] = stop
-        worker_mode = "classic" if protocol == "classic" else "ble"
+        worker_mode = "both" if protocol == "both" else ("classic" if protocol == "classic" else "ble")
         thread = threading.Thread(
             target=_worker_loop,
             args=(
@@ -4000,6 +4187,7 @@ def stop_scan():
 
 @app.get("/api/status")
 def status():
+    devices = _available_devices()
     with state_lock:
         return jsonify(
             {
@@ -4041,6 +4229,9 @@ def status():
                 "btc_engine_command": state.btc_engine_command,
                 "btc_engine_log": state.btc_engine_log,
                 "scanner_log": state.scanner_log[-160:],
+                "scanner_assignments": state.scanner_assignments,
+                "fm_playback": {"running": False},
+                "available_devices": devices,
                 "channel_activity": [
                     state.channel_activity.get(idx, {"channel": idx, "hits": 0, "rssi_dbfs": -120.0})
                     for idx in range(79)
