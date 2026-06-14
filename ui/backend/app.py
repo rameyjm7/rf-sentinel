@@ -2,6 +2,7 @@ import os
 import json
 import logging
 import platform
+import queue
 import re
 import shutil
 import signal
@@ -17,9 +18,9 @@ from typing import Any
 import numpy as np
 import requests
 import websocket
-from flask import Flask, jsonify, request, send_from_directory
+from flask import Flask, Response, jsonify, request, send_from_directory
 from werkzeug.exceptions import BadRequest
-from websocket import WebSocketConnectionClosedException
+from websocket._exceptions import WebSocketConnectionClosedException
 
 
 BLE_ADV_CHANNELS = {
@@ -71,7 +72,6 @@ RF_SENTINEL_CONTROL_PATH = RF_SENTINEL_LOG_DIR / "rf_sentinel_control.json"
 RF_SENTINEL_UI_CONFIG_PATH = RF_SENTINEL_LOG_DIR / "rf_sentinel_ui_config.json"
 RF_SENTINEL_NO_CHANGE = object()
 RF_SENTINEL_PROTOCOLS = {"btc", "ble", "zigbee", "tpms", "wifi", "fm"}
-RF_SENTINEL_DEFAULT_ZIGBEE_FOLLOW_CHANNEL = 25
 RF_SENTINEL_KEEP_BAD_FCS = os.getenv("RF_SENTINEL_KEEP_BAD_FCS", "0").strip().lower() in {"1", "true", "yes", "on"}
 BLE_IDENTITY_CACHE_PATH = DATA_DIR / "ble_identities.json"
 COMPANY_IDENTIFIERS_PATH = DATA_DIR / "company_identifiers.json"
@@ -105,6 +105,107 @@ def _design_lowpass_taps(sample_rate_hz: int, cutoff_hz: float, num_taps: int) -
         return np.array([1.0], dtype=np.float32)
     kernel /= kernel_sum
     return kernel.astype(np.float32)
+
+
+class FmAudioDemod:
+    def __init__(self, in_rate: int, out_rate: int = 48_000) -> None:
+        self.in_rate = int(in_rate)
+        self.out_rate = int(out_rate)
+        self.decim = max(1, int(round(self.in_rate / 240_000.0)))
+        self.demod_rate = self.in_rate / float(self.decim)
+        self.prev = np.complex64(1.0 + 0j)
+        self.channel_filter = self._design_lowpass(257, 125_000.0, float(self.in_rate))
+        self._channel_tail = np.zeros(max(0, self.channel_filter.size - 1), dtype=np.complex64)
+        self.mono_filter = self._design_lowpass(129, 15_000.0, float(self.demod_rate))
+        self._mono_tail = np.zeros(max(0, self.mono_filter.size - 1), dtype=np.float32)
+        self._audio_scale = 1.0
+        self.resample_pos = 0.0
+        self._leftover = b""
+
+    def process_iq_i8(self, raw: bytes) -> bytes:
+        if not raw:
+            return b""
+        if self._leftover:
+            raw = self._leftover + raw
+            self._leftover = b""
+        if len(raw) % 2 != 0:
+            self._leftover = raw[-1:]
+            raw = raw[:-1]
+        if len(raw) < 4:
+            return b""
+        iq = np.frombuffer(raw, dtype=np.int8).astype(np.float32)
+        z = (iq[0::2] / 128.0 + 1j * (iq[1::2] / 128.0)).astype(np.complex64)
+        if z.size < 8:
+            return b""
+        z = self._channel_filter_and_decimate(z)
+        if z.size < 8:
+            return b""
+        prev = np.empty_like(z)
+        prev[0] = self.prev
+        prev[1:] = z[:-1]
+        self.prev = z[-1]
+        demod = np.angle(z * np.conj(prev)).astype(np.float32)
+        if demod.size < 8:
+            return b""
+        demod -= float(np.mean(demod))
+        # Match AetherCast's forgiving mono fallback: it is much harder to upset
+        # on marginal RF than the stricter audio low-pass path.
+        kernel = np.array([0.2, 0.2, 0.2, 0.2, 0.2], dtype=np.float32)
+        mono = np.convolve(demod, kernel, mode="same").astype(np.float32)
+        if mono.size < 4:
+            return b""
+        step = self.demod_rate / float(self.out_rate)
+        positions = np.arange(self.resample_pos, mono.size - 1, step, dtype=np.float64)
+        if positions.size == 0:
+            self.resample_pos = float(self.resample_pos + mono.size)
+            return b""
+        next_pos = float(positions[-1] + step - (mono.size - 1))
+        idx = np.floor(positions).astype(np.int32)
+        valid = idx + 1 < mono.size
+        idx = idx[valid]
+        positions = positions[valid]
+        if positions.size == 0:
+            self.resample_pos = max(0.0, next_pos)
+            return b""
+        frac = positions - idx
+        audio = mono[idx] * (1.0 - frac) + mono[idx + 1] * frac
+        self.resample_pos = max(0.0, next_pos)
+        peak = float(np.max(np.abs(audio))) if audio.size else 1.0
+        target_scale = 0.85 / max(peak, 0.2)
+        self._audio_scale = (self._audio_scale * 0.9) + (target_scale * 0.1)
+        audio = np.clip(audio * self._audio_scale, -1.0, 1.0)
+        mono_i16 = (audio * 32767.0).astype(np.int16)
+        return mono_i16.tobytes()
+
+    @staticmethod
+    def _design_lowpass(num_taps: int, cutoff_hz: float, sample_rate_hz: float) -> np.ndarray:
+        cutoff = min(float(cutoff_hz), (float(sample_rate_hz) / 2.0) * 0.92)
+        n = np.arange(int(num_taps), dtype=np.float32) - ((int(num_taps) - 1) / 2.0)
+        taps = 2.0 * cutoff / float(sample_rate_hz) * np.sinc(2.0 * cutoff / float(sample_rate_hz) * n)
+        taps *= np.hamming(int(num_taps)).astype(np.float32)
+        taps /= max(1e-12, float(np.sum(taps)))
+        return taps.astype(np.float32)
+
+    def _filter_float(self, x: np.ndarray, taps: np.ndarray, tail_name: str) -> np.ndarray:
+        tail = getattr(self, tail_name)
+        x = x.astype(np.float32, copy=False)
+        x_ext = np.concatenate((tail, x))
+        filtered = np.convolve(x_ext, taps, mode="valid").astype(np.float32)
+        setattr(self, tail_name, x_ext[-tail.size :].astype(np.float32) if tail.size else tail)
+        return filtered
+
+    def _channel_filter_and_decimate(self, z: np.ndarray) -> np.ndarray:
+        z_ext = np.concatenate((self._channel_tail, z))
+        filtered = np.convolve(z_ext, self.channel_filter, mode="valid").astype(np.complex64)
+        if self._channel_tail.size:
+            self._channel_tail = z_ext[-self._channel_tail.size :].astype(np.complex64)
+        decim = int(self.decim)
+        if decim <= 1:
+            return filtered
+        usable = (filtered.size // decim) * decim
+        if usable <= 0:
+            return np.empty(0, dtype=np.complex64)
+        return filtered[:usable].reshape(-1, decim).mean(axis=1).astype(np.complex64)
 
 
 def _gateway_base() -> str:
@@ -189,6 +290,27 @@ class ExplorerState:
     btc_engine_log: str = ""
     scanner_log: list[str] = field(default_factory=list)
     scanner_assignments: dict[str, dict[str, Any]] = field(default_factory=dict)
+
+
+@dataclass
+class FmPlaybackState:
+    running: bool = False
+    pending: bool = False
+    pending_freq_mhz: float = 0.0
+    pending_device_id: str = ""
+    device_id: str = ""
+    freq_mhz: float = 0.0
+    sample_rate_sps: int = 2_000_000
+    lna_gain_db: int = 32
+    vga_gain_db: int = 32
+    stream_id: str = ""
+    worker_alive: bool = False
+    worker_error: str = ""
+    last_audio_rms: float = 0.0
+    produced_chunks: int = 0
+    served_chunks: int = 0
+    empty_audio_polls: int = 0
+    scanner_protocol_paused: bool = False
 
 
 @dataclass
@@ -1369,12 +1491,18 @@ class CombinedBluetoothDetector:
 app = Flask(__name__, static_folder=str(PROJECT_ROOT / "ui" / "frontend"), static_url_path="")
 app.logger.setLevel(logging.INFO)
 state = ExplorerState()
+fm_playback = FmPlaybackState()
 state_lock = threading.Lock()
 identity_cache_lock = threading.Lock()
 worker_stop = threading.Event()
 worker_thread: threading.Thread | None = None
 worker_stops: dict[str, threading.Event] = {}
 worker_threads: dict[str, threading.Thread] = {}
+fm_worker_stop = threading.Event()
+fm_worker_thread: threading.Thread | None = None
+fm_audio_q: queue.Queue[bytes] = queue.Queue(maxsize=96)
+fm_pending_thread: threading.Thread | None = None
+fm_request_serial = 0
 inquiry_process: subprocess.Popen[str] | None = None
 btc_engine_process: subprocess.Popen[str] | None = None
 btc_engine_thread: threading.Thread | None = None
@@ -2463,6 +2591,370 @@ def _stop_duplicate_gateway_streams(device_id: str | None, keep_stream_id: str |
         cfg = stream.get("config", {}) or {}
         if stream_id and stream_id != keep_stream_id and str(cfg.get("device_id", "")).strip() == device_id:
             _stop_gateway_stream(stream_id)
+
+
+def _gateway_get_json(path: str) -> Any:
+    resp = requests.get(f"{_gateway_base()}{path}", headers=_gateway_headers(), timeout=2)
+    if resp.status_code >= 400:
+        return None
+    try:
+        return resp.json()
+    except ValueError:
+        return None
+
+
+def _gateway_stop_path(path: str) -> None:
+    try:
+        requests.post(f"{_gateway_base()}{path}", headers=_gateway_headers(), timeout=3)
+    except requests.RequestException:
+        pass
+
+
+def _force_release_gateway_device(device_id: str) -> None:
+    requested = str(device_id or "").strip()
+    if not requested:
+        return
+    stopped = 0
+    devices = _gateway_get_json("/devices")
+    if isinstance(devices, list):
+        for device in devices:
+            if str(device.get("id") or "").strip() != requested:
+                continue
+            owner = str(device.get("occupied_by") or "").strip()
+            owner_id = str(device.get("occupied_id") or "").strip()
+            if owner == "stream" and owner_id:
+                _gateway_stop_path(f"/streams/{owner_id}/stop")
+                stopped += 1
+            elif owner == "sweep" and owner_id:
+                _gateway_stop_path(f"/sweeps/{owner_id}/stop")
+                stopped += 1
+            elif owner == "iq_sweep" and owner_id:
+                _gateway_stop_path(f"/iq-sweeps/{owner_id}/stop")
+                stopped += 1
+            elif owner == "tx" and owner_id:
+                _gateway_stop_path(f"/tx/{owner_id}/stop")
+                stopped += 1
+    for path, id_key, stop_prefix in (
+        ("/streams", "stream_id", "/streams"),
+        ("/sweeps", "sweep_id", "/sweeps"),
+        ("/iq-sweeps", "iq_sweep_id", "/iq-sweeps"),
+        ("/tx", "tx_id", "/tx"),
+    ):
+        sessions = _gateway_get_json(path)
+        if not isinstance(sessions, list):
+            continue
+        for session in sessions:
+            cfg = session.get("config") if isinstance(session.get("config"), dict) else {}
+            if str(cfg.get("device_id") or "").strip() != requested:
+                continue
+            session_id = str(session.get(id_key) or "").strip()
+            if session_id:
+                _gateway_stop_path(f"{stop_prefix}/{session_id}/stop")
+                stopped += 1
+    if stopped:
+        with state_lock:
+            _append_scanner_log(f"[ui] force-released {requested} gateway sessions for FM playback")
+
+
+def _drain_fm_audio_queue() -> None:
+    while not fm_audio_q.empty():
+        try:
+            fm_audio_q.get_nowait()
+        except queue.Empty:
+            break
+
+
+def _fm_playback_status_payload() -> dict[str, Any]:
+    return {
+        "running": fm_playback.running,
+        "pending": fm_playback.pending,
+        "pending_freq_mhz": fm_playback.pending_freq_mhz,
+        "pending_device_id": fm_playback.pending_device_id,
+        "device_id": fm_playback.device_id,
+        "freq_mhz": fm_playback.freq_mhz,
+        "sample_rate_sps": fm_playback.sample_rate_sps,
+        "lna_gain_db": fm_playback.lna_gain_db,
+        "vga_gain_db": fm_playback.vga_gain_db,
+        "stream_id": fm_playback.stream_id,
+        "worker_alive": fm_playback.worker_alive,
+        "worker_error": fm_playback.worker_error,
+        "last_audio_rms": fm_playback.last_audio_rms,
+        "produced_chunks": fm_playback.produced_chunks,
+        "served_chunks": fm_playback.served_chunks,
+        "queued_chunks": fm_audio_q.qsize(),
+    }
+
+
+def _fm_busy_error(exc: Exception) -> bool:
+    text = str(exc or "").lower()
+    return "resource busy" in text or "already in use" in text or "409" in text
+
+
+def _runtime_enabled_protocols() -> set[str]:
+    protocols = state.decoder_stats.get("enabled_protocols")
+    if isinstance(protocols, list):
+        live = {str(item).strip().lower() for item in protocols} & RF_SENTINEL_PROTOCOLS
+        if live:
+            return live
+    control = _read_rf_sentinel_control()
+    control_protocols = control.get("protocols")
+    if isinstance(control_protocols, list):
+        live = {str(item).strip().lower() for item in control_protocols} & RF_SENTINEL_PROTOCOLS
+        if live:
+            return live
+    return set(_read_ui_config().get("protocols", [])) & RF_SENTINEL_PROTOCOLS
+
+
+def _current_fm_scanner_device_id() -> str:
+    assignments = dict(state.scanner_assignments or {})
+    for assignment in assignments.values():
+        if str(assignment.get("protocol") or "").lower() == "fm":
+            device_id = str(assignment.get("device_id") or "").strip()
+            if device_id:
+                return device_id
+    hop_device = str(state.device_ids.get("hop") or state.device_ids.get("radio_b") or "").strip()
+    if hop_device:
+        return hop_device
+    return ""
+
+
+def _pause_fm_scanner_for_playback() -> None:
+    protocols = _runtime_enabled_protocols()
+    if "fm" not in protocols:
+        return
+    protocols.discard("fm")
+    existing = _read_rf_sentinel_control()
+    devices = existing.get("devices") if isinstance(existing.get("devices"), list) else None
+    enabled_devices = {str(item).strip() for item in devices if str(item).strip()} if devices is not None else None
+    control = _write_rf_sentinel_control(
+        protocols,
+        enabled_devices=enabled_devices,
+        zigbee_follow_channel=RF_SENTINEL_NO_CHANGE,
+    )
+    with state_lock:
+        state.decoder_stats["enabled_protocols"] = sorted(protocols)
+        state.decoder_stats["follow"] = _follow_state_for_protocols(control, protocols)
+        fm_playback.scanner_protocol_paused = True
+        _append_scanner_log("[ui] FM scanner paused for playback lock")
+
+
+def _restore_fm_scanner_after_playback() -> None:
+    if not fm_playback.scanner_protocol_paused:
+        return
+    fm_playback.scanner_protocol_paused = False
+    protocols = _runtime_enabled_protocols()
+    saved_protocols = set(_read_ui_config().get("protocols", [])) & RF_SENTINEL_PROTOCOLS
+    if "fm" not in saved_protocols:
+        return
+    protocols.add("fm")
+    existing = _read_rf_sentinel_control()
+    devices = existing.get("devices") if isinstance(existing.get("devices"), list) else None
+    enabled_devices = {str(item).strip() for item in devices if str(item).strip()} if devices is not None else None
+    control = _write_rf_sentinel_control(
+        protocols,
+        enabled_devices=enabled_devices,
+        zigbee_follow_channel=RF_SENTINEL_NO_CHANGE,
+    )
+    with state_lock:
+        state.decoder_stats["enabled_protocols"] = sorted(protocols)
+        state.decoder_stats["follow"] = _follow_state_for_protocols(control, protocols)
+        _append_scanner_log("[ui] FM scanner restored after playback")
+
+
+def _device_available(device_id: str) -> bool:
+    requested = str(device_id or "").strip()
+    if not requested:
+        return False
+    for device in _available_devices():
+        if str(device.get("id") or "").strip() == requested:
+            return not bool(device.get("occupied"))
+    return False
+
+
+def _wait_for_device_available(device_id: str, timeout_s: float = 5.0) -> bool:
+    deadline = time.time() + max(0.1, float(timeout_s))
+    while time.time() < deadline:
+        if _device_available(device_id):
+            return True
+        time.sleep(0.15)
+    return _device_available(device_id)
+
+
+def _preferred_fm_playback_device(requested_device_id: str = "") -> str:
+    devices = _available_devices()
+    requested = str(requested_device_id or "").strip()
+    if requested:
+        for device in devices:
+            if str(device.get("id") or "").strip() == requested and not bool(device.get("occupied")):
+                return requested
+        raise RuntimeError(f"resource busy: SDR {requested} is not free for FM playback")
+    for preferred in ("hackrf", "sidekiq", "bladerf"):
+        for device in devices:
+            dev_id = str(device.get("id") or "").strip()
+            haystack = f"{dev_id} {str(device.get('label') or '')}".lower()
+            if preferred in haystack and not bool(device.get("occupied")):
+                return dev_id
+    for device in devices:
+        dev_id = str(device.get("id") or "").strip()
+        if dev_id and not bool(device.get("occupied")):
+            return dev_id
+    raise RuntimeError("No free SDR is available for FM playback")
+
+
+def _start_fm_playback_now(freq_mhz: float, requested_device_id: str = "") -> None:
+    global fm_worker_thread
+    requested = str(requested_device_id or "").strip() or _current_fm_scanner_device_id()
+    if requested and not _device_available(requested):
+        _pause_fm_scanner_for_playback()
+        _force_release_gateway_device(requested)
+        _wait_for_device_available(requested, timeout_s=2.0)
+    picked_device_id = _preferred_fm_playback_device(requested)
+    _stop_duplicate_gateway_streams(picked_device_id)
+    body, actual_rate, actual_lna, actual_vga = _start_gateway_stream(
+        picked_device_id,
+        int(round(float(freq_mhz) * 1_000_000.0)),
+        2_000_000,
+        32,
+        32,
+    )
+    fm_worker_stop.clear()
+    _drain_fm_audio_queue()
+    fm_playback.running = True
+    fm_playback.pending = False
+    fm_playback.pending_freq_mhz = 0.0
+    fm_playback.pending_device_id = ""
+    fm_playback.device_id = picked_device_id
+    fm_playback.freq_mhz = float(freq_mhz)
+    fm_playback.sample_rate_sps = actual_rate
+    fm_playback.lna_gain_db = actual_lna
+    fm_playback.vga_gain_db = actual_vga
+    fm_playback.stream_id = str(body.get("stream_id") or "")
+    fm_playback.worker_error = ""
+    fm_playback.last_audio_rms = 0.0
+    fm_playback.produced_chunks = 0
+    fm_playback.served_chunks = 0
+    fm_playback.empty_audio_polls = 0
+    fm_worker_thread = threading.Thread(target=_fm_worker_loop, args=(fm_playback.stream_id, actual_rate), daemon=True)
+    fm_worker_thread.start()
+
+
+def _stop_fm_playback() -> None:
+    global fm_worker_thread, fm_request_serial
+    fm_request_serial += 1
+    fm_worker_stop.set()
+    if fm_worker_thread and fm_worker_thread.is_alive():
+        fm_worker_thread.join(timeout=2.0)
+    fm_worker_thread = None
+    if fm_playback.stream_id:
+        _stop_gateway_stream(fm_playback.stream_id)
+    _drain_fm_audio_queue()
+    fm_playback.running = False
+    fm_playback.pending = False
+    fm_playback.pending_freq_mhz = 0.0
+    fm_playback.pending_device_id = ""
+    fm_playback.device_id = ""
+    fm_playback.freq_mhz = 0.0
+    fm_playback.stream_id = ""
+    fm_playback.worker_alive = False
+    fm_playback.worker_error = ""
+    fm_playback.last_audio_rms = 0.0
+    fm_playback.produced_chunks = 0
+    fm_playback.served_chunks = 0
+    fm_playback.empty_audio_polls = 0
+
+
+def _fm_worker_loop(stream_id: str, sample_rate_sps: int) -> None:
+    demod = FmAudioDemod(sample_rate_sps)
+    pcm_accum = bytearray()
+    target_chunk_bytes = 16384
+    headers = []
+    token = _gateway_token()
+    if token:
+        headers.append(f"Authorization: Bearer {token}")
+        headers.append(f"x-api-key: {token}")
+    fm_playback.worker_alive = True
+    fm_playback.worker_error = ""
+    try:
+        while not fm_worker_stop.is_set() and fm_playback.stream_id == stream_id:
+            ws = websocket.WebSocket()
+            try:
+                ws.connect(_ws_url_for_stream(stream_id), timeout=8, header=headers)
+                ws.settimeout(1.0)
+                while not fm_worker_stop.is_set() and fm_playback.stream_id == stream_id:
+                    try:
+                        chunk = ws.recv()
+                    except websocket.WebSocketTimeoutException:
+                        continue
+                    except WebSocketConnectionClosedException:
+                        fm_playback.worker_error = "FM websocket closed"
+                        break
+                    if not isinstance(chunk, (bytes, bytearray)):
+                        continue
+                    pcm = demod.process_iq_i8(bytes(chunk))
+                    if not pcm:
+                        continue
+                    pcm_accum.extend(pcm)
+                    if len(pcm_accum) < target_chunk_bytes:
+                        continue
+                    out = bytes(pcm_accum)
+                    pcm_accum.clear()
+                    audio_i16 = np.frombuffer(out, dtype=np.int16)
+                    if audio_i16.size:
+                        fm_playback.last_audio_rms = float(np.sqrt(np.mean((audio_i16.astype(np.float32) / 32768.0) ** 2)))
+                    fm_playback.produced_chunks += 1
+                    try:
+                        fm_audio_q.put(out, timeout=0.1)
+                    except queue.Full:
+                        try:
+                            fm_audio_q.get_nowait()
+                        except queue.Empty:
+                            pass
+                        try:
+                            fm_audio_q.put_nowait(out)
+                        except queue.Full:
+                            pass
+            except Exception as exc:
+                fm_playback.worker_error = f"FM websocket error: {exc}"
+            finally:
+                try:
+                    ws.close()
+                except Exception:
+                    pass
+            if not fm_worker_stop.is_set() and fm_playback.stream_id == stream_id:
+                fm_worker_stop.wait(0.5)
+    finally:
+        if fm_playback.stream_id == stream_id:
+            fm_playback.worker_alive = False
+
+
+def _fm_pending_loop(request_serial: int, freq_mhz: float, requested_device_id: str) -> None:
+    while request_serial == fm_request_serial and not fm_worker_stop.is_set():
+        try:
+            _start_fm_playback_now(freq_mhz, requested_device_id)
+            return
+        except Exception as exc:
+            if not _fm_busy_error(exc):
+                if request_serial == fm_request_serial:
+                    fm_playback.pending = False
+                    fm_playback.worker_error = f"FM start failed: {exc}"
+                    _restore_fm_scanner_after_playback()
+                return
+            if request_serial == fm_request_serial:
+                fm_playback.pending = True
+                fm_playback.pending_freq_mhz = float(freq_mhz)
+                fm_playback.pending_device_id = str(requested_device_id or "")
+                fm_playback.worker_error = "FM waiting for SDR availability"
+            time.sleep(0.5)
+
+
+def _start_fm_pending_thread(request_serial: int, freq_mhz: float, device_id: str) -> None:
+    global fm_pending_thread
+    fm_pending_thread = threading.Thread(
+        target=_fm_pending_loop,
+        args=(request_serial, float(freq_mhz), device_id),
+        daemon=True,
+    )
+    fm_pending_thread.start()
 
 
 def _printable_hex_text(hex_text: Any) -> str:
@@ -3673,13 +4165,8 @@ def _start_rf_sentinel_engine(
         cmd.append("--no-wifi")
     if "fm" not in protocols:
         cmd.append("--no-fm")
-    existing_control = _read_rf_sentinel_control()
-    existing_follow = existing_control.get("follow") if isinstance(existing_control.get("follow"), dict) else {}
-    zigbee_follow_channel = RF_SENTINEL_NO_CHANGE
-    if "zigbee" not in protocols:
-        zigbee_follow_channel = None
-    elif not isinstance(existing_follow.get("zigbee"), dict):
-        zigbee_follow_channel = RF_SENTINEL_DEFAULT_ZIGBEE_FOLLOW_CHANNEL
+    # Start in discovery mode; only the explicit right-click Follow action locks Zigbee.
+    zigbee_follow_channel = None
     control = _write_rf_sentinel_control(
         protocols,
         enabled_devices=devices,
@@ -3784,6 +4271,68 @@ def update_scan_follow():
     return jsonify({"ok": True, "follow": follow_state})
 
 
+@app.post("/api/fm/play")
+def fm_play():
+    global fm_pending_thread, fm_request_serial
+    payload = request.get_json(silent=True) or {}
+    freq_mhz = float(payload.get("freq_mhz", 0.0) or 0.0)
+    device_id = str(payload.get("device_id") or "").strip() or _current_fm_scanner_device_id()
+    if not 87.5 <= freq_mhz <= 108.0:
+        return _json_error(400, "fm_play", error="freq_mhz must be between 87.5 and 108.0")
+    try:
+        if fm_playback.running:
+            _stop_fm_playback()
+        fm_request_serial += 1
+        request_serial = fm_request_serial
+        fm_playback.pending = True
+        fm_playback.pending_freq_mhz = float(freq_mhz)
+        fm_playback.pending_device_id = device_id
+        fm_playback.worker_error = "FM queued; waiting for SDR availability"
+        if device_id and not _device_available(device_id):
+            _pause_fm_scanner_for_playback()
+            _force_release_gateway_device(device_id)
+            _start_fm_pending_thread(request_serial, float(freq_mhz), device_id)
+        else:
+            try:
+                _start_fm_playback_now(freq_mhz, device_id)
+            except Exception as exc:
+                if not _fm_busy_error(exc):
+                    fm_playback.pending = False
+                    _restore_fm_scanner_after_playback()
+                    return _json_error(409, "fm_play", error=str(exc))
+                _start_fm_pending_thread(request_serial, float(freq_mhz), device_id)
+    except requests.RequestException as exc:
+        return _json_error(503, "fm_play", error="sdr-gateway is unavailable", detail=str(exc))
+    return jsonify({"ok": True, "fm_playback": _fm_playback_status_payload()})
+
+
+@app.post("/api/fm/stop")
+def fm_stop():
+    _stop_fm_playback()
+    return jsonify({"ok": True, "fm_playback": _fm_playback_status_payload()})
+
+
+@app.get("/api/fm/audio/batch")
+def fm_audio_batch():
+    if not fm_playback.running:
+        return Response(b"", mimetype="application/octet-stream", status=204)
+    count = max(1, min(int(request.args.get("count", 6)), 16))
+    timeout = max(0.05, min(float(request.args.get("timeout", 0.4)), 2.0))
+    chunks: list[bytes] = []
+    for idx in range(count):
+        try:
+            pcm = fm_audio_q.get(timeout=timeout if idx == 0 else 0.02)
+        except queue.Empty:
+            break
+        chunks.append(pcm)
+        fm_playback.served_chunks += 1
+    if not chunks:
+        fm_playback.empty_audio_polls += 1
+        return Response(b"", mimetype="application/octet-stream", status=204)
+    fm_playback.empty_audio_polls = 0
+    return Response(b"".join(chunks), mimetype="application/octet-stream")
+
+
 def _reset_stats() -> None:
     state.chunks_seen = 0
     state.bytes_seen = 0
@@ -3875,6 +4424,7 @@ def _available_devices() -> list[dict[str, Any]]:
 
 def _stop_scan(stop_gateway: bool = True) -> None:
     global worker_thread, worker_threads, worker_stops
+    _stop_fm_playback()
     _stop_bredr_inquiry()
     _stop_rf_sentinel_engine()
     _stop_btcsniffer_engine()
@@ -4436,7 +4986,7 @@ def status():
                 "scanner_log": state.scanner_log[-160:],
                 "scanner_assignments": state.scanner_assignments,
                 "ui_config": ui_config,
-                "fm_playback": {"running": False},
+                "fm_playback": _fm_playback_status_payload(),
                 "available_devices": devices,
                 "channel_activity": [
                     state.channel_activity.get(idx, {"channel": idx, "hits": 0, "rssi_dbfs": -120.0})

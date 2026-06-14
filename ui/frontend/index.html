@@ -1768,6 +1768,10 @@
       let configLoaded = false;
       let activeDetectionTab = "ALL";
       let tableSort = { key: "last_seen_at", direction: "desc" };
+      let fmAudioCtx = null;
+      let fmGainNode = null;
+      let fmPlayCursor = 0;
+      let fmAudioLoopActive = false;
       const detectionGroupOpen = new Map();
       const btcTargetMetrics = Array.from(document.querySelectorAll(".btc-target-metric"));
       const metrics = {
@@ -2348,22 +2352,47 @@
         return Number.isFinite(numeric) ? numeric : null;
       }
 
+      function playingFmMhz() {
+        const value = Number(latestStatus?.fm_playback?.freq_mhz);
+        return Number.isFinite(value) ? value : null;
+      }
+
       function isFollowedZigbee(row) {
         return row?.protocol === "ZIGBEE" && Number(row.channel) === zigbeeFollowChannel();
       }
 
+      function isPlayingFm(row) {
+        if (row?.protocol !== "FM") return false;
+        const rowFreq = Number(row.frequency_mhz);
+        const current = playingFmMhz();
+        return Number.isFinite(rowFreq) && Number.isFinite(current) && Math.abs(rowFreq - current) < 0.05;
+      }
+
       function followAttrs(row) {
-        if (row?.protocol !== "ZIGBEE" || row.channel === undefined || row.channel === null || row.channel === "") return "";
-        const channel = Number(row.channel);
-        if (!Number.isFinite(channel)) return "";
-        return ` data-follow-protocol="zigbee" data-follow-channel="${channel}"`;
+        const attrs = [];
+        if (row?.protocol === "ZIGBEE" && row.channel !== undefined && row.channel !== null && row.channel !== "") {
+          const channel = Number(row.channel);
+          if (Number.isFinite(channel)) {
+            attrs.push(`data-follow-protocol="zigbee"`, `data-follow-channel="${channel}"`);
+          }
+        }
+        if (row?.protocol === "FM") {
+          const freq = Number(row.frequency_mhz);
+          if (Number.isFinite(freq) && freq >= 87.5 && freq <= 108.0) {
+            attrs.push(`data-play-protocol="fm"`, `data-play-freq-mhz="${freq.toFixed(1)}"`);
+          }
+        }
+        return attrs.length ? ` ${attrs.join(" ")}` : "";
       }
 
       function titleWithFollowLock(row) {
         const lock = isFollowedZigbee(row)
           ? `<button class="lock-button" type="button" data-unfollow-zigbee="${Number(row.channel)}" title="Unlock Zigbee channel ${Number(row.channel)}">${materialIcon("lock")}CH ${Number(row.channel)}</button>`
           : "";
-        return `<span class="title-text">${titleWithBrandIcon(row)}</span>${lock}`;
+        const play = isPlayingFm(row)
+          ? `<button class="lock-button" type="button" data-stop-fm="${Number(row.frequency_mhz).toFixed(1)}" title="Stop FM ${Number(row.frequency_mhz).toFixed(1)} MHz">${materialIcon("volume_up")}${Number(row.frequency_mhz).toFixed(1)}</button>`
+          : "";
+        return `<span class="title-text">${titleWithBrandIcon(row)}</span>${lock}${play}`;
       }
 
       function uuidVendorName(row) {
@@ -2443,9 +2472,9 @@
             const deviceType = fmtDeviceType(row);
             const deviceTypeDetail = fmtDeviceTypeDetail(row);
             return `
-              <tr class="${protocolClass(row.protocol)}">
+              <tr class="${protocolClass(row.protocol)}"${followAttrs(row)}>
                 <td>${protocolChip(row.protocol)}</td>
-                <td>${row.identity || row.name || row.mac || "Unknown device"}</td>
+                <td>${titleWithFollowLock(row)}</td>
                 <td>${deviceType || ""}${deviceTypeDetail ? `<br><span class="small">${deviceTypeDetail}</span>` : ""}</td>
                 <td>${row.mac || ""}</td>
                 <td>${uuid || ""}</td>
@@ -2982,8 +3011,7 @@
             return `
               <article class="${Number(row.detections || 0) > 3 ? "candidate good" : "candidate soft"} ${protocolClass(row.protocol)}"${followAttrs(row)}>
                 <div class="candidate-top">
-                  <strong>${titleWithBrandIcon(row)}</strong>
-                  ${isFollowedZigbee(row) ? `<button class="lock-button" type="button" data-unfollow-zigbee="${Number(row.channel)}" title="Unlock Zigbee channel ${Number(row.channel)}">${materialIcon("lock")}CH ${Number(row.channel)}</button>` : ""}
+                  <strong>${titleWithFollowLock(row)}</strong>
                   ${protocolChip(row.protocol)}
                 </div>
                 <div class="chips">
@@ -3024,8 +3052,7 @@
             .map((row) => `
               <article class="${Number(row.detections || 0) > 1 ? "candidate good" : "candidate soft"} ${protocolClass(row.protocol)}"${followAttrs(row)}>
                 <div class="candidate-top">
-                  <strong>${titleWithBrandIcon(row)}</strong>
-                  ${isFollowedZigbee(row) ? `<button class="lock-button" type="button" data-unfollow-zigbee="${Number(row.channel)}" title="Unlock Zigbee channel ${Number(row.channel)}">${materialIcon("lock")}CH ${Number(row.channel)}</button>` : ""}
+                  <strong>${titleWithFollowLock(row)}</strong>
                   <span class="chip">${Number(row.detections || 0).toLocaleString()} hits</span>
                 </div>
                 <div class="chips">
@@ -3158,7 +3185,9 @@
       }
 
       function statusLabel(status) {
-        if (!status.running) return plannedStatusLabel();
+        const fmPlaying = Number(status?.fm_playback?.freq_mhz);
+        const fmSuffix = Number.isFinite(fmPlaying) && status?.fm_playback?.running ? ` · FM ${fmPlaying.toFixed(1)} MHz playing` : "";
+        if (!status.running) return `${plannedStatusLabel()}${fmSuffix}`;
         if (status.mode === "sentinel") {
           const sdrs = autoSdrCount(status);
           const active = Object.keys(status.scanner_assignments || {}).length;
@@ -3166,9 +3195,9 @@
           const ismPrefix = enabled.has("btc") && enabled.has("ble") ? "2.4 GHz ISM BTC+BLE shared stream" : "Multi-SDR sweep";
           const followChannel = status.follow_target?.zigbee?.channel ?? status.decoder_stats?.follow?.zigbee?.channel;
           if (followChannel !== undefined && followChannel !== null) {
-            return `${ismPrefix} · ${active || sdrs || 0}/${sdrs || 0} radios active · Zigbee locked CH ${followChannel}`;
+            return `${ismPrefix} · ${active || sdrs || 0}/${sdrs || 0} radios active · Zigbee locked CH ${followChannel}${fmSuffix}`;
           }
-          return `${ismPrefix} · ${active || sdrs || 0}/${sdrs || 0} radios active`;
+          return `${ismPrefix} · ${active || sdrs || 0}/${sdrs || 0} radios active${fmSuffix}`;
         }
         if (status.mode === "classic" || status.mode === "both") {
           const rateMhz = Math.max(1, Math.round(Number(status.sample_rate_sps || 0) / 1_000_000) || 60);
@@ -3288,7 +3317,7 @@
             const pill = active
               ? `<span class="sdr-assignment-chips">${sdrProtocolChips(assignment)}</span>`
               : inferredChips
-                ? `<span class="sdr-assignment-chips">${inferredChips}<span class="legend-pill">Idle</span></span>`
+                ? `<span class="sdr-assignment-chips">${inferredChips}<span class="legend-pill">${scannerOwned ? "Scanning" : "Idle"}</span></span>`
                 : `<span class="legend-pill">${scannerOwned ? "Scanning" : "Idle"}</span>`;
             const center = active ? assignmentCenter(assignment) : "";
             const band = active
@@ -3382,6 +3411,7 @@
           latestStatus = status;
           liveDot.classList.toggle("live", Boolean(status.running && status.worker_alive));
           runState.textContent = statusLabel(status);
+          if (status.fm_playback?.running) fmAudioLoop();
           runToggleBtn.classList.toggle("danger", Boolean(status.running));
           runToggleText.textContent = status.running ? "Stop" : "Start";
           runToggleBtn.querySelector(".material-symbols-rounded").textContent = status.running ? "stop" : "play_arrow";
@@ -3466,17 +3496,118 @@
         await pollStatus();
       }
 
+      async function ensureFmAudio() {
+        if (!fmAudioCtx) fmAudioCtx = new AudioContext({ sampleRate: 48000 });
+        if (!fmGainNode) {
+          fmGainNode = fmAudioCtx.createGain();
+          fmGainNode.gain.value = 0.95;
+          fmGainNode.connect(fmAudioCtx.destination);
+        }
+        if (fmAudioCtx.state === "suspended") await fmAudioCtx.resume();
+        if (fmPlayCursor < fmAudioCtx.currentTime + 0.25) fmPlayCursor = fmAudioCtx.currentTime + 0.25;
+      }
+
+      function queueFmPcm(arrayBuffer) {
+        if (!fmAudioCtx || !fmGainNode) return;
+        const pcm = new Int16Array(arrayBuffer);
+        const frames = pcm.length;
+        if (!frames) return;
+        const mono = new Float32Array(frames);
+        for (let i = 0; i < frames; i += 1) {
+          mono[i] = pcm[i] / 32768.0;
+        }
+        const buf = fmAudioCtx.createBuffer(1, frames, 48000);
+        buf.copyToChannel(mono, 0);
+        const src = fmAudioCtx.createBufferSource();
+        src.buffer = buf;
+        src.connect(fmGainNode);
+        const startAt = Math.max(fmPlayCursor, fmAudioCtx.currentTime + 0.02);
+        src.start(startAt);
+        fmPlayCursor = startAt + buf.duration;
+      }
+
+      async function fmAudioLoop() {
+        if (fmAudioLoopActive) return;
+        fmAudioLoopActive = true;
+        try {
+          while (latestStatus?.fm_playback?.running) {
+            await ensureFmAudio();
+            const lead = fmPlayCursor - fmAudioCtx.currentTime;
+            if (lead > 0.8) {
+              await new Promise((resolve) => setTimeout(resolve, 120));
+              continue;
+            }
+            const resp = await fetch("/api/fm/audio/batch?count=3&timeout=0.4", { cache: "no-store" });
+            if (resp.status === 204) {
+              await new Promise((resolve) => setTimeout(resolve, 80));
+              continue;
+            }
+            if (!resp.ok) throw new Error(`FM audio fetch failed (${resp.status})`);
+            const buffer = await resp.arrayBuffer();
+            if (buffer.byteLength) queueFmPcm(buffer);
+            if (fmPlayCursor - fmAudioCtx.currentTime > 1.2) {
+              fmPlayCursor = fmAudioCtx.currentTime + 0.3;
+            }
+          }
+        } finally {
+          fmAudioLoopActive = false;
+        }
+      }
+
+      async function setFmPlayback(freqMhz) {
+        const playing = Number.isFinite(Number(freqMhz));
+        const currentFm = playingFmMhz();
+        const switchingFm = playing && Number.isFinite(currentFm) && Math.abs(currentFm - Number(freqMhz)) >= 0.05;
+        if (playing) await ensureFmAudio();
+        if (switchingFm && fmAudioCtx) {
+          fmPlayCursor = fmAudioCtx.currentTime + 0.2;
+        }
+        const resp = await fetch(playing ? "/api/fm/play" : "/api/fm/stop", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify(playing ? { freq_mhz: Number(freqMhz) } : {}),
+        });
+        const data = await resp.json().catch(() => ({}));
+        if (!resp.ok) throw new Error(data.error || data.detail || "FM playback update failed");
+        latestStatus = { ...(latestStatus || {}), fm_playback: data.fm_playback || {} };
+        runState.textContent = playing
+          ? data.fm_playback?.pending
+            ? `Queued FM ${Number(freqMhz).toFixed(1)} MHz; waiting for SDR`
+            : switchingFm
+              ? `Switching FM to ${Number(freqMhz).toFixed(1)} MHz on ${data.fm_playback?.device_id || "SDR"}`
+              : `Playing FM ${Number(freqMhz).toFixed(1)} MHz on ${data.fm_playback?.device_id || "SDR"}`
+          : "FM playback stopped";
+        if (playing && !data.fm_playback?.pending) fmAudioLoop();
+        await pollStatus();
+      }
+
       function showFollowMenu(event, card) {
         const channel = Number(card.dataset.followChannel);
-        if (!Number.isFinite(channel)) return;
-        const followed = channel === zigbeeFollowChannel();
+        const fmFreq = Number(card.dataset.playFreqMhz);
+        const zigbee = Number.isFinite(channel);
+        const fm = Number.isFinite(fmFreq);
+        if (!zigbee && !fm) return;
         event.preventDefault();
-        followMenu.innerHTML = `
-          <button type="button" data-follow-menu-action="${followed ? "unfollow" : "follow"}" data-channel="${channel}">
-            ${materialIcon(followed ? "lock_open" : "lock")}
-            ${followed ? `Unfollow Zigbee CH ${channel}` : `Follow Zigbee CH ${channel}`}
-          </button>
-        `;
+        const actions = [];
+        if (zigbee) {
+          const followed = channel === zigbeeFollowChannel();
+          actions.push(`
+            <button type="button" data-follow-menu-action="${followed ? "unfollow" : "follow"}" data-channel="${channel}">
+              ${materialIcon(followed ? "lock_open" : "lock")}
+              ${followed ? `Unfollow Zigbee CH ${channel}` : `Follow Zigbee CH ${channel}`}
+            </button>
+          `);
+        }
+        if (fm) {
+          const playing = Math.abs((playingFmMhz() ?? -999) - fmFreq) < 0.05;
+          actions.push(`
+            <button type="button" data-fm-menu-action="${playing ? "stop" : "play"}" data-freq-mhz="${fmFreq.toFixed(1)}">
+              ${materialIcon(playing ? "stop" : "play_arrow")}
+              ${playing ? `Stop FM ${fmFreq.toFixed(1)} MHz` : `Play FM ${fmFreq.toFixed(1)} MHz`}
+            </button>
+          `);
+        }
+        followMenu.innerHTML = actions.join("");
         const width = 210;
         followMenu.style.left = `${Math.min(event.clientX, window.innerWidth - width - 12)}px`;
         followMenu.style.top = `${Math.min(event.clientY, window.innerHeight - 58)}px`;
@@ -3484,19 +3615,26 @@
       }
 
       function handleFollowContextMenu(event) {
-        const card = event.target.closest("[data-follow-protocol='zigbee']");
+        const card = event.target.closest("[data-follow-protocol='zigbee'], [data-play-protocol='fm']");
         if (!card) return;
         showFollowMenu(event, card);
       }
 
       async function handleFollowClick(event) {
         const menuButton = event.target.closest("[data-follow-menu-action]");
+        const fmButton = event.target.closest("[data-fm-menu-action]");
         const unlockButton = event.target.closest("[data-unfollow-zigbee]");
-        if (!menuButton && !unlockButton) return;
+        const stopFmButton = event.target.closest("[data-stop-fm]");
+        if (!menuButton && !unlockButton && !fmButton && !stopFmButton) return;
         event.preventDefault();
         event.stopPropagation();
+        hideFollowMenu();
         try {
-          if (unlockButton || menuButton.dataset.followMenuAction === "unfollow") {
+          if (stopFmButton || (fmButton && fmButton.dataset.fmMenuAction === "stop")) {
+            await setFmPlayback(null);
+          } else if (fmButton) {
+            await setFmPlayback(Number(fmButton.dataset.freqMhz));
+          } else if (unlockButton || menuButton.dataset.followMenuAction === "unfollow") {
             await setZigbeeFollow(null);
           } else {
             await setZigbeeFollow(Number(menuButton.dataset.channel));
