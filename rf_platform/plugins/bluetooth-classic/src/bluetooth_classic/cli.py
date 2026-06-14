@@ -25,7 +25,8 @@ from bluetooth_lowenergy.detector import BLE_ADV_CHANNELS, WideBLEAdvertisingDet
 PLUGIN_ROOT = Path(__file__).resolve().parents[2]
 DEFAULT_BINARY = PLUGIN_ROOT / "build" / "btcexplorer-sniffer"
 DEFAULT_GATEWAY_BINARY = PLUGIN_ROOT / "build" / "btcexplorer-sniffer-gateway"
-DEFAULT_LOG = PLUGIN_ROOT / "btcexplorer-sniffer.log"
+DEFAULT_LOG_DIR = Path(os.getenv("RF_SENTINEL_LOG_DIR", "/var/log/rf_sentinel"))
+DEFAULT_LOG = DEFAULT_LOG_DIR / "btcexplorer-sniffer.log"
 ANSI_RESET = "\033[0m"
 ANSI_BLE_BLUE = "\033[34m"
 ANSI_BTC_CYAN = "\033[36m"
@@ -283,6 +284,7 @@ def _run_listen(args: argparse.Namespace) -> int:
         binary=DEFAULT_GATEWAY_BINARY if args.source == "gateway" else DEFAULT_BINARY,
     )
     driver = _device_driver(args.device_id, args.driver)
+    args.log.parent.mkdir(parents=True, exist_ok=True)
     gateway_stream_id = ""
     gateway_stop = threading.Event()
     gateway_thread: threading.Thread | None = None
@@ -536,6 +538,7 @@ def _print_combined_event(event: dict[str, Any], args: argparse.Namespace) -> No
 
 def _run_combined(args: argparse.Namespace) -> int:
     binary = _ensure_binary(auto_build=not args.no_auto_build, binary=DEFAULT_GATEWAY_BINARY)
+    args.log.parent.mkdir(parents=True, exist_ok=True)
     stream_id = _start_gateway_stream(args)
     stop = threading.Event()
     events: "queue.Queue[dict[str, Any]]" = queue.Queue()

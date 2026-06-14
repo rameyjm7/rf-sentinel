@@ -76,7 +76,8 @@ COMPANY_IDENTIFIERS_PATH = DATA_DIR / "company_identifiers.json"
 UUID16_IDENTIFIERS_PATH = DATA_DIR / "uuid16_identifiers.json"
 BTC_SNIFFER_ROOT = Path(os.getenv("BTC_SNIFFER_ROOT", str(PROJECT_ROOT / "rf_platform" / "plugins" / "bluetooth-classic")))
 BTC_SNIFFER_BINARY = Path(os.getenv("BTC_SNIFFER_BINARY", str(BTC_SNIFFER_ROOT / "build" / "btcexplorer-sniffer")))
-BTC_SNIFFER_LOG_PATH = Path(os.getenv("BTC_SNIFFER_LOG", str(DATA_DIR / "btcexplorer-sniffer.log")))
+RF_SENTINEL_LOG_DIR = Path(os.getenv("RF_SENTINEL_LOG_DIR", "/var/log/rf_sentinel"))
+BTC_SNIFFER_LOG_PATH = Path(os.getenv("BTC_SNIFFER_LOG", str(RF_SENTINEL_LOG_DIR / "btcexplorer-sniffer.log")))
 BTC_SNIFFER_AUTO_BUILD = os.getenv("BTC_SNIFFER_AUTO_BUILD", "1").strip().lower() not in {"0", "false", "no"}
 BTC_ENGINE_DEFAULT = os.getenv("BTC_ENGINE", "btcsniffer").strip().lower()
 SDR_GATEWAY_DEVICES_TIMEOUT_SECONDS = float(os.getenv("SDR_GATEWAY_DEVICES_TIMEOUT_SECONDS", "10"))
@@ -1928,6 +1929,59 @@ def _btc_max_bandwidth_mhz_for_device(device_id: str) -> int:
     return 20
 
 
+def _device_max_rate_mhz(device: dict[str, Any]) -> int:
+    try:
+        rate = int(round(float(device.get("max_sample_rate_sps") or 0) / 1_000_000.0))
+    except (TypeError, ValueError):
+        rate = 0
+    if rate > 0:
+        return rate
+    return _btc_max_bandwidth_mhz_for_device(str(device.get("id") or ""))
+
+
+def _pick_ism24_bluetooth_device(devices: list[dict[str, Any]], allowed_devices: set[str] | None = None) -> str:
+    candidates = [
+        dev
+        for dev in devices
+        if str(dev.get("id") or "").strip()
+        and (not allowed_devices or str(dev.get("id") or "").strip() in allowed_devices)
+        and int(dev.get("freq_min_hz") or 0) <= 2_402_000_000
+        and int(dev.get("freq_max_hz") or 0) >= 2_480_000_000
+    ]
+    if not candidates:
+        candidates = [
+            dev
+            for dev in devices
+            if str(dev.get("id") or "").strip()
+            and (not allowed_devices or str(dev.get("id") or "").strip() in allowed_devices)
+        ]
+    if not candidates:
+        return ""
+    wide = [dev for dev in candidates if _device_max_rate_mhz(dev) >= 60]
+    pool = wide or candidates
+    best = max(pool, key=lambda dev: (_device_max_rate_mhz(dev), "bladerf" in str(dev.get("id") or dev.get("label") or "").lower()))
+    return str(best.get("id") or "")
+
+
+def _pick_non_bluetooth_hop_device(
+    devices: list[dict[str, Any]],
+    bluetooth_device_id: str,
+    allowed_devices: set[str] | None = None,
+) -> str:
+    blocked = str(bluetooth_device_id or "").strip()
+    candidates = [
+        dev
+        for dev in devices
+        if str(dev.get("id") or "").strip()
+        and str(dev.get("id") or "").strip() != blocked
+        and str(dev.get("id") or "").strip() != "wlan0"
+        and (not allowed_devices or str(dev.get("id") or "").strip() in allowed_devices)
+    ]
+    if not candidates:
+        return ""
+    return _pick_device(candidates, "hackrf", "sidekiq")
+
+
 def _tail_text(path: Path, max_lines: int = 20) -> str:
     try:
         lines = path.read_text(errors="replace").splitlines()
@@ -3329,6 +3383,8 @@ def _scanner_protocol_from_job_name(job_name: str) -> str:
     if not parts:
         return ""
     protocol = parts[-1]
+    if protocol == "bluetooth":
+        protocol = "btc"
     if protocol.startswith("follow"):
         protocol = "zigbee"
     return protocol.lower()
@@ -3339,6 +3395,8 @@ def _scanner_band_from_command(command: str, protocol: str) -> str:
     if protocol == "btc":
         match = re.search(r"--center-mhz\s+([0-9.]+)\s+--bandwidth-mhz\s+([0-9]+)", text)
         if match:
+            if "bluetooth_scanner" in text:
+                return f"2.4 GHz ISM shared BTC+BLE · {match.group(1)} MHz / {match.group(2)} MHz BW"
             return f"{match.group(1)} MHz / {match.group(2)} MHz BW"
     if protocol == "ble":
         if "iq-sweep" in text:
@@ -3907,6 +3965,32 @@ def start_scan():
         btc_center_mhz = max(2402.0, min(2480.0, btc_center_mhz))
 
     devices_available = _available_devices()
+    combined_bluetooth_protocols = "btc" in enabled_protocols and "ble" in enabled_protocols
+    if mode in {"both", "sentinel"} and combined_bluetooth_protocols:
+        combined_device_id = _pick_ism24_bluetooth_device(devices_available, enabled_devices)
+        if combined_device_id:
+            btc_device_id = combined_device_id
+            other_sdr_protocols = enabled_protocols & {"zigbee", "tpms", "fm"}
+            alternate_hop_device_id = _pick_non_bluetooth_hop_device(devices_available, combined_device_id, enabled_devices)
+            btle_device_id = alternate_hop_device_id if mode == "sentinel" and other_sdr_protocols and alternate_hop_device_id else combined_device_id
+            combined_rate_mhz = max(1, min(BT_CLASSIC_BANK_SIZE, _btc_max_bandwidth_mhz_for_device(combined_device_id)))
+            device_meta = next((dev for dev in devices_available if str(dev.get("id") or "") == combined_device_id), None)
+            if device_meta is not None:
+                combined_rate_mhz = max(1, min(BT_CLASSIC_BANK_SIZE, _device_max_rate_mhz(device_meta)))
+            sample_rate_sps = combined_rate_mhz * 1_000_000
+            single_radio_bluetooth_requested = True
+            _append_scanner_log(
+                f"[ui] 2.4GHz ISM Bluetooth uses {combined_device_id} at {combined_rate_mhz} MHz "
+                f"({'wideband' if combined_rate_mhz >= 60 else 'best available'})"
+            )
+            if alternate_hop_device_id and btle_device_id == alternate_hop_device_id:
+                _append_scanner_log(f"[ui] non-Bluetooth SDR hopping uses {alternate_hop_device_id}")
+            elif mode == "sentinel" and other_sdr_protocols:
+                disabled = sorted(other_sdr_protocols)
+                enabled_protocols -= other_sdr_protocols
+                _append_scanner_log(
+                    f"[ui] disabled {', '.join(disabled)} because no second SDR is available while BTC+BLE owns {combined_device_id}"
+                )
     if mode in {"classic", "both", "sentinel"} and not btc_device_id:
         btc_device_id = _pick_device(devices_available, "bladerf")
     if mode in {"ble", "both", "sentinel"} and not btle_device_id:

@@ -339,6 +339,13 @@
         font-weight: 900;
       }
 
+      .config-note {
+        margin-top: 8px;
+        color: var(--muted);
+        font-size: 0.78rem;
+        line-height: 1.35;
+      }
+
       .sdr-config-list {
         display: grid;
         grid-template-columns: repeat(auto-fit, minmax(210px, 1fr));
@@ -1519,15 +1526,16 @@
             <summary><span class="material-symbols-rounded">tune</span>Config</summary>
             <div class="config-panel">
               <div class="config-section">
-                <div class="config-title">Protocols</div>
+                <div class="config-title">Protocol Groups</div>
                 <div class="protocol-toggles">
-                  <span class="toggle"><input id="btcInput" type="checkbox" checked /> BTC</span>
-                  <span class="toggle"><input id="btleInput" type="checkbox" checked /> BLE</span>
-                  <span class="toggle"><input id="zigbeeInput" type="checkbox" checked /> Zigbee</span>
+                  <span class="toggle"><input id="btcInput" type="checkbox" checked /> 2.4G BTC</span>
+                  <span class="toggle"><input id="btleInput" type="checkbox" checked /> 2.4G BLE</span>
+                  <span class="toggle"><input id="zigbeeInput" type="checkbox" checked /> 2.4G Zigbee</span>
                   <span class="toggle"><input id="tpmsInput" type="checkbox" checked /> TPMS</span>
                   <span class="toggle"><input id="wifiInput" type="checkbox" checked /> WiFi</span>
                   <span class="toggle"><input id="fmInput" type="checkbox" checked /> FM</span>
                 </div>
+                <div class="config-note">BTC and BLE share one 2.4 GHz ISM SDR stream when a wideband radio is available. Zigbee stays separate for now, but it lives in the same band for the future shared stream path.</div>
               </div>
               <div class="config-section">
                 <div class="config-title">SDRs</div>
@@ -1777,6 +1785,31 @@
         return 20;
       }
 
+      function deviceMaxRateMhz(device) {
+        const reported = Number(device?.max_sample_rate_sps || 0) / 1_000_000;
+        return reported > 0 ? reported : btcMaxRateMhzForDevice(device?.id);
+      }
+
+      function covers24gIsm(device) {
+        const minHz = Number(device?.freq_min_hz || 0);
+        const maxHz = Number(device?.freq_max_hz || 0);
+        return minHz <= 2_402_000_000 && maxHz >= 2_480_000_000;
+      }
+
+      function bestSharedBluetoothDevice(devices) {
+        const candidates = Array.isArray(devices)
+          ? devices.filter((dev) => String(dev?.id || "").trim() && covers24gIsm(dev))
+          : [];
+        const pool = candidates.length ? candidates : (Array.isArray(devices) ? devices : []);
+        return [...pool].sort((a, b) => {
+          const aRate = deviceMaxRateMhz(a);
+          const bRate = deviceMaxRateMhz(b);
+          const aWide = aRate >= 60 ? 1 : 0;
+          const bWide = bRate >= 60 ? 1 : 0;
+          return (bWide - aWide) || (bRate - aRate);
+        })[0] || null;
+      }
+
       function syncRateInputToSelection(forceCap = false) {
         const current = Math.max(1, Number(sampleRateInput.value || 1));
         const cap = btcMaxRateMhzForDevice(btcDeviceSelect.value);
@@ -1939,8 +1972,14 @@
             const option = Array.from(select.options).find((opt) => opt.value.toLowerCase().includes(pattern) || opt.textContent.toLowerCase().includes(pattern));
             if (option) select.value = option.value;
           };
-          selectMatch(btcDeviceSelect, "bladerf");
-          selectMatch(btleDeviceSelect, "hackrf");
+          const sharedBluetooth = bestSharedBluetoothDevice(data);
+          if (sharedBluetooth) {
+            btcDeviceSelect.value = sharedBluetooth.id;
+            btleDeviceSelect.value = sharedBluetooth.id;
+          } else {
+            selectMatch(btcDeviceSelect, "bladerf");
+            selectMatch(btleDeviceSelect, "hackrf");
+          }
           syncRateInputToSelection();
           if (!data.length) {
             btcDeviceSelect.innerHTML = "<option>No SDR devices</option>";
@@ -2924,7 +2963,11 @@
       }
 
       function plannedStatusLabel() {
-        const protocols = selectedProtocols().map((item) => item.toUpperCase()).join("+") || "no protocols";
+        const selected = selectedProtocols();
+        const hasSharedBluetooth = selected.includes("btc") && selected.includes("ble");
+        const protocols = hasSharedBluetooth
+          ? `2.4G ISM BTC+BLE${selected.filter((item) => !["btc", "ble"].includes(item)).map((item) => `+${item.toUpperCase()}`).join("")}`
+          : selected.map((item) => item.toUpperCase()).join("+") || "no protocols";
         const sdrs = autoSdrCount(latestStatus);
         return `Ready: ${protocols} across ${sdrs || "available"} SDRs`;
       }
@@ -2934,15 +2977,17 @@
         if (status.mode === "sentinel") {
           const sdrs = autoSdrCount(status);
           const active = Object.keys(status.scanner_assignments || {}).length;
+          const enabled = new Set((status.decoder_stats?.enabled_protocols || selectedProtocols()).map((item) => String(item).toLowerCase()));
+          const ismPrefix = enabled.has("btc") && enabled.has("ble") ? "RF Sentinel 2.4 GHz ISM BTC+BLE shared stream" : "RF Sentinel multi-SDR sweep";
           const followChannel = status.follow_target?.zigbee?.channel ?? status.decoder_stats?.follow?.zigbee?.channel;
           if (followChannel !== undefined && followChannel !== null) {
-            return `RF Sentinel multi-SDR sweep · ${active || sdrs || 0}/${sdrs || 0} radios active · Zigbee locked CH ${followChannel}`;
+            return `${ismPrefix} · ${active || sdrs || 0}/${sdrs || 0} radios active · Zigbee locked CH ${followChannel}`;
           }
-          return `RF Sentinel multi-SDR sweep · ${active || sdrs || 0}/${sdrs || 0} radios active`;
+          return `${ismPrefix} · ${active || sdrs || 0}/${sdrs || 0} radios active`;
         }
         if (status.mode === "classic" || status.mode === "both") {
           const rateMhz = Math.max(1, Math.round(Number(status.sample_rate_sps || 0) / 1_000_000) || 60);
-          return `${status.mode === "both" ? "BTC+BTLE" : "CLASSIC"} ${fmtFreqCompact(status.center_freq_hz)} / ${rateMhz} MHz`;
+          return `${status.mode === "both" ? "2.4G ISM BTC+BLE" : "CLASSIC"} ${fmtFreqCompact(status.center_freq_hz)} / ${rateMhz} MHz`;
         }
         return `BTLE CH ${status.channel} / 2 MHz`;
       }
@@ -2968,7 +3013,13 @@
             if (enabledProtocols.has("ble")) ism.push("BLE");
             if (enabledProtocols.has("zigbee")) ism.push("Zigbee");
             if (enabledProtocols.has("wifi")) ism.push("WiFi");
-            if (ism.length) bands.push(`2.4 GHz ${ism.join("+")}`);
+            if (ism.length) {
+              const sharedBluetooth = enabledProtocols.has("btc") && enabledProtocols.has("ble");
+              const label = sharedBluetooth
+                ? `2.4 GHz ISM shared stream: BTC+BLE${enabledProtocols.has("zigbee") ? " (+Zigbee-ready)" : ""}`
+                : `2.4 GHz ISM ${ism.join("+")}`;
+              bands.push(label);
+            }
           }
           if (canTpms && enabledProtocols.has("tpms")) bands.push("TPMS 315/433.92 MHz");
           if (canFm && enabledProtocols.has("fm")) bands.push("FM 87.7-107.9 MHz");

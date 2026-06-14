@@ -168,6 +168,30 @@ def _build_jobs(args: argparse.Namespace) -> tuple[list[ScanJob], list[ScanJob]]
             ],
         )
 
+    def bluetooth_combined_job(name: str, device_id: str, bandwidth_mhz: int) -> ScanJob:
+        return ScanJob(
+            name=name,
+            protocol="btc",
+            continuous=True,
+            dwell_s=0.0,
+            command=[
+                _bin("bluetooth_scanner"),
+                "--device-id",
+                device_id,
+                "--center-mhz",
+                f"{args.btc_center_mhz:.3f}",
+                "--bandwidth-mhz",
+                str(int(bandwidth_mhz)),
+                "--lna-gain-db",
+                str(args.btc_lna_gain_db),
+                "--vga-gain-db",
+                str(args.btc_vga_gain_db),
+                "--amp-gain-db",
+                str(args.btc_amp_gain_db),
+                "--json",
+            ],
+        )
+
     def zigbee_job(name: str, device_id: str) -> ScanJob:
         job = ScanJob(
             name=name,
@@ -320,11 +344,15 @@ def _build_jobs(args: argparse.Namespace) -> tuple[list[ScanJob], list[ScanJob]]
             cycled.append(wifi_job("wifi"))
         return continuous, cycled
 
-    if not args.no_btc:
+    combined_bluetooth = not args.no_btc and not args.no_ble
+
+    if combined_bluetooth:
+        continuous.append(bluetooth_combined_job("btc", args.btc_device_id, args.btc_bandwidth_mhz))
+    elif not args.no_btc:
         job = btc_job("btc", args.btc_device_id, args.btc_bandwidth_mhz, args.btc_lna_gain_db, args.btc_vga_gain_db)
         continuous.append(ScanJob(name=job.name, protocol=job.protocol, continuous=True, dwell_s=0.0, command=job.command))
 
-    if not args.no_ble:
+    if not args.no_ble and not combined_bluetooth:
         cycled.append(ble_job("ble", args.hop_device_id))
 
     if not args.no_zigbee:
@@ -703,6 +731,12 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--no-tpms", action="store_true")
     parser.add_argument("--no-wifi", action="store_true")
     parser.add_argument("--no-fm", action="store_true")
+    parser.add_argument(
+        "--allowed-device-id",
+        action="append",
+        default=[],
+        help="SDR device allowed by the UI; repeatable and currently used for compatibility with UI launches",
+    )
     parser.add_argument("--control-file", default="", help="optional JSON file with a live protocols list")
     parser.add_argument("--once", action="store_true", help="run one BLE/Zigbee/TPMS cycle and exit")
     return parser

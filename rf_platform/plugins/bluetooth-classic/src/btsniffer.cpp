@@ -1407,7 +1407,7 @@ int SAFE_MAIN(int argc, char *argv[])
     std::string input_format = "cs8";
     bool input_stdin = false;
 #endif
-    std::string log_path = "btsniffer.log";
+    std::string log_path = "/var/log/rf_sentinel/btsniffer.log";
     std::string events_path = "";
     double lna_gain_db = 40.0;
     double vga_gain_db = 40.0;
