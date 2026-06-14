@@ -3483,7 +3483,7 @@
       }
 
       async function setZigbeeFollow(channel) {
-        const follow = Number.isFinite(Number(channel));
+        const follow = channel !== null && channel !== undefined && Number.isFinite(Number(channel));
         const resp = await fetch("/api/scan/follow", {
           method: "POST",
           headers: { "Content-Type": "application/json" },

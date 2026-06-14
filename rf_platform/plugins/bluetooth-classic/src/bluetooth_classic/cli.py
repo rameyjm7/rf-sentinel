@@ -6,6 +6,7 @@ import json
 import os
 import platform
 import queue
+import re
 import shutil
 import signal
 import subprocess
@@ -49,6 +50,77 @@ CSV_FIELDS = [
     "uaps",
     "packet",
 ]
+
+
+def _btc_bank_start_channel(center_mhz: float, bandwidth_mhz: int) -> int:
+    start = int(round(float(center_mhz) - 2402.0 - ((float(bandwidth_mhz) - 1.0) / 2.0)))
+    return max(0, min(78, start))
+
+
+def _parse_native_status_line(text: str, args: argparse.Namespace) -> dict[str, Any] | None:
+    match = re.search(
+        r"\[\s*(?P<bin>\d+)\]\s+(?P<ts>\d+)\s+us\s+--\s+(?P<lap>[0-9A-Fa-f]{6})\s+--\s+(?P<msg>.*)",
+        text,
+    )
+    if not match:
+        return None
+    bin_index = int(match.group("bin"))
+    channel = _btc_bank_start_channel(float(args.center_mhz), int(args.bandwidth_mhz)) + bin_index
+    lap = match.group("lap").upper()
+    msg = match.group("msg").strip()
+    base = {
+        "protocol": "btc",
+        "channel": channel,
+        "bin": bin_index,
+        "lap": lap,
+        "ts_us": int(match.group("ts")),
+        "source": "btcexplorer-sniffer",
+        "raw": text,
+    }
+
+    resolved = re.search(
+        r"RESOLVED UAP:LAP\s+(?P<uap>[0-9A-Fa-f]{2}):(?P<lap>[0-9A-Fa-f]{6})(?:.*tracking(?:\s+for)?\s+(?P<tracking>\d+)\s+us)?",
+        msg,
+    )
+    if resolved:
+        return {
+            **base,
+            "type": "lap_resolved",
+            "kind": "classic_lap",
+            "lap": resolved.group("lap").upper(),
+            "uap": resolved.group("uap").upper(),
+            "candidate_count": 1,
+            "tracking_us": int(resolved.group("tracking") or 0),
+        }
+
+    two_left = re.search(
+        r"Only two UAP left \((?P<uap0>[0-9A-Fa-f]{2}) and (?P<uap1>[0-9A-Fa-f]{2})\).*tracking for\s+(?P<tracking>\d+)\s+us",
+        msg,
+    )
+    if two_left:
+        return {
+            **base,
+            "type": "lap_two_uap_left",
+            "kind": "classic_lap",
+            "uap0": two_left.group("uap0").upper(),
+            "uap1": two_left.group("uap1").upper(),
+            "candidate_count": 2,
+            "tracking_us": int(two_left.group("tracking") or 0),
+        }
+
+    narrowed = re.search(r"(?P<count>\d+)\s+possible UAPs remaining\s+\[(?P<uaps>[0-9A-Fa-f ]+)\]", msg)
+    if narrowed:
+        return {
+            **base,
+            "type": "lap_narrowed",
+            "kind": "classic_lap",
+            "candidate_count": int(narrowed.group("count")),
+            "uaps": narrowed.group("uaps").strip(),
+        }
+
+    if "Initialized" in msg:
+        return {**base, "type": "lap_initialized", "kind": "classic_lap", "candidate_count": 32}
+    return None
 
 
 def _device_driver(device_id: str, fallback: str) -> str:
@@ -378,6 +450,8 @@ def _run_listen(args: argparse.Namespace) -> int:
                 except json.JSONDecodeError:
                     event = None
             if event is None:
+                event = _parse_native_status_line(text, args)
+            if event is None:
                 if args.raw:
                     print(text, flush=True)
                 continue
@@ -482,6 +556,9 @@ def _combined_btc_stdout_worker(proc: subprocess.Popen[str], args: argparse.Name
                     continue
                 except json.JSONDecodeError:
                     pass
+            event = _parse_native_status_line(text, args)
+            if event is not None:
+                events.put(event)
             if args.raw:
                 events.put({"protocol": "btc", "type": "raw", "message": text})
     finally:
