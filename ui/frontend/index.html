@@ -3555,7 +3555,7 @@
       }
 
       async function setFmPlayback(freqMhz) {
-        const playing = Number.isFinite(Number(freqMhz));
+        const playing = freqMhz !== null && freqMhz !== undefined && Number.isFinite(Number(freqMhz));
         const currentFm = playingFmMhz();
         const switchingFm = playing && Number.isFinite(currentFm) && Math.abs(currentFm - Number(freqMhz)) >= 0.05;
         if (playing) await ensureFmAudio();

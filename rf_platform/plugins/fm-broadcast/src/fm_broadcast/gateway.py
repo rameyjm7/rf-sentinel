@@ -75,6 +75,30 @@ class GatewayClient:
             if stream_id and str((config or {}).get("device_id") or "") == device_id:
                 self.stop_stream(stream_id)
 
+    def stream_for_device(self, device_id: str) -> StreamHandle | None:
+        try:
+            response = self.session.get(f"{self.base_url}/streams", headers=self.headers(), timeout=5)
+            response.raise_for_status()
+            streams = response.json()
+        except requests.RequestException:
+            return None
+        if not isinstance(streams, list):
+            return None
+        for stream in streams:
+            if not isinstance(stream, dict):
+                continue
+            config = stream.get("config") if isinstance(stream.get("config"), dict) else {}
+            stream_id = str(stream.get("stream_id") or "")
+            if not stream_id or str((config or {}).get("device_id") or "") != device_id:
+                continue
+            return StreamHandle(
+                stream_id=stream_id,
+                device_id=device_id,
+                center_freq_hz=int((config or {}).get("center_freq_hz") or 0),
+                sample_rate_sps=int((config or {}).get("sample_rate_sps") or 0),
+            )
+        return None
+
     def stop_iq_sweeps_for_device(self, device_id: str) -> None:
         try:
             response = self.session.get(f"{self.base_url}/iq-sweeps", headers=self.headers(), timeout=5)
@@ -206,6 +230,52 @@ class GatewayClient:
             device_id=device_id,
             center_freq_hz=int(body.get("center_freq_hz") or center_freq_hz),
             sample_rate_sps=int(body.get("sample_rate_sps") or sample_rate_sps),
+        )
+
+    def retune_stream(
+        self,
+        stream_id: str,
+        *,
+        device_id: str,
+        center_freq_hz: int,
+        sample_rate_sps: int,
+        lna_gain_db: int,
+        vga_gain_db: int,
+        amp_enable: bool,
+        baseband_filter_hz: int,
+    ) -> StreamHandle:
+        payload = {
+            "device_id": device_id,
+            "center_freq_hz": int(center_freq_hz),
+            "sample_rate_sps": int(sample_rate_sps),
+            "lna_gain_db": int(lna_gain_db),
+            "vga_gain_db": int(vga_gain_db),
+            "amp_enable": bool(amp_enable),
+            "baseband_filter_hz": int(baseband_filter_hz),
+            "duration_seconds": None,
+            "num_samples": None,
+        }
+        response = self.session.post(
+            f"{self.base_url}/streams/{stream_id}/retune",
+            headers=self.headers(),
+            json=payload,
+            timeout=12,
+        )
+        try:
+            response.raise_for_status()
+        except requests.HTTPError as exc:
+            try:
+                detail = response.json().get("detail")
+            except (ValueError, AttributeError):
+                detail = response.text.strip()
+            raise RuntimeError(f"sdr-gateway stream retune failed: HTTP {response.status_code}: {detail}") from exc
+        body = response.json()
+        config = body.get("config", {}) if isinstance(body.get("config"), dict) else {}
+        return StreamHandle(
+            stream_id=str(body.get("stream_id") or stream_id),
+            device_id=device_id,
+            center_freq_hz=int(config.get("center_freq_hz") or center_freq_hz),
+            sample_rate_sps=int(config.get("sample_rate_sps") or sample_rate_sps),
         )
 
     def stop_stream(self, stream_id: str) -> None:

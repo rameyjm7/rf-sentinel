@@ -47,15 +47,30 @@ def _capture_iq(
     vga_gain_db: int,
     amp_enable: bool,
 ) -> bytes:
-    stream = client.start_stream(
-        device_id=device_id,
-        center_freq_hz=int(center_freq_hz),
-        sample_rate_sps=int(sample_rate_sps),
-        lna_gain_db=int(lna_gain_db),
-        vga_gain_db=int(vga_gain_db),
-        amp_enable=bool(amp_enable),
-        baseband_filter_hz=int(sample_rate_sps),
-    )
+    created_stream = False
+    stream = client.stream_for_device(device_id)
+    if stream is not None:
+        stream = client.retune_stream(
+            stream.stream_id,
+            device_id=device_id,
+            center_freq_hz=int(center_freq_hz),
+            sample_rate_sps=int(sample_rate_sps),
+            lna_gain_db=int(lna_gain_db),
+            vga_gain_db=int(vga_gain_db),
+            amp_enable=bool(amp_enable),
+            baseband_filter_hz=int(sample_rate_sps),
+        )
+    else:
+        stream = client.start_stream(
+            device_id=device_id,
+            center_freq_hz=int(center_freq_hz),
+            sample_rate_sps=int(sample_rate_sps),
+            lna_gain_db=int(lna_gain_db),
+            vga_gain_db=int(vga_gain_db),
+            amp_enable=bool(amp_enable),
+            baseband_filter_hz=int(sample_rate_sps),
+        )
+        created_stream = True
     chunks: list[bytes] = []
     deadline = time.monotonic() + max(0.05, float(dwell_s))
     try:
@@ -64,8 +79,9 @@ def _capture_iq(
             if time.monotonic() >= deadline:
                 break
     finally:
-        client.stop_stream(stream.stream_id)
-        time.sleep(0.12)
+        if created_stream:
+            client.stop_stream(stream.stream_id)
+            time.sleep(0.12)
     return b"".join(chunks)
 
 

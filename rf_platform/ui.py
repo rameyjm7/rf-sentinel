@@ -6,7 +6,7 @@ from importlib.util import module_from_spec, spec_from_file_location
 from pathlib import Path
 
 
-def _load_app():
+def _load_backend():
     app_path = Path(__file__).resolve().parents[1] / "ui" / "backend" / "app.py"
     backend_dir = str(app_path.parent)
     if backend_dir not in sys.path:
@@ -16,14 +16,22 @@ def _load_app():
         raise RuntimeError(f"unable to load UI backend: {app_path}")
     module = module_from_spec(spec)
     spec.loader.exec_module(module)
-    return module.app
+    return module
 
 
 def main() -> int:
-    app = _load_app()
+    module = _load_backend()
+    app = module.app
     host = os.getenv("RF_SENTINEL_HOST", os.getenv("BT_EXPLORER_HOST", "0.0.0.0"))
     port = int(os.getenv("RF_SENTINEL_PORT", os.getenv("BT_EXPLORER_PORT", "5050")))
-    app.run(host=host, port=port, threaded=True)
+    try:
+        app.run(host=host, port=port, threaded=True)
+    except KeyboardInterrupt:
+        print("\n[ui] Ctrl+C received, disconnecting from sdr-gateway...", file=sys.stderr)
+    finally:
+        shutdown = getattr(module, "shutdown", None)
+        if callable(shutdown):
+            shutdown()
     return 0
 
 

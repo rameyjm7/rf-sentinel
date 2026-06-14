@@ -1513,6 +1513,8 @@ rf_sentinel_stop = threading.Event()
 devices_cache_lock = threading.Lock()
 devices_cache: list[dict[str, Any]] = []
 devices_cache_updated_at = 0.0
+shutdown_lock = threading.Lock()
+shutdown_complete = False
 ble_identity_cache: dict[str, dict[str, Any]] = {}
 company_identifier_lut: dict[str, str] = {}
 uuid16_identifier_lut: dict[str, str] = {}
@@ -2565,13 +2567,24 @@ def _stop_btcsniffer_engine() -> None:
 
 def _gateway_streams() -> list[dict[str, Any]]:
     try:
-        resp = requests.get(f"{_gateway_base()}/streams", headers=_gateway_headers(), timeout=2)
+        resp = requests.get(f"{_gateway_base()}/streams", headers=_gateway_headers(), timeout=5)
         if resp.status_code >= 400:
             return []
         body = resp.json()
         return body if isinstance(body, list) else []
     except requests.RequestException:
         return []
+
+
+def _gateway_stream_for_device(device_id: str | None) -> dict[str, Any] | None:
+    requested = str(device_id or "").strip()
+    if not requested:
+        return None
+    for stream in _gateway_streams():
+        cfg = stream.get("config", {}) or {}
+        if str(cfg.get("device_id", "")).strip() == requested:
+            return stream
+    return None
 
 
 def _stop_gateway_stream(stream_id: str | None) -> None:
@@ -2594,7 +2607,7 @@ def _stop_duplicate_gateway_streams(device_id: str | None, keep_stream_id: str |
 
 
 def _gateway_get_json(path: str) -> Any:
-    resp = requests.get(f"{_gateway_base()}{path}", headers=_gateway_headers(), timeout=2)
+    resp = requests.get(f"{_gateway_base()}{path}", headers=_gateway_headers(), timeout=5)
     if resp.status_code >= 400:
         return None
     try:
@@ -2804,21 +2817,55 @@ def _preferred_fm_playback_device(requested_device_id: str = "") -> str:
 def _start_fm_playback_now(freq_mhz: float, requested_device_id: str = "") -> None:
     global fm_worker_thread
     requested = str(requested_device_id or "").strip() or _current_fm_scanner_device_id()
+    active_stream = _gateway_stream_for_device(requested)
     if requested and not _device_available(requested):
         _pause_fm_scanner_for_playback()
-        _force_release_gateway_device(requested)
-        _wait_for_device_available(requested, timeout_s=2.0)
-    picked_device_id = _preferred_fm_playback_device(requested)
-    _stop_duplicate_gateway_streams(picked_device_id)
-    body, actual_rate, actual_lna, actual_vga = _start_gateway_stream(
-        picked_device_id,
-        int(round(float(freq_mhz) * 1_000_000.0)),
-        2_000_000,
-        32,
-        32,
-    )
-    fm_worker_stop.clear()
+        if active_stream is None:
+            _force_release_gateway_device(requested)
+            _wait_for_device_available(requested, timeout_s=2.0)
+            active_stream = _gateway_stream_for_device(requested)
+    picked_device_id = requested if active_stream is not None else _preferred_fm_playback_device(requested)
+    target_freq_hz = int(round(float(freq_mhz) * 1_000_000.0))
+    target_rate = 2_000_000
+    target_lna = 32
+    target_vga = 32
+    if active_stream is not None:
+        stream_id = str(active_stream.get("stream_id") or "").strip()
+        body, actual_rate, actual_lna, actual_vga = _retune_gateway_stream(
+            stream_id,
+            picked_device_id,
+            target_freq_hz,
+            target_rate,
+            target_lna,
+            target_vga,
+        )
+    else:
+        _stop_duplicate_gateway_streams(picked_device_id)
+        body, actual_rate, actual_lna, actual_vga = _start_gateway_stream(
+            picked_device_id,
+            target_freq_hz,
+            target_rate,
+            target_lna,
+            target_vga,
+        )
     _drain_fm_audio_queue()
+    stream_id = str(body.get("stream_id") or "")
+    if fm_playback.running and fm_playback.stream_id == stream_id and fm_worker_thread and fm_worker_thread.is_alive():
+        fm_playback.pending = False
+        fm_playback.pending_freq_mhz = 0.0
+        fm_playback.pending_device_id = ""
+        fm_playback.device_id = picked_device_id
+        fm_playback.freq_mhz = float(freq_mhz)
+        fm_playback.sample_rate_sps = actual_rate
+        fm_playback.lna_gain_db = actual_lna
+        fm_playback.vga_gain_db = actual_vga
+        fm_playback.worker_error = ""
+        fm_playback.last_audio_rms = 0.0
+        fm_playback.produced_chunks = 0
+        fm_playback.served_chunks = 0
+        fm_playback.empty_audio_polls = 0
+        return
+    fm_worker_stop.clear()
     fm_playback.running = True
     fm_playback.pending = False
     fm_playback.pending_freq_mhz = 0.0
@@ -2828,7 +2875,7 @@ def _start_fm_playback_now(freq_mhz: float, requested_device_id: str = "") -> No
     fm_playback.sample_rate_sps = actual_rate
     fm_playback.lna_gain_db = actual_lna
     fm_playback.vga_gain_db = actual_vga
-    fm_playback.stream_id = str(body.get("stream_id") or "")
+    fm_playback.stream_id = stream_id
     fm_playback.worker_error = ""
     fm_playback.last_audio_rms = 0.0
     fm_playback.produced_chunks = 0
@@ -4280,8 +4327,6 @@ def fm_play():
     if not 87.5 <= freq_mhz <= 108.0:
         return _json_error(400, "fm_play", error="freq_mhz must be between 87.5 and 108.0")
     try:
-        if fm_playback.running:
-            _stop_fm_playback()
         fm_request_serial += 1
         request_serial = fm_request_serial
         fm_playback.pending = True
@@ -4463,6 +4508,32 @@ def _stop_scan(stop_gateway: bool = True) -> None:
         state.test_target_error = ""
 
 
+def _shutdown_gateway_device_ids() -> set[str]:
+    device_ids = {str(item or "").strip() for item in state.device_ids.values()}
+    for assignment in (state.scanner_assignments or {}).values():
+        if isinstance(assignment, dict):
+            device_ids.add(str(assignment.get("device_id") or "").strip())
+    if fm_playback.device_id:
+        device_ids.add(str(fm_playback.device_id).strip())
+    return {device_id for device_id in device_ids if device_id}
+
+
+def shutdown() -> None:
+    global shutdown_complete
+    with shutdown_lock:
+        if shutdown_complete:
+            return
+        shutdown_complete = True
+    device_ids = _shutdown_gateway_device_ids()
+    try:
+        _append_scanner_log("[ui] shutting down; releasing gateway sessions")
+        _stop_scan(stop_gateway=True)
+        for device_id in device_ids:
+            _force_release_gateway_device(device_id)
+    except Exception as exc:
+        app.logger.warning("UI shutdown cleanup failed: %s", exc)
+
+
 def _channel_freq(mode: str, channel: int) -> int:
     if mode in {"classic", "both"}:
         start_hz = BT_CLASSIC_CHANNELS.get(channel, BT_CLASSIC_CHANNELS[0])
@@ -4485,6 +4556,42 @@ def _start_gateway_stream(
 ) -> tuple[dict[str, Any], int, int, int]:
     resp = requests.post(
         f"{_gateway_base()}/streams/start",
+        headers=_gateway_headers(),
+        json={
+            "device_id": device_id,
+            "center_freq_hz": center_freq_hz,
+            "sample_rate_sps": sample_rate_sps,
+            "lna_gain_db": lna_gain_db,
+            "vga_gain_db": vga_gain_db,
+            "amp_enable": False,
+            "baseband_filter_hz": sample_rate_sps,
+            "duration_seconds": None,
+            "num_samples": None,
+        },
+        timeout=12,
+    )
+    if resp.status_code >= 400:
+        raise RuntimeError(resp.text)
+    body = resp.json()
+    accepted_config = body.get("config", {}) or {}
+    actual_rate = int(accepted_config.get("sample_rate_sps", sample_rate_sps))
+    actual_lna = int(accepted_config.get("lna_gain_db", lna_gain_db))
+    actual_vga = int(accepted_config.get("vga_gain_db", vga_gain_db))
+    return body, actual_rate, actual_lna, actual_vga
+
+
+def _retune_gateway_stream(
+    stream_id: str,
+    device_id: str,
+    center_freq_hz: int,
+    sample_rate_sps: int,
+    lna_gain_db: int,
+    vga_gain_db: int,
+) -> tuple[dict[str, Any], int, int, int]:
+    if not stream_id:
+        raise RuntimeError("No gateway stream is available to retune")
+    resp = requests.post(
+        f"{_gateway_base()}/streams/{stream_id}/retune",
         headers=_gateway_headers(),
         json={
             "device_id": device_id,
@@ -5030,4 +5137,9 @@ def clear():
 if __name__ == "__main__":
     host = os.getenv("BT_EXPLORER_HOST", "0.0.0.0")
     port = int(os.getenv("BT_EXPLORER_PORT", "5050"))
-    app.run(host=host, port=port, threaded=True)
+    try:
+        app.run(host=host, port=port, threaded=True)
+    except KeyboardInterrupt:
+        print("\n[ui] Ctrl+C received, disconnecting from sdr-gateway...", file=sys.stderr)
+    finally:
+        shutdown()
