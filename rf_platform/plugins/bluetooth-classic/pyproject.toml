@@ -15,4 +15,5 @@ dependencies = [
 [project.scripts]
 bluetooth-classic = "bluetooth_classic.cli:main"
 bluetooth_classic = "bluetooth_classic.cli:main"
+bluetooth_scanner = "bluetooth_classic.combined:main"
 btc_scanner = "bluetooth_classic.cli:main"

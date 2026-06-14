@@ -1405,6 +1405,7 @@ int SAFE_MAIN(int argc, char *argv[])
 #ifdef BTC_GATEWAY_FIFO
     std::string input_fifo_path = "";
     std::string input_format = "cs8";
+    bool input_stdin = false;
 #endif
     std::string log_path = "btsniffer.log";
     std::string events_path = "";
@@ -1425,6 +1426,7 @@ int SAFE_MAIN(int argc, char *argv[])
             ("fifo", po::value<std::string>(&fifo_path)->default_value(fifo_path), "optional path for raw CF32 IQ output")
 #ifdef BTC_GATEWAY_FIFO
             ("input-fifo", po::value<std::string>(&input_fifo_path)->default_value(input_fifo_path), "read IQ from this FIFO/file instead of opening an SDR")
+            ("input-stdin", po::bool_switch(&input_stdin)->default_value(false), "read IQ from stdin instead of opening an SDR")
             ("input-format", po::value<std::string>(&input_format)->default_value(input_format), "input FIFO format: cs8 or cf32")
 #endif
             ("log", po::value<std::string>(&log_path)->default_value(log_path), "diagnostic log path, overwritten each run")
@@ -1506,25 +1508,28 @@ int SAFE_MAIN(int argc, char *argv[])
     }
 #ifdef BTC_GATEWAY_FIFO
     boost::algorithm::to_lower(input_format);
-    const bool use_input_fifo = !input_fifo_path.empty();
-    if (use_input_fifo && input_format != "cs8" && input_format != "cf32") {
+    const bool use_input_stream = input_stdin || !input_fifo_path.empty();
+    if (input_stdin && !input_fifo_path.empty()) {
+        throw std::runtime_error("--input-stdin and --input-fifo are mutually exclusive");
+    }
+    if (use_input_stream && input_format != "cs8" && input_format != "cf32") {
         throw std::runtime_error("--input-format must be cs8 or cf32");
     }
 #else
-    const bool use_input_fifo = false;
+    const bool use_input_stream = false;
 #endif
 
     SoapySDR::Device *sdr = NULL;
     SoapySDR::Stream *rx_stream = NULL;
-    if (use_input_fifo) {
+    if (use_input_stream) {
 #ifdef BTC_GATEWAY_FIFO
-        std::cout << "Opening IQ FIFO=" << input_fifo_path
+        std::cout << "Opening IQ input=" << (input_stdin ? "stdin" : input_fifo_path)
                   << " format=" << input_format
                   << " at " << (freq / 1.0e6) << " MHz, "
                   << (rate / 1.0e6) << " Msps, "
                   << decfactor << " bins" << std::endl;
-        log_event(boost::format("opening input_fifo=%s input_format=%s center_mhz=%.3f rate_msps=%.3f bins=%u")
-                  % input_fifo_path % input_format % (freq / 1.0e6) % (rate / 1.0e6) % decfactor);
+        log_event(boost::format("opening input=%s input_format=%s center_mhz=%.3f rate_msps=%.3f bins=%u")
+                  % (input_stdin ? "stdin" : input_fifo_path) % input_format % (freq / 1.0e6) % (rate / 1.0e6) % decfactor);
 #endif
     } else {
         SoapySDR::Kwargs args;
@@ -1643,12 +1648,17 @@ int SAFE_MAIN(int argc, char *argv[])
     FILE* input_fp = NULL;
 //    printf("%d\n",bankptr);
 #ifdef BTC_GATEWAY_FIFO
-    if(use_input_fifo){
-        printf("Reading IQ samples from %s\n", input_fifo_path.c_str());
-        input_fp = fopen(input_fifo_path.c_str(),"rb");
-        if(input_fp == NULL){
-            printf("# Failed to open the input file %s for reading.. exiting!\n", input_fifo_path.c_str());
-            return 1;
+    if(use_input_stream){
+        if (input_stdin) {
+            printf("Reading IQ samples from stdin\n");
+            input_fp = stdin;
+        } else {
+            printf("Reading IQ samples from %s\n", input_fifo_path.c_str());
+            input_fp = fopen(input_fifo_path.c_str(),"rb");
+            if(input_fp == NULL){
+                printf("# Failed to open the input file %s for reading.. exiting!\n", input_fifo_path.c_str());
+                return 1;
+            }
         }
     }
 #endif
@@ -1719,7 +1729,7 @@ int SAFE_MAIN(int argc, char *argv[])
 
 //            printf("n: %d\n",n);
 #ifdef BTC_GATEWAY_FIFO
-            if (use_input_fifo) {
+            if (use_input_stream) {
                 if (input_format == "cf32") {
                     num_rx_samps = fread(buff, sizeof(iqsamp_t), usrp_bufsize, input_fp);
                 } else {
@@ -1733,6 +1743,10 @@ int SAFE_MAIN(int argc, char *argv[])
                     }
                 }
                 if (num_rx_samps == 0) {
+                    if (input_stdin) {
+                        stopsig = true;
+                        break;
+                    }
                     if (feof(input_fp)) clearerr(input_fp);
                     usleep(1000);
                     continue;
@@ -1795,7 +1809,7 @@ int SAFE_MAIN(int argc, char *argv[])
     if(save_to_file && fp != NULL){
        fclose(fp);
     }
-    if(input_fp != NULL){
+    if(input_fp != NULL && input_fp != stdin){
        fclose(input_fp);
     }
 
