@@ -66,8 +66,9 @@ def _load_env_file(path: Path) -> None:
 _load_env_file(PROJECT_ROOT / "config" / "env.txt")
 
 DATA_DIR = Path(__file__).resolve().parent / "data"
-RF_SENTINEL_CONTROL_PATH = DATA_DIR / "rf_sentinel_control.json"
-RF_SENTINEL_UI_CONFIG_PATH = DATA_DIR / "rf_sentinel_ui_config.json"
+RF_SENTINEL_LOG_DIR = Path(os.getenv("RF_SENTINEL_LOG_DIR", "/var/log/rf_sentinel"))
+RF_SENTINEL_CONTROL_PATH = RF_SENTINEL_LOG_DIR / "rf_sentinel_control.json"
+RF_SENTINEL_UI_CONFIG_PATH = RF_SENTINEL_LOG_DIR / "rf_sentinel_ui_config.json"
 RF_SENTINEL_NO_CHANGE = object()
 RF_SENTINEL_PROTOCOLS = {"btc", "ble", "zigbee", "tpms", "wifi", "fm"}
 RF_SENTINEL_DEFAULT_ZIGBEE_FOLLOW_CHANNEL = 25
@@ -77,7 +78,6 @@ COMPANY_IDENTIFIERS_PATH = DATA_DIR / "company_identifiers.json"
 UUID16_IDENTIFIERS_PATH = DATA_DIR / "uuid16_identifiers.json"
 BTC_SNIFFER_ROOT = Path(os.getenv("BTC_SNIFFER_ROOT", str(PROJECT_ROOT / "rf_platform" / "plugins" / "bluetooth-classic")))
 BTC_SNIFFER_BINARY = Path(os.getenv("BTC_SNIFFER_BINARY", str(BTC_SNIFFER_ROOT / "build" / "btcexplorer-sniffer")))
-RF_SENTINEL_LOG_DIR = Path(os.getenv("RF_SENTINEL_LOG_DIR", "/var/log/rf_sentinel"))
 BTC_SNIFFER_LOG_PATH = Path(os.getenv("BTC_SNIFFER_LOG", str(RF_SENTINEL_LOG_DIR / "btcexplorer-sniffer.log")))
 BTC_SNIFFER_AUTO_BUILD = os.getenv("BTC_SNIFFER_AUTO_BUILD", "1").strip().lower() not in {"0", "false", "no"}
 BTC_ENGINE_DEFAULT = os.getenv("BTC_ENGINE", "btcsniffer").strip().lower()
@@ -3317,7 +3317,7 @@ def _write_rf_sentinel_control(
     enabled_devices: set[str] | None = None,
     zigbee_follow_channel: int | None | object = RF_SENTINEL_NO_CHANGE,
 ) -> dict[str, Any]:
-    DATA_DIR.mkdir(parents=True, exist_ok=True)
+    RF_SENTINEL_CONTROL_PATH.parent.mkdir(parents=True, exist_ok=True)
     payload = _read_rf_sentinel_control()
     if enabled_protocols is not None:
         payload["protocols"] = sorted(enabled_protocols & RF_SENTINEL_PROTOCOLS)
@@ -3360,7 +3360,7 @@ def _read_ui_config() -> dict[str, Any]:
 
 
 def _write_ui_config(protocols: set[str], disabled_devices: set[str]) -> dict[str, Any]:
-    DATA_DIR.mkdir(parents=True, exist_ok=True)
+    RF_SENTINEL_UI_CONFIG_PATH.parent.mkdir(parents=True, exist_ok=True)
     payload = {
         "protocols": sorted(protocols & RF_SENTINEL_PROTOCOLS),
         "disabled_devices": sorted(str(item).strip() for item in disabled_devices if str(item).strip()),
@@ -3378,6 +3378,17 @@ def _enabled_devices_from_disabled(devices: list[dict[str, Any]], disabled_devic
         for item in devices
         if str(item.get("id") or "").strip() and str(item.get("id") or "").strip() not in disabled_devices
     }
+
+
+def _has_wifi_device(devices: list[dict[str, Any]], enabled_devices: set[str] | None = None) -> bool:
+    for item in devices:
+        device_id = str(item.get("id") or "").strip()
+        if enabled_devices is not None and device_id not in enabled_devices:
+            continue
+        text = f"{device_id} {item.get('label') or ''} {item.get('driver') or ''}".lower()
+        if "wlan" in text or "wifi" in text or "802.11" in text:
+            return True
+    return False
 
 
 def _terminate_process_group(proc: subprocess.Popen[str], timeout_s: float = 4.0) -> None:
@@ -3712,11 +3723,14 @@ def update_scan_protocols():
     if isinstance(requested_devices, list):
         enabled_devices = {str(item).strip() for item in requested_devices if str(item).strip()}
     disabled_devices = set()
+    devices_available = _available_devices()
     if enabled_devices is not None:
-        known_devices = {str(item.get("id") or "").strip() for item in _available_devices() if str(item.get("id") or "").strip()}
+        known_devices = {str(item.get("id") or "").strip() for item in devices_available if str(item.get("id") or "").strip()}
         disabled_devices = known_devices - enabled_devices
     else:
         disabled_devices = set(_read_ui_config().get("disabled_devices", []))
+    if "wifi" in enabled_protocols and not _has_wifi_device(devices_available, enabled_devices):
+        enabled_protocols.discard("wifi")
     _write_ui_config(enabled_protocols, disabled_devices)
     _write_rf_sentinel_control(enabled_protocols, enabled_devices=enabled_devices)
     with state_lock:
@@ -3970,8 +3984,11 @@ def update_config():
     if not isinstance(requested_disabled, list):
         requested_disabled = []
     disabled_devices = {str(item).strip() for item in requested_disabled if str(item).strip()}
+    devices_available = _available_devices()
+    enabled_devices = _enabled_devices_from_disabled(devices_available, disabled_devices)
+    if "wifi" in protocols and not _has_wifi_device(devices_available, enabled_devices):
+        protocols.discard("wifi")
     config = _write_ui_config(protocols, disabled_devices)
-    enabled_devices = _enabled_devices_from_disabled(_available_devices(), disabled_devices)
     _write_rf_sentinel_control(protocols, enabled_devices=enabled_devices)
     with state_lock:
         state.decoder_stats["enabled_protocols"] = sorted(protocols)
@@ -4040,6 +4057,10 @@ def start_scan():
         btc_center_mhz = max(2402.0, min(2480.0, btc_center_mhz))
 
     devices_available = _available_devices()
+    if "wifi" in enabled_protocols and not _has_wifi_device(devices_available, enabled_devices):
+        enabled_protocols.discard("wifi")
+    if mode == "sentinel" and not enabled_protocols:
+        return _json_error(400, "start_scan", error="select at least one available protocol")
     combined_bluetooth_protocols = "btc" in enabled_protocols and "ble" in enabled_protocols
     if mode in {"both", "sentinel"} and combined_bluetooth_protocols:
         combined_device_id = _pick_ism24_bluetooth_device(devices_available, enabled_devices)

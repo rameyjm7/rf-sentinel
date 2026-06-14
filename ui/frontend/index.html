@@ -346,6 +346,15 @@
         line-height: 1.35;
       }
 
+      .toggle.disabled {
+        opacity: 0.45;
+        cursor: not-allowed;
+      }
+
+      .toggle.disabled input {
+        cursor: not-allowed;
+      }
+
       .sdr-config-list {
         display: grid;
         grid-template-columns: repeat(auto-fit, minmax(210px, 1fr));
@@ -1611,7 +1620,7 @@
                   <span class="toggle"><input id="btleInput" type="checkbox" checked /> 2.4G BLE</span>
                   <span class="toggle"><input id="zigbeeInput" type="checkbox" checked /> 2.4G Zigbee</span>
                   <span class="toggle"><input id="tpmsInput" type="checkbox" checked /> TPMS</span>
-                  <span class="toggle"><input id="wifiInput" type="checkbox" checked /> WiFi</span>
+                  <span class="toggle" id="wifiToggle"><input id="wifiInput" type="checkbox" checked /> WiFi</span>
                   <span class="toggle"><input id="fmInput" type="checkbox" checked /> FM</span>
                 </div>
                 <div class="config-note">BTC and BLE share one 2.4 GHz ISM SDR stream when a wideband radio is available. Zigbee stays separate for now, but it lives in the same band for the future shared stream path.</div>
@@ -1718,6 +1727,7 @@
       const zigbeeInput = document.getElementById("zigbeeInput");
       const tpmsInput = document.getElementById("tpmsInput");
       const wifiInput = document.getElementById("wifiInput");
+      const wifiToggle = document.getElementById("wifiToggle");
       const fmInput = document.getElementById("fmInput");
       const sdrConfigList = document.getElementById("sdrConfigList");
       const channelSelect = document.getElementById("channelSelect");
@@ -1752,6 +1762,8 @@
       let devicesReady = false;
       let latestStatus = null;
       let knownSdrDevices = [];
+      let wifiDeviceAvailable = false;
+      let savedProtocolList = [];
       const disabledSdrIds = new Set();
       let configLoaded = false;
       let activeDetectionTab = "ALL";
@@ -1877,6 +1889,19 @@
         return minHz <= 2_402_000_000 && maxHz >= 2_480_000_000;
       }
 
+      function isWifiDevice(device) {
+        const text = `${device?.id || ""} ${device?.label || ""} ${device?.driver || ""}`.toLowerCase();
+        return text.includes("wlan") || text.includes("wifi") || text.includes("802.11");
+      }
+
+      function updateWifiAvailability(devices = knownSdrDevices) {
+        wifiDeviceAvailable = (Array.isArray(devices) ? devices : []).some(isWifiDevice);
+        wifiInput.disabled = !wifiDeviceAvailable;
+        wifiToggle.classList.toggle("disabled", !wifiDeviceAvailable);
+        wifiToggle.title = wifiDeviceAvailable ? "" : "WiFi requires a WiFi interface listed by sdr-gateway";
+        if (!wifiDeviceAvailable) wifiInput.checked = false;
+      }
+
       function bestSharedBluetoothDevice(devices) {
         const candidates = Array.isArray(devices)
           ? devices.filter((dev) => String(dev?.id || "").trim() && covers24gIsm(dev))
@@ -1889,6 +1914,17 @@
           const bWide = bRate >= 60 ? 1 : 0;
           return (bWide - aWide) || (bRate - aRate);
         })[0] || null;
+      }
+
+      function bestNonBluetoothHopDevice(devices, bluetoothDeviceId = "") {
+        const blocked = String(bluetoothDeviceId || "").trim();
+        const candidates = (Array.isArray(devices) ? devices : [])
+          .filter((dev) => {
+            const id = String(dev?.id || "").trim();
+            return id && id !== blocked && id !== "wlan0" && !disabledSdrIds.has(id);
+          });
+        const preferred = candidates.find((dev) => /hackrf/i.test(`${dev?.id || ""} ${dev?.label || ""}`));
+        return preferred || candidates.sort((a, b) => deviceMaxRateMhz(b) - deviceMaxRateMhz(a))[0] || null;
       }
 
       function syncRateInputToSelection(forceCap = false) {
@@ -1921,7 +1957,7 @@
         if (btleInput.checked) protocols.push("ble");
         if (zigbeeInput.checked) protocols.push("zigbee");
         if (tpmsInput.checked) protocols.push("tpms");
-        if (wifiInput.checked) protocols.push("wifi");
+        if (!wifiInput.disabled && wifiInput.checked) protocols.push("wifi");
         if (fmInput.checked) protocols.push("fm");
         return protocols;
       }
@@ -1945,11 +1981,12 @@
           .map((item) => String(item).toLowerCase())
           .filter(Boolean));
         if (!values.size) return;
+        savedProtocolList = Array.from(values);
         btcInput.checked = values.has("btc");
         btleInput.checked = values.has("ble");
         zigbeeInput.checked = values.has("zigbee");
         tpmsInput.checked = values.has("tpms");
-        wifiInput.checked = values.has("wifi");
+        wifiInput.checked = wifiDeviceAvailable && values.has("wifi");
         fmInput.checked = values.has("fm");
       }
 
@@ -1966,6 +2003,7 @@
           const resp = await fetch("/api/config");
           const config = await resp.json().catch(() => ({}));
           if (!resp.ok) throw new Error(config.error || "Config load failed");
+          savedProtocolList = Array.isArray(config.protocols) ? config.protocols : [];
           applyProtocolList(config.protocols);
           applyDisabledSdrList(config.disabled_devices);
         } catch {
@@ -2008,6 +2046,8 @@
         if (!nextDevices.length && preserveOnEmpty && knownSdrDevices.length) return;
         if (!force && sameSdrList(nextDevices, knownSdrDevices) && sdrConfigList.children.length) return;
         knownSdrDevices = nextDevices;
+        updateWifiAvailability(knownSdrDevices);
+        if (savedProtocolList.length) applyProtocolList(savedProtocolList);
         sdrConfigList.innerHTML = knownSdrDevices.length
           ? knownSdrDevices.map((dev) => {
               const id = String(dev.id || "").trim();
@@ -2104,7 +2144,8 @@
           const sharedBluetooth = bestSharedBluetoothDevice(data);
           if (sharedBluetooth) {
             btcDeviceSelect.value = sharedBluetooth.id;
-            btleDeviceSelect.value = sharedBluetooth.id;
+            const alternateHop = bestNonBluetoothHopDevice(data, sharedBluetooth.id);
+            btleDeviceSelect.value = alternateHop?.id || sharedBluetooth.id;
           } else {
             selectMatch(btcDeviceSelect, "bladerf");
             selectMatch(btleDeviceSelect, "hackrf");
@@ -2120,6 +2161,7 @@
         } catch (err) {
           btcDeviceSelect.innerHTML = `<option>${err.message}</option>`;
           btleDeviceSelect.innerHTML = `<option>${err.message}</option>`;
+          updateWifiAvailability([]);
           renderSdrConfigList([], { preserveOnEmpty: true });
           devicesReady = false;
         } finally {
@@ -3143,7 +3185,11 @@
         function deviceRole(device) {
           const id = String(device?.id || "");
           const selectedClassic = String(status?.device_ids?.classic || status?.device_ids?.radio_a || selectedDeviceId(btcDeviceSelect) || "");
-          const selectedHop = String(status?.device_ids?.hop || status?.device_ids?.radio_b || selectedDeviceId(btleDeviceSelect) || "");
+          const separateBandsEnabled = enabledProtocols.has("zigbee") || enabledProtocols.has("tpms") || enabledProtocols.has("fm");
+          const inferredHop = separateBandsEnabled
+            ? bestNonBluetoothHopDevice(devices, selectedClassic)?.id || ""
+            : "";
+          const selectedHop = String(status?.device_ids?.hop || status?.device_ids?.radio_b || inferredHop || selectedDeviceId(btleDeviceSelect) || "");
           const isClassic = selectedClassic && id === selectedClassic;
           const isHop = selectedHop && id === selectedHop;
           const protocols = [];
@@ -3240,8 +3286,8 @@
             const pill = active
               ? `<span class="sdr-assignment-chips">${sdrProtocolChips(assignment)}</span>`
               : inferredChips
-                ? `<span class="sdr-assignment-chips">${inferredChips}</span>`
-                : `<span class="legend-pill">${scannerOwned ? "Scanning" : "Ready"}</span>`;
+                ? `<span class="sdr-assignment-chips">${inferredChips}<span class="legend-pill">Idle</span></span>`
+                : `<span class="legend-pill">${scannerOwned ? "Scanning" : "Idle"}</span>`;
             const center = active ? assignmentCenter(assignment) : "";
             const band = active
               ? `${assignment.band || "Scanning"}${center ? ` · center ${center}` : ""}`
