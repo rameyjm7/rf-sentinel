@@ -67,6 +67,7 @@ _load_env_file(PROJECT_ROOT / "config" / "env.txt")
 
 DATA_DIR = Path(__file__).resolve().parent / "data"
 RF_SENTINEL_CONTROL_PATH = DATA_DIR / "rf_sentinel_control.json"
+RF_SENTINEL_UI_CONFIG_PATH = DATA_DIR / "rf_sentinel_ui_config.json"
 RF_SENTINEL_NO_CHANGE = object()
 RF_SENTINEL_PROTOCOLS = {"btc", "ble", "zigbee", "tpms", "wifi", "fm"}
 RF_SENTINEL_DEFAULT_ZIGBEE_FOLLOW_CHANNEL = 25
@@ -3339,6 +3340,46 @@ def _write_rf_sentinel_control(
     return payload
 
 
+def _read_ui_config() -> dict[str, Any]:
+    try:
+        payload = json.loads(RF_SENTINEL_UI_CONFIG_PATH.read_text(encoding="utf-8"))
+    except (FileNotFoundError, OSError, json.JSONDecodeError):
+        payload = {}
+    if not isinstance(payload, dict):
+        payload = {}
+    protocols = payload.get("protocols")
+    if not isinstance(protocols, list):
+        protocols = sorted(RF_SENTINEL_PROTOCOLS)
+    disabled = payload.get("disabled_devices")
+    if not isinstance(disabled, list):
+        disabled = []
+    return {
+        "protocols": sorted({str(item).strip().lower() for item in protocols} & RF_SENTINEL_PROTOCOLS),
+        "disabled_devices": sorted({str(item).strip() for item in disabled if str(item).strip()}),
+    }
+
+
+def _write_ui_config(protocols: set[str], disabled_devices: set[str]) -> dict[str, Any]:
+    DATA_DIR.mkdir(parents=True, exist_ok=True)
+    payload = {
+        "protocols": sorted(protocols & RF_SENTINEL_PROTOCOLS),
+        "disabled_devices": sorted(str(item).strip() for item in disabled_devices if str(item).strip()),
+        "updated_at": time.time(),
+    }
+    tmp_path = RF_SENTINEL_UI_CONFIG_PATH.with_suffix(".json.tmp")
+    tmp_path.write_text(json.dumps(payload, separators=(",", ":"), sort_keys=True), encoding="utf-8")
+    tmp_path.replace(RF_SENTINEL_UI_CONFIG_PATH)
+    return payload
+
+
+def _enabled_devices_from_disabled(devices: list[dict[str, Any]], disabled_devices: set[str]) -> set[str]:
+    return {
+        str(item.get("id") or "").strip()
+        for item in devices
+        if str(item.get("id") or "").strip() and str(item.get("id") or "").strip() not in disabled_devices
+    }
+
+
 def _terminate_process_group(proc: subprocess.Popen[str], timeout_s: float = 4.0) -> None:
     try:
         os.killpg(proc.pid, signal.SIGTERM)
@@ -3670,6 +3711,13 @@ def update_scan_protocols():
     enabled_devices = None
     if isinstance(requested_devices, list):
         enabled_devices = {str(item).strip() for item in requested_devices if str(item).strip()}
+    disabled_devices = set()
+    if enabled_devices is not None:
+        known_devices = {str(item.get("id") or "").strip() for item in _available_devices() if str(item.get("id") or "").strip()}
+        disabled_devices = known_devices - enabled_devices
+    else:
+        disabled_devices = set(_read_ui_config().get("disabled_devices", []))
+    _write_ui_config(enabled_protocols, disabled_devices)
     _write_rf_sentinel_control(enabled_protocols, enabled_devices=enabled_devices)
     with state_lock:
         state.decoder_stats["enabled_protocols"] = sorted(enabled_protocols)
@@ -3906,6 +3954,31 @@ def devices():
         return jsonify({"error": "sdr-gateway is unavailable", "detail": str(exc), "gateway_base": _gateway_base()}), 503
 
 
+@app.get("/api/config")
+def get_config():
+    return jsonify(_read_ui_config())
+
+
+@app.post("/api/config")
+def update_config():
+    payload = request.get_json(silent=True) or {}
+    requested_protocols = payload.get("protocols")
+    if not isinstance(requested_protocols, list):
+        return _json_error(400, "update_config", error="protocols must be a list")
+    protocols = {str(item).strip().lower() for item in requested_protocols} & RF_SENTINEL_PROTOCOLS
+    requested_disabled = payload.get("disabled_devices")
+    if not isinstance(requested_disabled, list):
+        requested_disabled = []
+    disabled_devices = {str(item).strip() for item in requested_disabled if str(item).strip()}
+    config = _write_ui_config(protocols, disabled_devices)
+    enabled_devices = _enabled_devices_from_disabled(_available_devices(), disabled_devices)
+    _write_rf_sentinel_control(protocols, enabled_devices=enabled_devices)
+    with state_lock:
+        state.decoder_stats["enabled_protocols"] = sorted(protocols)
+        _append_scanner_log(f"[ui] config saved: {', '.join(sorted(protocols)) or 'none'}")
+    return jsonify({"ok": True, **config})
+
+
 @app.errorhandler(BadRequest)
 def handle_bad_request(exc: BadRequest):
     payload = {"error": "bad request", "detail": str(exc)}
@@ -3938,17 +4011,19 @@ def start_scan():
     btc_target_mac = str(payload.get("btc_target_mac", "")).strip()
     preserve_detections = bool(payload.get("preserve_detections", False))
     btc_engine = str(payload.get("btc_engine", BTC_ENGINE_DEFAULT) or BTC_ENGINE_DEFAULT).strip().lower()
+    saved_config = _read_ui_config()
     requested_protocols = payload.get("protocols")
     if isinstance(requested_protocols, list):
         enabled_protocols = {str(item).strip().lower() for item in requested_protocols}
     else:
-        enabled_protocols = set(RF_SENTINEL_PROTOCOLS)
+        enabled_protocols = {str(item).strip().lower() for item in saved_config.get("protocols", [])}
     enabled_protocols &= RF_SENTINEL_PROTOCOLS
     requested_devices = payload.get("devices")
     if isinstance(requested_devices, list):
         enabled_devices = {str(item).strip() for item in requested_devices if str(item).strip()}
     else:
-        enabled_devices = {str(item.get("id") or "").strip() for item in _available_devices() if str(item.get("id") or "").strip()}
+        disabled_devices = {str(item).strip() for item in saved_config.get("disabled_devices", []) if str(item).strip()}
+        enabled_devices = _enabled_devices_from_disabled(_available_devices(), disabled_devices)
     sweep_both_radios = bool(payload.get("sweep_both_radios", mode == "sentinel"))
     single_radio_bluetooth_requested = bool(payload.get("single_radio_bluetooth") or payload.get("bluetooth_single_radio"))
 
@@ -4272,6 +4347,7 @@ def stop_scan():
 @app.get("/api/status")
 def status():
     devices = _available_devices()
+    ui_config = _read_ui_config()
     with state_lock:
         return jsonify(
             {
@@ -4314,6 +4390,7 @@ def status():
                 "btc_engine_log": state.btc_engine_log,
                 "scanner_log": state.scanner_log[-160:],
                 "scanner_assignments": state.scanner_assignments,
+                "ui_config": ui_config,
                 "fm_playback": {"running": False},
                 "available_devices": devices,
                 "channel_activity": [

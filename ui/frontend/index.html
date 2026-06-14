@@ -497,6 +497,13 @@
         gap: 8px;
       }
 
+      .sdr-assignment-chips {
+        display: inline-flex;
+        flex-wrap: wrap;
+        justify-content: flex-end;
+        gap: 4px;
+      }
+
       .sdr-assignment-title {
         font-size: 0.8rem;
         font-weight: 800;
@@ -521,6 +528,31 @@
         color: var(--muted);
         font-size: 0.76rem;
         background: rgba(255, 253, 248, 0.5);
+      }
+
+      .toast {
+        position: fixed;
+        z-index: 80;
+        right: 18px;
+        bottom: 18px;
+        max-width: min(360px, calc(100vw - 36px));
+        padding: 10px 12px;
+        border: 1px solid rgba(20, 184, 166, 0.36);
+        border-radius: 10px;
+        color: #fffdf8;
+        background: linear-gradient(135deg, rgba(8, 47, 73, 0.96), rgba(20, 83, 45, 0.94));
+        box-shadow: 0 16px 44px rgba(0, 0, 0, 0.28);
+        font-size: 0.84rem;
+        font-weight: 800;
+        opacity: 0;
+        transform: translateY(10px);
+        pointer-events: none;
+        transition: opacity 160ms ease, transform 160ms ease;
+      }
+
+      .toast.show {
+        opacity: 1;
+        transform: translateY(0);
       }
 
       .hidden {
@@ -1479,6 +1511,7 @@
   </head>
   <body>
     <div id="followMenu" class="follow-menu" hidden></div>
+    <div id="toast" class="toast" role="status" aria-live="polite"></div>
     <div class="app">
       <header>
         <div>
@@ -1669,10 +1702,12 @@
       const candidatesEl = document.getElementById("candidates");
       const detectionViewSelect = document.getElementById("detectionViewSelect");
       const followMenu = document.getElementById("followMenu");
+      const toast = document.getElementById("toast");
       let devicesReady = false;
       let latestStatus = null;
       let knownSdrDevices = [];
       const disabledSdrIds = new Set();
+      let configLoaded = false;
       let activeDetectionTab = "ALL";
       let tableSort = { key: "last_seen_at", direction: "desc" };
       const detectionGroupOpen = new Map();
@@ -1855,6 +1890,60 @@
         return disabledSdrIds.size ? selectedSdrIds() : null;
       }
 
+      function disabledSdrPayload() {
+        return Array.from(disabledSdrIds).filter(Boolean).sort();
+      }
+
+      function applyProtocolList(protocols) {
+        const values = new Set((Array.isArray(protocols) ? protocols : [])
+          .map((item) => String(item).toLowerCase())
+          .filter(Boolean));
+        if (!values.size) return;
+        btcInput.checked = values.has("btc");
+        btleInput.checked = values.has("ble");
+        zigbeeInput.checked = values.has("zigbee");
+        tpmsInput.checked = values.has("tpms");
+        wifiInput.checked = values.has("wifi");
+        fmInput.checked = values.has("fm");
+      }
+
+      function applyDisabledSdrList(devices) {
+        disabledSdrIds.clear();
+        (Array.isArray(devices) ? devices : []).forEach((id) => {
+          const value = String(id || "").trim();
+          if (value) disabledSdrIds.add(value);
+        });
+      }
+
+      async function loadConfig() {
+        try {
+          const resp = await fetch("/api/config");
+          const config = await resp.json().catch(() => ({}));
+          if (!resp.ok) throw new Error(config.error || "Config load failed");
+          applyProtocolList(config.protocols);
+          applyDisabledSdrList(config.disabled_devices);
+        } catch {
+          // Defaults remain usable if the config file is missing or unreadable.
+        } finally {
+          configLoaded = true;
+          refreshPlannedStatusLabel();
+        }
+      }
+
+      async function saveConfig({ toastMessage = "Config saved" } = {}) {
+        const protocols = selectedProtocols();
+        const disabled_devices = disabledSdrPayload();
+        const resp = await fetch("/api/config", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ protocols, disabled_devices }),
+        });
+        const data = await resp.json().catch(() => ({}));
+        if (!resp.ok) throw new Error(data.error || data.detail || "Config save failed");
+        showToast(toastMessage);
+        return data;
+      }
+
       function isSidekiqDeviceId(id) {
         return String(id || "").trim().toLowerCase().startsWith("sidekiq:");
       }
@@ -1924,13 +2013,7 @@
       function syncProtocolCheckboxes(status) {
         const enabled = status?.decoder_stats?.enabled_protocols;
         if (!Array.isArray(enabled)) return;
-        const protocols = new Set(enabled.map((item) => String(item).toLowerCase()));
-        btcInput.checked = protocols.has("btc");
-        btleInput.checked = protocols.has("ble");
-        zigbeeInput.checked = protocols.has("zigbee");
-        tpmsInput.checked = protocols.has("tpms");
-        wifiInput.checked = protocols.has("wifi");
-        fmInput.checked = protocols.has("fm");
+        applyProtocolList(enabled);
       }
 
       function nextChannelValue() {
@@ -2113,6 +2196,16 @@
                   ? materialIcon("radio")
                   : materialIcon("sensors");
         return `<span class="chip ${protocolClass(value)}">${icon}${value}</span>`;
+      }
+
+      let toastTimer = null;
+
+      function showToast(message) {
+        if (!toast) return;
+        clearTimeout(toastTimer);
+        toast.textContent = message;
+        toast.classList.add("show");
+        toastTimer = setTimeout(() => toast.classList.remove("show"), 2600);
       }
 
       function fcsChip(row) {
@@ -2978,7 +3071,7 @@
           const sdrs = autoSdrCount(status);
           const active = Object.keys(status.scanner_assignments || {}).length;
           const enabled = new Set((status.decoder_stats?.enabled_protocols || selectedProtocols()).map((item) => String(item).toLowerCase()));
-          const ismPrefix = enabled.has("btc") && enabled.has("ble") ? "RF Sentinel 2.4 GHz ISM BTC+BLE shared stream" : "RF Sentinel multi-SDR sweep";
+          const ismPrefix = enabled.has("btc") && enabled.has("ble") ? "2.4 GHz ISM BTC+BLE shared stream" : "Multi-SDR sweep";
           const followChannel = status.follow_target?.zigbee?.channel ?? status.decoder_stats?.follow?.zigbee?.channel;
           if (followChannel !== undefined && followChannel !== null) {
             return `${ismPrefix} · ${active || sdrs || 0}/${sdrs || 0} radios active · Zigbee locked CH ${followChannel}`;
@@ -3025,7 +3118,26 @@
           if (canFm && enabledProtocols.has("fm")) bands.push("FM 87.7-107.9 MHz");
           if (bands.length) return `${bands.slice(0, 2).join(" · ")}${bands.length > 2 ? " · more" : ""}`;
           if (maxMsps > 0) return `RF sweep up to ${maxMsps.toFixed(1)} Msps`;
-          return "RF Sentinel scanning";
+          return "RF scanning";
+        }
+        function assignmentCenter(assignment) {
+          const text = `${assignment?.band || ""} ${assignment?.command || ""}`;
+          const centerMatch = text.match(/(?:center-mhz|center)\s+([0-9.]+)/i) || text.match(/([0-9.]+)\s*MHz/i);
+          if (centerMatch) return `${Number(centerMatch[1]).toFixed(3).replace(/\.?0+$/, "")} MHz`;
+          const channelMatch = text.match(/(?:Zigbee|CH|--channel)\s+([0-9]+)/i);
+          if (channelMatch && String(assignment?.protocol || "").toLowerCase() === "zigbee") {
+            return `CH ${channelMatch[1]} · ${2405 + ((Number(channelMatch[1]) - 11) * 5)} MHz`;
+          }
+          return "";
+        }
+        function sdrProtocolChips(assignment) {
+          if (!assignment) return "";
+          const protocol = String(assignment.protocol || "").toUpperCase();
+          const band = String(assignment.band || "");
+          if (protocol === "BTC" && /BTC\+BLE|BTC\+BTLE|shared/i.test(band)) {
+            return `${protocolChip("BTC")}${protocolChip("BTLE")}`;
+          }
+          return protocolChip(protocol || "RF");
         }
         devices
           .filter((device) => String(device?.id || "").trim() && String(device?.id || "").trim() !== "wlan0")
@@ -3034,18 +3146,18 @@
             const assignment = assignments[device.id] || null;
             const active = Boolean(assignment);
             const disabled = disabledSdrIds.has(String(device.id || ""));
+            if (disabled) return;
             const title = device.label || device.id;
             const driver = String(device.driver || "").toUpperCase();
             const scannerRunning = Boolean(status?.running || status?.worker_alive);
-            const scannerOwned = !disabled && (scannerRunning || active || Boolean(device.occupied));
+            const scannerOwned = scannerRunning || active || Boolean(device.occupied);
             const pill = active
-              ? protocolChip(String(assignment.protocol || "").toUpperCase())
-              : `<span class="legend-pill">${disabled ? "Disabled" : scannerOwned ? "Scanning" : "Ready"}</span>`;
+              ? `<span class="sdr-assignment-chips">${sdrProtocolChips(assignment)}</span>`
+              : `<span class="legend-pill">${scannerOwned ? "Scanning" : "Ready"}</span>`;
+            const center = active ? assignmentCenter(assignment) : "";
             const band = active
-              ? (assignment.band || "Scanning")
-              : disabled
-                ? "Disabled in Config"
-                : fallbackSdrBand(device);
+              ? `${assignment.band || "Scanning"}${center ? ` · center ${center}` : ""}`
+              : fallbackSdrBand(device);
             const when = active && assignment.seen_at ? `${Math.max(0, Math.round(Date.now() / 1000 - Number(assignment.seen_at)))}s ago` : "";
             cards.push(`
               <div class="sdr-assignment">
@@ -3139,6 +3251,8 @@
           runToggleBtn.querySelector(".material-symbols-rounded").textContent = status.running ? "stop" : "play_arrow";
           if (status.running) syncModeCheckboxes(status.mode);
           if (status.running) syncProtocolCheckboxes(status);
+          if (configLoaded && !status.running && Array.isArray(status.ui_config?.protocols)) applyProtocolList(status.ui_config.protocols);
+          if (configLoaded && Array.isArray(status.ui_config?.disabled_devices)) applyDisabledSdrList(status.ui_config.disabled_devices);
           if (Array.isArray(status.available_devices)) renderSdrConfigList(status.available_devices, { preserveOnEmpty: true });
           const rows = status.discovery_table || [];
           const detectionTotal = rows.reduce((sum, row) => sum + Number(row.detections || 0), 0);
@@ -3172,8 +3286,17 @@
       async function applyProtocolSelection() {
         refreshPlannedStatusLabel();
         const protocols = selectedProtocols();
-        if (!latestStatus?.running) return;
+        const label = protocols.map((item) => item.toUpperCase()).join("+") || "paused";
+        if (!latestStatus?.running) {
+          try {
+            await saveConfig({ toastMessage: `Config saved: ${label}` });
+          } catch (err) {
+            showToast(err.message || "Config save failed");
+          }
+          return;
+        }
         try {
+          await saveConfig({ toastMessage: `Config saved: ${label}` });
           const resp = await fetch("/api/scan/protocols", {
             method: "POST",
             headers: { "Content-Type": "application/json" },
@@ -3181,10 +3304,10 @@
           });
           const data = await resp.json().catch(() => ({}));
           if (!resp.ok) throw new Error(data.error || data.detail || "Protocol update failed");
-          const label = protocols.map((item) => item.toUpperCase()).join("+") || "paused";
           runState.textContent = `Updated protocols: ${label}`;
         } catch (err) {
           runState.textContent = err.message || "Protocol update failed";
+          showToast(runState.textContent);
         }
       }
 
@@ -3347,6 +3470,10 @@
       sampleRateInput.addEventListener("input", refreshPlannedStatusLabel);
       detectionViewSelect.addEventListener("change", pollStatus);
       hopDwellInput.addEventListener("change", scheduleAutoHop);
+      document.addEventListener("click", (event) => {
+        if (!configMenu.open || configMenu.contains(event.target)) return;
+        configMenu.open = false;
+      });
       sdrConfigList.addEventListener("change", async (event) => {
         const input = event.target.closest("[data-sdr-id]");
         if (!input) return;
@@ -3354,6 +3481,7 @@
         if (!id) return;
         if (input.checked) disabledSdrIds.delete(id);
         else disabledSdrIds.add(id);
+        showToast(`${id} ${input.checked ? "enabled" : "disabled"}`);
         await applyProtocolSelection();
         refreshPlannedStatusLabel();
       });
@@ -3405,8 +3533,11 @@
       });
       window.addEventListener("blur", hideFollowMenu);
       setChannels();
-      loadDevices();
-      pollStatus();
+      (async () => {
+        await loadConfig();
+        await loadDevices();
+        pollStatus();
+      })();
       setInterval(pollStatus, 900);
     </script>
   </body>
