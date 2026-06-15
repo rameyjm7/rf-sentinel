@@ -27,6 +27,7 @@ DEFAULT_ZIGBEE_FOLLOW_SAMPLE_RATE_SPS = 8_000_000
 DEFAULT_WIFI_INTERFACE = "wlan0"
 DEFAULT_FM_SAMPLE_RATE_SPS = 20_000_000
 DEFAULT_FM_INTERVAL_S = 60.0
+DEFAULT_LFMF_INTERVAL_S = 120.0
 
 
 @dataclass(frozen=True)
@@ -322,6 +323,31 @@ def _build_jobs(args: argparse.Namespace) -> tuple[list[ScanJob], list[ScanJob]]
             ],
         )
 
+    def lfmf_job(name: str, device_id: str) -> ScanJob:
+        command = [
+            _bin("lowfreq-scan"),
+            "scan",
+            "--device-id",
+            device_id,
+            "--band",
+            args.lfmf_band,
+            "--sample-rate-sps",
+            str(args.lfmf_sample_rate_sps),
+            "--bandwidth-hz",
+            str(args.lfmf_bandwidth_hz),
+            "--dwell-s",
+            str(args.lfmf_dwell_s),
+            "--active-threshold-db",
+            str(args.lfmf_active_threshold_db),
+            "--top",
+            str(args.lfmf_top_signals),
+            "--jsonl",
+            "--yes",
+        ]
+        if args.lfmf_serial:
+            command.extend(["--serial", args.lfmf_serial])
+        return ScanJob(name=name, protocol="lfmf", dwell_s=args.lfmf_slice_s, command=command)
+
     if bool(args.sweep_both_radios):
         radios = [
             ("radio_a", args.radio_a_device_id or args.btc_device_id, args.radio_a_btc_bandwidth_mhz, args.btc_lna_gain_db, args.btc_vga_gain_db),
@@ -340,6 +366,8 @@ def _build_jobs(args: argparse.Namespace) -> tuple[list[ScanJob], list[ScanJob]]
                 cycled.append(tpms_job(f"{prefix}:tpms", device_id))
             if not args.no_fm:
                 cycled.append(fm_job(f"{prefix}:fm", device_id))
+            if not args.no_lfmf and _is_sdrplay_device_id(device_id):
+                cycled.append(lfmf_job(f"{prefix}:lfmf", device_id))
         if not args.no_wifi:
             cycled.append(wifi_job("wifi"))
         return continuous, cycled
@@ -364,6 +392,13 @@ def _build_jobs(args: argparse.Namespace) -> tuple[list[ScanJob], list[ScanJob]]
     if not args.no_fm:
         cycled.append(fm_job("fm", args.hop_device_id))
 
+    if not args.no_lfmf:
+        lfmf_device_id = _pick_lfmf_device_id(args)
+        if lfmf_device_id:
+            cycled.append(lfmf_job("lfmf", lfmf_device_id))
+        else:
+            print("[rf-sentinel] VLF/LF/MF disabled; no allowed SDRplay RSP2 device", flush=True)
+
     if not args.no_wifi:
         cycled.append(wifi_job("wifi"))
 
@@ -371,7 +406,7 @@ def _build_jobs(args: argparse.Namespace) -> tuple[list[ScanJob], list[ScanJob]]
 
 
 def _configured_protocols(args: argparse.Namespace) -> set[str]:
-    protocols = {"btc", "ble", "zigbee", "tpms", "wifi", "fm"}
+    protocols = {"btc", "ble", "zigbee", "tpms", "wifi", "fm", "lfmf"}
     if args.no_btc:
         protocols.discard("btc")
     if args.no_ble:
@@ -384,7 +419,25 @@ def _configured_protocols(args: argparse.Namespace) -> set[str]:
         protocols.discard("wifi")
     if args.no_fm:
         protocols.discard("fm")
+    if args.no_lfmf:
+        protocols.discard("lfmf")
     return protocols
+
+
+def _is_sdrplay_device_id(device_id: str) -> bool:
+    text = str(device_id or "").strip().lower()
+    return text.startswith("sdrplay:")
+
+
+def _pick_lfmf_device_id(args: argparse.Namespace) -> str:
+    allowed = [str(item).strip() for item in getattr(args, "allowed_device_id", []) if str(item).strip()]
+    for device_id in allowed:
+        if _is_sdrplay_device_id(device_id):
+            return device_id
+    for device_id in (getattr(args, "lfmf_device_id", ""), getattr(args, "hop_device_id", ""), getattr(args, "radio_b_device_id", ""), getattr(args, "btc_device_id", "")):
+        if _is_sdrplay_device_id(str(device_id)):
+            return str(device_id)
+    return ""
 
 
 def _control_payload(args: argparse.Namespace) -> dict[str, object]:
@@ -498,6 +551,8 @@ def _priority_protocol(args: argparse.Namespace, job: ScanJob) -> str:
 def _job_interval_s(args: argparse.Namespace, job: ScanJob) -> float:
     if job.protocol == "fm":
         return max(1.0, float(args.fm_interval_s))
+    if job.protocol == "lfmf":
+        return max(1.0, float(args.lfmf_interval_s))
     return 0.0
 
 
@@ -727,12 +782,24 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--fm-lna-gain-db", type=int, default=32)
     parser.add_argument("--fm-vga-gain-db", type=int, default=32)
 
+    parser.add_argument("--lfmf-device-id", default="sdrplay:0", help="SDRplay device reserved for VLF/LF/MF scans")
+    parser.add_argument("--lfmf-serial", default=os.getenv("SDRPLAY_SERIAL", ""))
+    parser.add_argument("--lfmf-band", choices=("vlf", "lf", "mf", "am", "1khz-1mhz", "vlf-lf-mf"), default="vlf-lf-mf")
+    parser.add_argument("--lfmf-slice-s", type=float, default=90.0)
+    parser.add_argument("--lfmf-interval-s", type=float, default=DEFAULT_LFMF_INTERVAL_S)
+    parser.add_argument("--lfmf-sample-rate-sps", type=int, default=250_000)
+    parser.add_argument("--lfmf-bandwidth-hz", type=int, default=80_000)
+    parser.add_argument("--lfmf-dwell-s", type=float, default=0.16)
+    parser.add_argument("--lfmf-active-threshold-db", type=float, default=6.0)
+    parser.add_argument("--lfmf-top-signals", type=int, default=50)
+
     parser.add_argument("--no-btc", action="store_true")
     parser.add_argument("--no-ble", action="store_true")
     parser.add_argument("--no-zigbee", action="store_true")
     parser.add_argument("--no-tpms", action="store_true")
     parser.add_argument("--no-wifi", action="store_true")
     parser.add_argument("--no-fm", action="store_true")
+    parser.add_argument("--no-lfmf", action="store_true")
     parser.add_argument(
         "--allowed-device-id",
         action="append",

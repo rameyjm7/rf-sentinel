@@ -2,11 +2,20 @@ from __future__ import annotations
 
 import numpy as np
 
+from am_broadcast.cli import BAND_PRESETS, _resolve_scan_plan
 from am_broadcast.dsp import channel_grid, cs16_to_complex, measure_am_channel
 
 
 def test_channel_grid_uses_inclusive_khz_range() -> None:
     assert channel_grid(530, 560, 10) == [530_000, 540_000, 550_000, 560_000]
+
+
+def test_band_presets_cover_vlf_lf_mf() -> None:
+    assert BAND_PRESETS["vlf"].start_khz == 3
+    assert BAND_PRESETS["lf"].start_khz == 30
+    assert BAND_PRESETS["mf"].stop_khz == 3000
+    assert BAND_PRESETS["1khz-1mhz"].start_khz == 1
+    assert BAND_PRESETS["1khz-1mhz"].stop_khz == 1000
 
 
 def test_cs16_to_complex_reads_interleaved_iq() -> None:

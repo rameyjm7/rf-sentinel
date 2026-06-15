@@ -71,7 +71,7 @@ RF_SENTINEL_LOG_DIR = Path(os.getenv("RF_SENTINEL_LOG_DIR", "/var/log/rf_sentine
 RF_SENTINEL_CONTROL_PATH = RF_SENTINEL_LOG_DIR / "rf_sentinel_control.json"
 RF_SENTINEL_UI_CONFIG_PATH = RF_SENTINEL_LOG_DIR / "rf_sentinel_ui_config.json"
 RF_SENTINEL_NO_CHANGE = object()
-RF_SENTINEL_PROTOCOLS = {"btc", "ble", "zigbee", "tpms", "wifi", "fm"}
+RF_SENTINEL_PROTOCOLS = {"btc", "ble", "zigbee", "tpms", "wifi", "fm", "lfmf"}
 RF_SENTINEL_KEEP_BAD_FCS = os.getenv("RF_SENTINEL_KEEP_BAD_FCS", "0").strip().lower() in {"1", "true", "yes", "on"}
 BLE_IDENTITY_CACHE_PATH = DATA_DIR / "ble_identities.json"
 COMPANY_IDENTIFIERS_PATH = DATA_DIR / "company_identifiers.json"
@@ -3236,6 +3236,51 @@ def _scanner_json_to_events(source: str, payload: dict[str, Any]) -> list[dict[s
             }
         ]
 
+    if protocol == "lfmf" or source_protocol == "lfmf":
+        frequency_hz = payload.get("frequency_hz") or payload.get("freq_hz")
+        frequency_khz = payload.get("frequency_khz") or payload.get("freq_khz")
+        try:
+            frequency_hz_int = int(frequency_hz)
+        except (TypeError, ValueError):
+            try:
+                frequency_hz_int = int(float(frequency_khz) * 1000)
+            except (TypeError, ValueError):
+                frequency_hz_int = 0
+        label = f"{frequency_hz_int / 1000:.1f} kHz" if frequency_hz_int else "VLF/LF/MF signal"
+        band_label = str(payload.get("band_label") or payload.get("band") or "VLF/LF/MF").strip()
+        detail_bits = [
+            band_label,
+            f"carrier {float(payload.get('carrier_dbfs')):.1f} dBFS" if payload.get("carrier_dbfs") is not None else "",
+            f"SNR {float(payload.get('carrier_snr_db')):.1f} dB" if payload.get("carrier_snr_db") is not None else "",
+            f"excess {float(payload.get('excess_db')):.1f} dB" if payload.get("excess_db") is not None else "",
+            f"mod {float(payload.get('modulation_pct')):.1f}%" if payload.get("modulation_pct") is not None else "",
+        ]
+        return [
+            {
+                "kind": "lfmf_signal",
+                "protocol": "LFMF",
+                "seen_at": now,
+                "identity": f"{band_label} {label}",
+                "mac": str(frequency_hz_int or label),
+                "detail": " · ".join(bit for bit in detail_bits if bit),
+                "device_type": "VLF/LF/MF signal",
+                "device_type_detail": band_label,
+                "center_freq_hz": frequency_hz_int or None,
+                "frequency_hz": frequency_hz_int or None,
+                "frequency_khz": frequency_khz,
+                "last_rssi_dbfs": payload.get("carrier_dbfs") or payload.get("power_dbfs"),
+                "power_dbfs": payload.get("power_dbfs"),
+                "carrier_dbfs": payload.get("carrier_dbfs"),
+                "carrier_snr_db": payload.get("carrier_snr_db"),
+                "excess_db": payload.get("excess_db"),
+                "audio_dbfs": payload.get("audio_dbfs"),
+                "modulation_pct": payload.get("modulation_pct"),
+                "band": payload.get("band"),
+                "band_label": band_label,
+                "active": payload.get("active"),
+            }
+        ]
+
     return []
 
 
@@ -3265,6 +3310,7 @@ def _append_detections(events: list[dict[str, Any]], candidates: list[dict[str, 
                 "tpms_frame": "tpms",
                 "wifi_frame": "wifi",
                 "fm_station": "fm",
+                "lfmf_signal": "lfmf",
             }.get(str(event.get("kind") or ""))
             if mode_key:
                 rssi = _real_rssi(event.get("rssi_dbfs", event.get("last_rssi_dbfs")))
@@ -3280,7 +3326,7 @@ def _append_detections(events: list[dict[str, Any]], candidates: list[dict[str, 
                         state.noise_floor_dbfs = round((state.noise_floor_dbfs * 0.92) + (rssi * 0.08), 1)
                 except (TypeError, ValueError):
                     pass
-            if event["kind"] in {"ble_adv", "classic_lap", "zigbee_frame", "tpms_frame", "wifi_frame", "fm_station"}:
+            if event["kind"] in {"ble_adv", "classic_lap", "zigbee_frame", "tpms_frame", "wifi_frame", "fm_station", "lfmf_signal"}:
                 _upsert_discovery_row(event)
             if event["kind"] == "classic_lap":
                 _upsert_classic_address(event)
@@ -3493,6 +3539,33 @@ def _upsert_discovery_row(event: dict[str, Any]) -> None:
             "rds_subcarrier_db": event.get("rds_subcarrier_db"),
             "stereo_likely": event.get("stereo_likely"),
             "rds_likely": event.get("rds_likely"),
+        }
+    elif event.get("kind") == "lfmf_signal":
+        identity = str(event.get("identity") or "VLF/LF/MF signal")
+        frequency_hz = event.get("frequency_hz") or event.get("center_freq_hz")
+        row = {
+            "key": f"lfmf:{frequency_hz or identity}",
+            "protocol": "LFMF",
+            "identity": identity,
+            "mac": str(frequency_hz or identity),
+            "detail": str(event.get("detail") or "VLF/LF/MF signal"),
+            "device_type": str(event.get("device_type") or "VLF/LF/MF signal"),
+            "device_type_detail": str(event.get("device_type_detail") or ""),
+            "detections": 1,
+            "last_seen_at": now,
+            "last_rssi_dbfs": event.get("last_rssi_dbfs") or event.get("carrier_dbfs") or event.get("power_dbfs"),
+            "center_freq_hz": frequency_hz,
+            "frequency_hz": frequency_hz,
+            "frequency_khz": event.get("frequency_khz"),
+            "power_dbfs": event.get("power_dbfs"),
+            "carrier_dbfs": event.get("carrier_dbfs"),
+            "carrier_snr_db": event.get("carrier_snr_db"),
+            "excess_db": event.get("excess_db"),
+            "audio_dbfs": event.get("audio_dbfs"),
+            "modulation_pct": event.get("modulation_pct"),
+            "band": event.get("band"),
+            "band_label": event.get("band_label"),
+            "active": event.get("active"),
         }
     else:
         return
@@ -3938,6 +4011,21 @@ def _has_wifi_device(devices: list[dict[str, Any]], enabled_devices: set[str] | 
     return False
 
 
+def _is_sdrplay_device(item: dict[str, Any]) -> bool:
+    text = f"{item.get('id') or ''} {item.get('label') or ''} {item.get('driver') or ''}".lower()
+    return "sdrplay" in text and ("rsp2" in text or str(item.get("id") or "").lower().startswith("sdrplay:"))
+
+
+def _has_lfmf_device(devices: list[dict[str, Any]], enabled_devices: set[str] | None = None) -> bool:
+    for item in devices:
+        device_id = str(item.get("id") or "").strip()
+        if enabled_devices is not None and device_id not in enabled_devices:
+            continue
+        if _is_sdrplay_device(item):
+            return True
+    return False
+
+
 def _terminate_process_group(proc: subprocess.Popen[str], timeout_s: float = 4.0) -> None:
     try:
         os.killpg(proc.pid, signal.SIGTERM)
@@ -4016,6 +4104,16 @@ def _scanner_band_from_command(command: str, protocol: str) -> str:
             return "315 / 433.92 MHz"
     if protocol == "fm":
         return "87.7-107.9 MHz"
+    if protocol == "lfmf":
+        match = re.search(r"--band\s+(\S+)", text)
+        if match:
+            band = match.group(1)
+            if band == "vlf-lf-mf":
+                return "VLF/LF/MF 3 kHz-3 MHz"
+            if band == "1khz-1mhz":
+                return "VLF/LF/lower-MF 1 kHz-1 MHz"
+            return band.upper()
+        return "VLF/LF/MF"
     if protocol == "wifi":
         match = re.search(r"--channels\s+([0-9,]+)", text)
         if match:
@@ -4212,6 +4310,8 @@ def _start_rf_sentinel_engine(
         cmd.append("--no-wifi")
     if "fm" not in protocols:
         cmd.append("--no-fm")
+    if "lfmf" not in protocols:
+        cmd.append("--no-lfmf")
     # Start in discovery mode; only the explicit right-click Follow action locks Zigbee.
     zigbee_follow_channel = None
     control = _write_rf_sentinel_control(
@@ -4275,6 +4375,8 @@ def update_scan_protocols():
         disabled_devices = set(_read_ui_config().get("disabled_devices", []))
     if "wifi" in enabled_protocols and not _has_wifi_device(devices_available, enabled_devices):
         enabled_protocols.discard("wifi")
+    if "lfmf" in enabled_protocols and not _has_lfmf_device(devices_available, enabled_devices):
+        enabled_protocols.discard("lfmf")
     _write_ui_config(enabled_protocols, disabled_devices)
     control = _write_rf_sentinel_control(
         enabled_protocols,
@@ -4661,6 +4763,8 @@ def update_config():
     enabled_devices = _enabled_devices_from_disabled(devices_available, disabled_devices)
     if "wifi" in protocols and not _has_wifi_device(devices_available, enabled_devices):
         protocols.discard("wifi")
+    if "lfmf" in protocols and not _has_lfmf_device(devices_available, enabled_devices):
+        protocols.discard("lfmf")
     config = _write_ui_config(protocols, disabled_devices)
     control = _write_rf_sentinel_control(
         protocols,
@@ -4738,6 +4842,8 @@ def start_scan():
     devices_available = _available_devices()
     if "wifi" in enabled_protocols and not _has_wifi_device(devices_available, enabled_devices):
         enabled_protocols.discard("wifi")
+    if "lfmf" in enabled_protocols and not _has_lfmf_device(devices_available, enabled_devices):
+        enabled_protocols.discard("lfmf")
     if mode == "sentinel" and not enabled_protocols:
         return _json_error(400, "start_scan", error="select at least one available protocol")
     combined_bluetooth_protocols = "btc" in enabled_protocols and "ble" in enabled_protocols

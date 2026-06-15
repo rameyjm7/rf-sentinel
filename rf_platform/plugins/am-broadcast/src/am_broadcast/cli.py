@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import argparse
+import contextlib
 import csv
 import json
 import os
@@ -20,6 +21,65 @@ DEFAULT_STOP_KHZ = 1700
 DEFAULT_STEP_KHZ = 10
 DEFAULT_SAMPLE_RATE_SPS = 250_000
 DEFAULT_BANDWIDTH_HZ = 80_000
+DEFAULT_BAND = "am"
+
+
+@dataclass(frozen=True)
+class BandPreset:
+    label: str
+    start_khz: int
+    stop_khz: int
+    step_khz: int
+    description: str
+
+
+BAND_PRESETS: dict[str, BandPreset] = {
+    "vlf": BandPreset("VLF", 3, 30, 1, "Very Low Frequency, 3-30 kHz"),
+    "lf": BandPreset("LF", 30, 300, 5, "Low Frequency, 30-300 kHz"),
+    "mf": BandPreset("MF", 300, 3000, 10, "Medium Frequency, 300 kHz-3 MHz"),
+    "am": BandPreset("AM broadcast", 530, 1700, 10, "Medium-wave AM broadcast band"),
+    "1khz-1mhz": BandPreset("1 kHz-1 MHz", 1, 1000, 5, "VLF/LF/lower-MF survey range"),
+    "vlf-lf-mf": BandPreset("VLF/LF/MF", 3, 3000, 10, "VLF through MF survey range"),
+}
+
+
+@contextlib.contextmanager
+def _suppress_native_output(enabled: bool) -> Any:
+    if not enabled:
+        yield
+        return
+    sys.stdout.flush()
+    sys.stderr.flush()
+    saved_stdout = os.dup(1)
+    saved_stderr = os.dup(2)
+    try:
+        with open(os.devnull, "w", encoding="utf-8") as devnull:
+            os.dup2(devnull.fileno(), 1)
+            os.dup2(devnull.fileno(), 2)
+            yield
+    finally:
+        sys.stdout.flush()
+        sys.stderr.flush()
+        os.dup2(saved_stdout, 1)
+        os.dup2(saved_stderr, 2)
+        os.close(saved_stdout)
+        os.close(saved_stderr)
+
+
+@contextlib.contextmanager
+def _soapy_log_level(SoapySDR: Any, level: int | None) -> Any:
+    if level is None or not hasattr(SoapySDR, "setLogLevel"):
+        yield
+        return
+    previous = None
+    try:
+        if hasattr(SoapySDR, "getLogLevel"):
+            previous = SoapySDR.getLogLevel()
+        SoapySDR.setLogLevel(level)
+        yield
+    finally:
+        if previous is not None:
+            SoapySDR.setLogLevel(previous)
 
 
 @dataclass
@@ -34,6 +94,29 @@ class ScanResult:
     excess_db: float
     samples: int
     active: bool
+
+
+@dataclass(frozen=True)
+class ReceiverConfig:
+    sample_rate_sps: int
+    bandwidth_hz: int
+    tune_offset_hz: int
+    format: str = "CS16"
+
+
+@dataclass(frozen=True)
+class ScanPlan:
+    band: str
+    label: str
+    start_khz: int
+    stop_khz: int
+    step_khz: int
+
+    @property
+    def channel_count(self) -> int:
+        if self.stop_khz < self.start_khz or self.step_khz <= 0:
+            return 0
+        return ((self.stop_khz - self.start_khz) // self.step_khz) + 1
 
 
 def _load_soapysdr() -> Any:
@@ -86,7 +169,20 @@ def _set_named_gain(SoapySDR: Any, dev: Any, name: str, value: float, *, debug: 
         _try_call(f"gain:{name}", dev.setGain, SoapySDR.SOAPY_SDR_RX, 0, name, float(value), debug=debug)
 
 
-def _configure_receiver(SoapySDR: Any, dev: Any, args: argparse.Namespace) -> Any:
+def _read_int_setting(label: str, fallback: int, func: Any, *args: Any, debug: bool = False) -> int:
+    try:
+        value = func(*args)
+    except Exception as exc:
+        if debug:
+            print(f"am_broadcast_readback_warning setting={label} error={exc}", file=sys.stderr, flush=True)
+        return int(fallback)
+    try:
+        return int(round(float(value)))
+    except (TypeError, ValueError):
+        return int(fallback)
+
+
+def _configure_receiver(SoapySDR: Any, dev: Any, args: argparse.Namespace) -> tuple[Any, ReceiverConfig]:
     direction = SoapySDR.SOAPY_SDR_RX
     channel = 0
     _try_call("sample_rate", dev.setSampleRate, direction, channel, int(args.sample_rate_sps), debug=args.debug)
@@ -98,7 +194,38 @@ def _configure_receiver(SoapySDR: Any, dev: Any, args: argparse.Namespace) -> An
         _try_call("antenna", dev.setAntenna, direction, channel, str(args.antenna), debug=args.debug)
     stream = dev.setupStream(direction, SoapySDR.SOAPY_SDR_CS16, [channel])
     dev.activateStream(stream)
-    return stream
+    config = ReceiverConfig(
+        sample_rate_sps=_read_int_setting(
+            "sample_rate",
+            int(args.sample_rate_sps),
+            dev.getSampleRate,
+            direction,
+            channel,
+            debug=args.debug,
+        ),
+        bandwidth_hz=_read_int_setting(
+            "bandwidth",
+            int(args.bandwidth_hz),
+            dev.getBandwidth,
+            direction,
+            channel,
+            debug=args.debug,
+        ),
+        tune_offset_hz=int(args.tune_offset_hz),
+    )
+    return stream, config
+
+
+def _resolve_scan_plan(args: argparse.Namespace) -> ScanPlan:
+    band = str(args.band)
+    preset = BAND_PRESETS.get(band)
+    if preset is None:
+        preset = BAND_PRESETS[DEFAULT_BAND]
+    start_khz = preset.start_khz if args.start_khz is None else int(args.start_khz)
+    stop_khz = preset.stop_khz if args.stop_khz is None else int(args.stop_khz)
+    step_khz = preset.step_khz if args.step_khz is None else int(args.step_khz)
+    label = "Custom" if args.start_khz is not None or args.stop_khz is not None or args.step_khz is not None else preset.label
+    return ScanPlan(band=band, label=label, start_khz=start_khz, stop_khz=stop_khz, step_khz=step_khz)
 
 
 def _capture_channel(SoapySDR: Any, dev: Any, stream: Any, freq_hz: int, args: argparse.Namespace) -> np.ndarray:
@@ -130,13 +257,26 @@ def _capture_channel(SoapySDR: Any, dev: Any, stream: Any, freq_hz: int, args: a
 
 def _scan(args: argparse.Namespace) -> int:
     SoapySDR = _load_soapysdr()
-    freqs = channel_grid(int(args.start_khz), int(args.stop_khz), int(args.step_khz))
+    scan_plan = _resolve_scan_plan(args)
+    freqs = channel_grid(scan_plan.start_khz, scan_plan.stop_khz, scan_plan.step_khz)
     if not freqs:
-        print("No AM channels in requested range.", file=sys.stderr)
+        print("No channels in requested range.", file=sys.stderr)
+        return 2
+    if scan_plan.channel_count > 400 and not args.yes:
+        estimated_s = scan_plan.channel_count * max(0.02, float(args.dwell_s))
+        print(
+            f"Refusing long scan: {scan_plan.channel_count} channels, about {estimated_s:.0f}s of dwell time. "
+            "Use --yes to run it, or increase --step-khz.",
+            file=sys.stderr,
+        )
         return 2
 
-    dev = _open_sdrplay(SoapySDR, args)
-    stream = _configure_receiver(SoapySDR, dev, args)
+    quiet_log_level = None if args.show_driver_log else int(getattr(SoapySDR, "SOAPY_SDR_ERROR", 3))
+    with _soapy_log_level(SoapySDR, quiet_log_level), _suppress_native_output(not bool(args.show_driver_log)):
+        dev = _open_sdrplay(SoapySDR, args)
+        stream, receiver_config = _configure_receiver(SoapySDR, dev, args)
+        if not args.show_driver_log:
+            time.sleep(0.05)
     raw_results: list[tuple[int, AMMetrics]] = []
     try:
         for index, freq_hz in enumerate(freqs, start=1):
@@ -168,7 +308,7 @@ def _scan(args: argparse.Namespace) -> int:
         rows.sort(key=lambda row: row.freq_hz)
     if args.top > 0:
         rows = rows[: int(args.top)]
-    _print_results(rows, args, noise_floor)
+    _print_results(rows, args, noise_floor, receiver_config, scan_plan)
     return 0
 
 
@@ -188,9 +328,46 @@ def _to_result(freq_hz: int, metrics: AMMetrics, noise_floor: float, active_thre
     )
 
 
-def _print_results(rows: list[ScanResult], args: argparse.Namespace, noise_floor: float) -> None:
+def _print_results(
+    rows: list[ScanResult],
+    args: argparse.Namespace,
+    noise_floor: float,
+    receiver_config: ReceiverConfig,
+    scan_plan: ScanPlan,
+) -> None:
+    if args.jsonl:
+        for row in rows:
+            if args.active_only and not row.active:
+                continue
+            payload = asdict(row)
+            payload.update(
+                {
+                    "protocol": "lfmf",
+                    "kind": "lfmf_signal",
+                    "band": scan_plan.band,
+                    "band_label": scan_plan.label,
+                    "frequency_hz": row.freq_hz,
+                    "frequency_khz": row.freq_khz,
+                    "sample_rate_sps": receiver_config.sample_rate_sps,
+                    "bandwidth_hz": receiver_config.bandwidth_hz,
+                    "tune_offset_hz": receiver_config.tune_offset_hz,
+                    "timestamp": time.time(),
+                }
+            )
+            print(json.dumps(payload, separators=(",", ":")), flush=True)
+        return
     if args.json:
-        print(json.dumps({"noise_floor_dbfs": round(noise_floor, 1), "stations": [asdict(row) for row in rows]}, indent=2))
+        print(
+            json.dumps(
+                {
+                    "noise_floor_dbfs": round(noise_floor, 1),
+                    "receiver": asdict(receiver_config),
+                    "scan_plan": asdict(scan_plan),
+                    "signals": [asdict(row) for row in rows],
+                },
+                indent=2,
+            )
+        )
         return
     if args.csv:
         writer = csv.DictWriter(sys.stdout, fieldnames=list(asdict(rows[0]).keys()) if rows else list(ScanResult.__dataclass_fields__.keys()))
@@ -199,8 +376,10 @@ def _print_results(rows: list[ScanResult], args: argparse.Namespace, noise_floor
             writer.writerow(asdict(row))
         return
     print(
-        f"AM broadcast scan  carrier_floor={noise_floor:.1f} dBFS  threshold=+{float(args.active_threshold_db):.1f} dB  "
-        f"tune_offset={int(args.tune_offset_hz)} Hz"
+        f"{scan_plan.label} scan  range={scan_plan.start_khz}-{scan_plan.stop_khz} kHz  step={scan_plan.step_khz} kHz  "
+        f"sample_rate={receiver_config.sample_rate_sps} sps  bandwidth={receiver_config.bandwidth_hz} Hz  "
+        f"carrier_floor={noise_floor:.1f} dBFS  threshold=+{float(args.active_threshold_db):.1f} dB  "
+        f"tune_offset={receiver_config.tune_offset_hz} Hz"
     )
     print("freq_khz  status  excess  car_dbfs  car_snr  audio_dbfs  mod_pct  samples")
     for row in rows:
@@ -213,14 +392,16 @@ def _print_results(rows: list[ScanResult], args: argparse.Namespace, noise_floor
 
 
 def build_parser() -> argparse.ArgumentParser:
-    parser = argparse.ArgumentParser(description="Scan AM broadcast channels with an SDRplay receiver.")
+    parser = argparse.ArgumentParser(description="Scan VLF, LF, MF, and AM broadcast signals with an SDRplay receiver.")
     sub = parser.add_subparsers(dest="command")
-    scan = sub.add_parser("scan", help="Scan the AM broadcast band")
+    scan = sub.add_parser("scan", help="Scan VLF/LF/MF signal bands")
+    scan.add_argument("--device-id", default="", help="Optional RF Sentinel device id hint; SDRplay opens through SoapySDR.")
     scan.add_argument("--serial", default="", help="SDRplay serial number. Defaults to SDRPLAY_SERIAL when set.")
     scan.add_argument("--antenna", default="", help="Optional SDRplay antenna name, for example A, B, or Hi-Z.")
-    scan.add_argument("--start-khz", type=int, default=DEFAULT_START_KHZ)
-    scan.add_argument("--stop-khz", type=int, default=DEFAULT_STOP_KHZ)
-    scan.add_argument("--step-khz", type=int, default=DEFAULT_STEP_KHZ)
+    scan.add_argument("--band", choices=sorted(BAND_PRESETS), default=DEFAULT_BAND, help="Band preset to scan.")
+    scan.add_argument("--start-khz", type=int, default=None, help=f"Override preset start frequency. Default for AM is {DEFAULT_START_KHZ}.")
+    scan.add_argument("--stop-khz", type=int, default=None, help=f"Override preset stop frequency. Default for AM is {DEFAULT_STOP_KHZ}.")
+    scan.add_argument("--step-khz", type=int, default=None, help=f"Override preset channel step. Default for AM is {DEFAULT_STEP_KHZ}.")
     scan.add_argument("--sample-rate-sps", type=int, default=DEFAULT_SAMPLE_RATE_SPS)
     scan.add_argument("--bandwidth-hz", type=int, default=DEFAULT_BANDWIDTH_HZ)
     scan.add_argument("--tune-offset-hz", type=int, default=25_000, help="Tune this far above each channel so the AM carrier avoids DC.")
@@ -234,8 +415,12 @@ def build_parser() -> argparse.ArgumentParser:
     scan.add_argument("--top", type=int, default=0, help="Only show the top N rows after sorting. 0 shows all.")
     scan.add_argument("--sort", choices=["score", "freq"], default="score")
     scan.add_argument("--json", action="store_true")
+    scan.add_argument("--jsonl", action="store_true", help="Emit one compact JSON event per scanned signal.")
+    scan.add_argument("--active-only", action="store_true", help="With --jsonl, only emit rows above the active threshold.")
     scan.add_argument("--csv", action="store_true")
     scan.add_argument("--debug", action="store_true")
+    scan.add_argument("--show-driver-log", action="store_true", help="Show native SDRplay/SoapySDR startup messages.")
+    scan.add_argument("--yes", action="store_true", help="Allow long scans with more than 400 channels.")
     scan.set_defaults(func=_scan)
     return parser
 

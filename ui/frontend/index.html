@@ -23,6 +23,7 @@
         --zigbee-purple: #7e3ff2;
         --wifi-green: #16a34a;
         --fm-amber: #f59e0b;
+        --lfmf-cyan: #0891b2;
         --shadow: 0 18px 60px rgba(23, 33, 27, 0.12);
       }
 
@@ -1031,6 +1032,12 @@
         background: linear-gradient(90deg, rgba(245, 158, 11, 0.13), rgba(255, 250, 240, 0.86) 34%);
       }
 
+      .detection-card.protocol-lfmf,
+      .candidate.protocol-lfmf {
+        border-left-color: var(--lfmf-cyan);
+        background: linear-gradient(90deg, rgba(8, 145, 178, 0.14), rgba(255, 250, 240, 0.86) 34%);
+      }
+
       .wifi-topology {
         display: grid;
         gap: 10px;
@@ -1388,6 +1395,11 @@
         background: #fed7aa;
       }
 
+      .chip.protocol-lfmf {
+        color: #083344;
+        background: #a5f3fc;
+      }
+
       .chip.sdr-role-selected {
         border: 2px solid currentColor;
         box-shadow: 0 0 0 2px rgba(255, 253, 248, 0.18);
@@ -1407,6 +1419,10 @@
 
       .chip.sdr-role-selected.protocol-fm {
         border-color: #f59e0b;
+      }
+
+      .chip.sdr-role-selected.protocol-lfmf {
+        border-color: var(--lfmf-cyan);
       }
 
       .brand-icon-inline {
@@ -1490,6 +1506,10 @@
 
       .candidate.protocol-fm {
         border-left: 4px solid var(--fm-amber);
+      }
+
+      .candidate.protocol-lfmf {
+        border-left: 4px solid var(--lfmf-cyan);
       }
 
       .candidate-top {
@@ -1622,8 +1642,9 @@
                   <span class="toggle"><input id="tpmsInput" type="checkbox" checked /> TPMS</span>
                   <span class="toggle" id="wifiToggle"><input id="wifiInput" type="checkbox" checked /> WiFi</span>
                   <span class="toggle"><input id="fmInput" type="checkbox" checked /> FM</span>
+                  <span class="toggle" id="lfmfToggle"><input id="lfmfInput" type="checkbox" checked /> VLF/LF/MF</span>
                 </div>
-                <div class="config-note">BTC and BLE share one 2.4 GHz ISM SDR stream when a wideband radio is available. Zigbee stays separate for now, but it lives in the same band for the future shared stream path.</div>
+                <div class="config-note">BTC and BLE share one 2.4 GHz ISM SDR stream when a wideband radio is available. VLF/LF/MF is SDRplay RSP2-only and scans the low-frequency spectrum separately.</div>
               </div>
               <div class="config-section">
                 <div class="config-title">SDRs</div>
@@ -1650,6 +1671,7 @@
             <div class="metric"><span>TPMS Frames</span><strong id="tpmsMetric">0</strong></div>
             <div class="metric"><span>WiFi Frames</span><strong id="wifiMetric">0</strong></div>
             <div class="metric"><span>FM Stations</span><strong id="fmMetric">0</strong></div>
+            <div class="metric"><span>VLF/LF/MF</span><strong id="lfmfMetric">0</strong></div>
           </div>
           <div class="sdr-assignment-list" id="sdrAssignmentList"></div>
           <div class="spectrum" id="spectrum"></div>
@@ -1667,6 +1689,7 @@
                 <button class="tab-btn" id="tpmsTabBtn" type="button">TPMS</button>
                 <button class="tab-btn" id="wifiTabBtn" type="button">WiFi</button>
                 <button class="tab-btn" id="fmTabBtn" type="button">FM</button>
+                <button class="tab-btn" id="lfmfTabBtn" type="button">VLF/LF/MF</button>
               </div>
               <select class="view-select" id="detectionViewSelect">
                 <option value="cards">Cards</option>
@@ -1729,6 +1752,8 @@
       const wifiInput = document.getElementById("wifiInput");
       const wifiToggle = document.getElementById("wifiToggle");
       const fmInput = document.getElementById("fmInput");
+      const lfmfInput = document.getElementById("lfmfInput");
+      const lfmfToggle = document.getElementById("lfmfToggle");
       const sdrConfigList = document.getElementById("sdrConfigList");
       const channelSelect = document.getElementById("channelSelect");
       const scanForm = document.getElementById("scanForm");
@@ -1754,6 +1779,7 @@
       const tpmsTabBtn = document.getElementById("tpmsTabBtn");
       const wifiTabBtn = document.getElementById("wifiTabBtn");
       const fmTabBtn = document.getElementById("fmTabBtn");
+      const lfmfTabBtn = document.getElementById("lfmfTabBtn");
       const candidatePanelTitle = document.getElementById("candidatePanelTitle");
       const candidatesEl = document.getElementById("candidates");
       const detectionViewSelect = document.getElementById("detectionViewSelect");
@@ -1763,6 +1789,7 @@
       let latestStatus = null;
       let knownSdrDevices = [];
       let wifiDeviceAvailable = false;
+      let lfmfDeviceAvailable = false;
       let savedProtocolList = [];
       const disabledSdrIds = new Set();
       let configLoaded = false;
@@ -1785,6 +1812,7 @@
         tpms: document.getElementById("tpmsMetric"),
         wifi: document.getElementById("wifiMetric"),
         fm: document.getElementById("fmMetric"),
+        lfmf: document.getElementById("lfmfMetric"),
       };
 
       const bars = Array.from({ length: 40 }, (_, idx) => {
@@ -1898,12 +1926,25 @@
         return text.includes("wlan") || text.includes("wifi") || text.includes("802.11");
       }
 
+      function isSdrplayRsp2Device(device) {
+        const text = `${device?.id || ""} ${device?.label || ""} ${device?.driver || ""}`.toLowerCase();
+        return text.includes("sdrplay") && (text.includes("rsp2") || String(device?.id || "").toLowerCase().startsWith("sdrplay:"));
+      }
+
       function updateWifiAvailability(devices = knownSdrDevices) {
         wifiDeviceAvailable = (Array.isArray(devices) ? devices : []).some(isWifiDevice);
         wifiInput.disabled = !wifiDeviceAvailable;
         wifiToggle.classList.toggle("disabled", !wifiDeviceAvailable);
         wifiToggle.title = wifiDeviceAvailable ? "" : "WiFi requires a WiFi interface listed by sdr-gateway";
         if (!wifiDeviceAvailable) wifiInput.checked = false;
+      }
+
+      function updateLfmfAvailability(devices = knownSdrDevices) {
+        lfmfDeviceAvailable = (Array.isArray(devices) ? devices : []).some(isSdrplayRsp2Device);
+        lfmfInput.disabled = !lfmfDeviceAvailable;
+        lfmfToggle.classList.toggle("disabled", !lfmfDeviceAvailable);
+        lfmfToggle.title = lfmfDeviceAvailable ? "VLF/LF/MF uses the SDRplay RSP2 only" : "VLF/LF/MF requires an SDRplay RSP2 listed by sdr-gateway";
+        if (!lfmfDeviceAvailable) lfmfInput.checked = false;
       }
 
       function bestSharedBluetoothDevice(devices) {
@@ -1963,6 +2004,7 @@
         if (tpmsInput.checked) protocols.push("tpms");
         if (!wifiInput.disabled && wifiInput.checked) protocols.push("wifi");
         if (fmInput.checked) protocols.push("fm");
+        if (!lfmfInput.disabled && lfmfInput.checked) protocols.push("lfmf");
         return protocols;
       }
 
@@ -1992,6 +2034,7 @@
         tpmsInput.checked = values.has("tpms");
         wifiInput.checked = wifiDeviceAvailable && values.has("wifi");
         fmInput.checked = values.has("fm");
+        lfmfInput.checked = lfmfDeviceAvailable && values.has("lfmf");
       }
 
       function applyDisabledSdrList(devices) {
@@ -2051,6 +2094,7 @@
         if (!force && sameSdrList(nextDevices, knownSdrDevices) && sdrConfigList.children.length) return;
         knownSdrDevices = nextDevices;
         updateWifiAvailability(knownSdrDevices);
+        updateLfmfAvailability(knownSdrDevices);
         if (savedProtocolList.length) applyProtocolList(savedProtocolList);
         sdrConfigList.innerHTML = knownSdrDevices.length
           ? knownSdrDevices.map((dev) => {
@@ -2092,6 +2136,7 @@
           tpms: "TPMS",
           wifi: "WiFi",
           fm: "FM",
+          lfmf: "VLF/LF/MF",
         };
         return map[String(protocol || "").toLowerCase()] || String(protocol || "Idle");
       }
@@ -2166,6 +2211,7 @@
           btcDeviceSelect.innerHTML = `<option>${err.message}</option>`;
           btleDeviceSelect.innerHTML = `<option>${err.message}</option>`;
           updateWifiAvailability([]);
+          updateLfmfAvailability([]);
           renderSdrConfigList([], { preserveOnEmpty: true });
           devicesReady = false;
         } finally {
@@ -2267,6 +2313,7 @@
         if (value === "TPMS") return "protocol-tpms";
         if (value === "WIFI") return "protocol-wifi";
         if (value === "FM") return "protocol-fm";
+        if (value === "LFMF") return "protocol-lfmf";
         return "protocol-rf";
       }
 
@@ -2286,7 +2333,9 @@
                 ? materialIcon("wifi")
                 : value === "FM"
                   ? materialIcon("radio")
-                  : materialIcon("sensors");
+                  : value === "LFMF"
+                    ? materialIcon("waves")
+                    : materialIcon("sensors");
         return `<span class="chip ${protocolClass(value)}">${icon}${value}</span>`;
       }
 
@@ -2519,6 +2568,7 @@
         if (row.protocol === "TPMS") return "TPMS / Sub-GHz";
         if (row.protocol === "WIFI") return row.wifi_role === "ap" ? "WiFi Access Points" : "WiFi Stations";
         if (row.protocol === "FM") return "FM Broadcast";
+        if (row.protocol === "LFMF") return "VLF/LF/MF Signals";
         const manufacturerName = canonicalBleVendorName(row.manufacturer?.company_name || "");
         if (manufacturerName) return manufacturerName;
         const uuidVendor = uuidVendorName(row);
@@ -3221,6 +3271,7 @@
             ? bestNonBluetoothHopDevice(devices, selectedClassic)?.id || ""
             : "";
           const selectedHop = String(status?.device_ids?.hop || status?.device_ids?.radio_b || inferredHop || selectedDeviceId(btleDeviceSelect) || "");
+          const isLfmf = enabledProtocols.has("lfmf") && isSdrplayRsp2Device(device);
           const isClassic = selectedClassic && id === selectedClassic;
           const isHop = selectedHop && id === selectedHop;
           const protocols = [];
@@ -3229,7 +3280,8 @@
           if (isHop && enabledProtocols.has("zigbee")) protocols.push("ZIGBEE");
           if (isHop && enabledProtocols.has("tpms")) protocols.push("TPMS");
           if (isHop && enabledProtocols.has("fm")) protocols.push("FM");
-          return { isClassic, isHop, protocols };
+          if (isLfmf) protocols.push("LFMF");
+          return { isClassic, isHop, isLfmf, protocols };
         }
         function fallbackSdrBand(device) {
           const role = deviceRole(device);
@@ -3245,6 +3297,7 @@
             if (enabledProtocols.has("fm")) parts.push("FM 87.7-107.9 MHz");
             return parts.length ? parts.join(" · ") : "RF hopping";
           }
+          if (role.isLfmf) return "VLF/LF/MF survey · SDRplay RSP2 · 1 kHz-3 MHz";
           const minHz = Number(device.freq_min_hz || 0);
           const maxHz = Number(device.freq_max_hz || 0);
           const maxMsps = Number(device.max_sample_rate_sps || 0) / 1_000_000;
@@ -3268,6 +3321,7 @@
           }
           if (canTpms && enabledProtocols.has("tpms")) bands.push("TPMS 315/433.92 MHz");
           if (canFm && enabledProtocols.has("fm")) bands.push("FM 87.7-107.9 MHz");
+          if (isSdrplayRsp2Device(device) && enabledProtocols.has("lfmf")) bands.push("VLF/LF/MF 1 kHz-3 MHz");
           if (bands.length) return `${bands.slice(0, 2).join(" · ")}${bands.length > 2 ? " · more" : ""}`;
           if (maxMsps > 0) return `RF sweep up to ${maxMsps.toFixed(1)} Msps`;
           return "RF scanning";
@@ -3437,6 +3491,7 @@
           metrics.tpms.textContent = Number(protocolDetections("TPMS") || 0).toLocaleString();
           metrics.wifi.textContent = Number(protocolDetections("WIFI") || 0).toLocaleString();
           metrics.fm.textContent = Number(protocolDetections("FM") || 0).toLocaleString();
+          metrics.lfmf.textContent = Number(protocolDetections("LFMF") || 0).toLocaleString();
           updateBtcTargetVisibility(Boolean((btcTargetMacInput.value || "").trim() || status.test_target));
           renderIdentityTable(status.discovery_table || []);
           renderCandidates(status.classic_candidates || [], status.classic_addresses || [], status.discovery_table || []);
@@ -3774,6 +3829,7 @@
           [tpmsTabBtn, "TPMS"],
           [wifiTabBtn, "WIFI"],
           [fmTabBtn, "FM"],
+          [lfmfTabBtn, "LFMF"],
         ].forEach(([button, value]) => button.classList.toggle("active", protocol === value));
         pollStatus();
       }
@@ -3785,6 +3841,7 @@
       tpmsTabBtn.addEventListener("click", () => setDetectionTab("TPMS"));
       wifiTabBtn.addEventListener("click", () => setDetectionTab("WIFI"));
       fmTabBtn.addEventListener("click", () => setDetectionTab("FM"));
+      lfmfTabBtn.addEventListener("click", () => setDetectionTab("LFMF"));
       btcInput.addEventListener("change", () => {
         setChannels();
         scheduleAutoHop();
@@ -3799,6 +3856,7 @@
       tpmsInput.addEventListener("change", applyProtocolSelection);
       wifiInput.addEventListener("change", applyProtocolSelection);
       fmInput.addEventListener("change", applyProtocolSelection);
+      lfmfInput.addEventListener("change", applyProtocolSelection);
       identityTableWrap.addEventListener("contextmenu", handleFollowContextMenu);
       candidatesEl.addEventListener("contextmenu", handleFollowContextMenu);
       document.addEventListener("click", handleFollowClick);
