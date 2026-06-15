@@ -1,4 +1,7 @@
 import os
+import calendar
+import contextlib
+import csv
 import json
 import logging
 import platform
@@ -11,6 +14,7 @@ import subprocess
 import sys
 import threading
 import time
+import zipfile
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
@@ -70,6 +74,10 @@ DATA_DIR = Path(__file__).resolve().parent / "data"
 RF_SENTINEL_LOG_DIR = Path(os.getenv("RF_SENTINEL_LOG_DIR", "/var/log/rf_sentinel"))
 RF_SENTINEL_CONTROL_PATH = RF_SENTINEL_LOG_DIR / "rf_sentinel_control.json"
 RF_SENTINEL_UI_CONFIG_PATH = RF_SENTINEL_LOG_DIR / "rf_sentinel_ui_config.json"
+RF_SENTINEL_RUNS_DIR = RF_SENTINEL_LOG_DIR / "runs"
+RF_SENTINEL_ARCHIVE_DIR = RF_SENTINEL_LOG_DIR / "archives"
+RF_SENTINEL_CSV_RETENTION_DAYS = max(1, int(os.getenv("RF_SENTINEL_CSV_RETENTION_DAYS", "7")))
+RF_SENTINEL_CSV_ARCHIVE_MAX_MB = max(1, int(os.getenv("RF_SENTINEL_CSV_ARCHIVE_MAX_MB", "1000")))
 RF_SENTINEL_NO_CHANGE = object()
 RF_SENTINEL_PROTOCOLS = {"btc", "ble", "zigbee", "tpms", "wifi", "fm", "lfmf"}
 RF_SENTINEL_KEEP_BAD_FCS = os.getenv("RF_SENTINEL_KEEP_BAD_FCS", "0").strip().lower() in {"1", "true", "yes", "on"}
@@ -290,6 +298,8 @@ class ExplorerState:
     btc_engine_log: str = ""
     scanner_log: list[str] = field(default_factory=list)
     scanner_assignments: dict[str, dict[str, Any]] = field(default_factory=dict)
+    csv_run_id: str = ""
+    csv_log_dir: str = ""
 
 
 @dataclass
@@ -1493,6 +1503,7 @@ app.logger.setLevel(logging.INFO)
 state = ExplorerState()
 fm_playback = FmPlaybackState()
 state_lock = threading.Lock()
+csv_log_lock = threading.Lock()
 identity_cache_lock = threading.Lock()
 worker_stop = threading.Event()
 worker_thread: threading.Thread | None = None
@@ -1521,6 +1532,97 @@ uuid16_identifier_lut: dict[str, str] = {}
 UUID16_VENDOR_OVERRIDES = {
     "0xFCB2": "Apple, Inc.",
     "0xFEED": "Tile, Inc.",
+}
+
+CSV_COMMON_COLUMNS = [
+    "run_id",
+    "observed_at_iso",
+    "observed_at_epoch",
+    "logged_at_iso",
+    "scanner_source",
+    "protocol",
+    "kind",
+    "identity",
+    "device_type",
+    "device_type_detail",
+    "mac",
+    "name",
+    "source_address",
+    "destination_address",
+    "bssid",
+    "ssid",
+    "wifi_role",
+    "channel",
+    "center_freq_hz",
+    "frequency_hz",
+    "frequency_mhz",
+    "rssi_dbfs",
+    "rssi_dbm",
+    "confidence",
+    "detail",
+    "payload_hex",
+    "raw_json",
+]
+
+CSV_PROTOCOL_COLUMNS = {
+    "btle": [
+        "address",
+        "address_type",
+        "uuid16",
+        "uuid16_names",
+        "manufacturer_id",
+        "manufacturer_name",
+        "appearance_category",
+        "appearance_name",
+    ],
+    "btc": [
+        "lap",
+        "uap",
+        "nap",
+        "full_mac",
+        "status",
+        "target",
+        "candidate_count",
+        "processed_packets",
+        "broken_packets",
+        "repaired",
+        "repair_distance",
+    ],
+    "zigbee": ["pan_id", "fcs_ok", "fcs_hex", "decoded_text", "sequence_number", "psdu_hex"],
+    "tpms": ["protocol_variant", "sensor_id"],
+    "wifi": ["ssid_visible", "count"],
+    "fm": ["power_dbfs", "noise_dbfs", "excess_db", "audio_rms", "pilot_db", "rds_subcarrier_db", "stereo_likely", "rds_likely"],
+    "lfmf": [
+        "frequency_khz",
+        "carrier_dbfs",
+        "carrier_snr_db",
+        "excess_db",
+        "audio_dbfs",
+        "modulation_pct",
+        "band",
+        "band_label",
+        "active",
+    ],
+}
+
+CSV_COMBINED_COLUMNS = CSV_COMMON_COLUMNS + sorted({col for cols in CSV_PROTOCOL_COLUMNS.values() for col in cols})
+CSV_PROTOCOL_FILE_NAMES = {
+    "BTLE": "btle.csv",
+    "BTC": "btc.csv",
+    "ZIGBEE": "zigbee.csv",
+    "TPMS": "tpms.csv",
+    "WIFI": "wifi.csv",
+    "FM": "fm.csv",
+    "LFMF": "lfmf.csv",
+}
+CSV_LOGGABLE_KINDS = {
+    "ble_adv",
+    "classic_lap",
+    "zigbee_frame",
+    "tpms_frame",
+    "wifi_frame",
+    "fm_station",
+    "lfmf_signal",
 }
 
 BLE_APPEARANCE_LABELS = {
@@ -3069,6 +3171,316 @@ def _optional_bool(value: Any) -> bool | None:
     return None
 
 
+def _iso_from_epoch(value: Any) -> str:
+    try:
+        epoch = float(value)
+    except (TypeError, ValueError):
+        epoch = time.time()
+    base = time.strftime("%Y-%m-%dT%H:%M:%S", time.gmtime(epoch))
+    millis = int((epoch - int(epoch)) * 1000)
+    return f"{base}.{millis:03d}Z"
+
+
+def _csv_cell(value: Any) -> str:
+    if value is None:
+        return ""
+    if isinstance(value, bool):
+        return "true" if value else "false"
+    if isinstance(value, (list, tuple, dict)):
+        return json.dumps(value, separators=(",", ":"), sort_keys=True)
+    return str(value)
+
+
+def _csv_protocol_key(event: dict[str, Any]) -> str:
+    protocol = str(event.get("protocol") or "").strip().upper()
+    if protocol == "BLE":
+        return "BTLE"
+    if protocol:
+        return protocol
+    return {
+        "ble_adv": "BTLE",
+        "classic_lap": "BTC",
+        "zigbee_frame": "ZIGBEE",
+        "tpms_frame": "TPMS",
+        "wifi_frame": "WIFI",
+        "fm_station": "FM",
+        "lfmf_signal": "LFMF",
+    }.get(str(event.get("kind") or ""), "")
+
+
+def _csv_loggable_event(event: dict[str, Any]) -> bool:
+    kind = str(event.get("kind") or "").strip()
+    if kind not in CSV_LOGGABLE_KINDS:
+        return False
+    event_type = str(event.get("type") or "").strip().lower()
+    if event_type in {"status", "control", "info", "debug"}:
+        return False
+    if kind == "ble_adv":
+        return bool(event.get("address") or event.get("mac"))
+    if kind == "classic_lap":
+        return bool(event.get("lap"))
+    if kind == "zigbee_frame":
+        return bool(event.get("identity") or event.get("source_address") or event.get("destination_address") or event.get("payload_hex") or event.get("psdu_hex"))
+    if kind == "tpms_frame":
+        return bool(event.get("identity") or event.get("mac") or event.get("payload_hex"))
+    if kind == "wifi_frame":
+        return bool(event.get("identity") or event.get("source_address") or event.get("destination_address") or event.get("bssid") or event.get("ssid"))
+    if kind == "fm_station":
+        return bool(event.get("frequency_hz") or event.get("center_freq_hz") or event.get("identity"))
+    if kind == "lfmf_signal":
+        return bool(event.get("frequency_hz") or event.get("center_freq_hz") or event.get("identity"))
+    return True
+
+
+def _csv_event_row(event: dict[str, Any], columns: list[str]) -> dict[str, str]:
+    observed_at = float(event.get("seen_at") or time.time())
+    protocol = _csv_protocol_key(event)
+    manufacturer = event.get("manufacturer") if isinstance(event.get("manufacturer"), dict) else {}
+    appearance = event.get("appearance") if isinstance(event.get("appearance"), dict) else {}
+    row_values: dict[str, Any] = {
+        "run_id": state.csv_run_id,
+        "observed_at_iso": _iso_from_epoch(observed_at),
+        "observed_at_epoch": f"{observed_at:.6f}",
+        "logged_at_iso": _iso_from_epoch(time.time()),
+        "scanner_source": event.get("scanner_source"),
+        "protocol": protocol,
+        "kind": event.get("kind"),
+        "identity": event.get("identity") or event.get("name") or event.get("address") or event.get("mac"),
+        "device_type": event.get("device_type"),
+        "device_type_detail": event.get("device_type_detail") or event.get("protocol_variant"),
+        "mac": event.get("mac") or event.get("address") or event.get("full_mac"),
+        "name": event.get("name"),
+        "source_address": event.get("source_address"),
+        "destination_address": event.get("destination_address"),
+        "bssid": event.get("bssid"),
+        "ssid": event.get("ssid"),
+        "wifi_role": event.get("wifi_role"),
+        "channel": event.get("channel"),
+        "center_freq_hz": event.get("center_freq_hz"),
+        "frequency_hz": event.get("frequency_hz"),
+        "frequency_mhz": event.get("frequency_mhz"),
+        "rssi_dbfs": event.get("rssi_dbfs") or event.get("last_rssi_dbfs"),
+        "rssi_dbm": event.get("rssi_dbm"),
+        "confidence": event.get("confidence"),
+        "detail": event.get("detail") or event.get("status"),
+        "payload_hex": event.get("payload_hex") or event.get("psdu_hex") or event.get("hex"),
+        "raw_json": event,
+        "address": event.get("address") or event.get("mac"),
+        "address_type": event.get("address_type"),
+        "uuid16": event.get("uuid16"),
+        "uuid16_names": event.get("uuid16_names"),
+        "manufacturer_id": manufacturer.get("id"),
+        "manufacturer_name": manufacturer.get("name"),
+        "appearance_category": appearance.get("category"),
+        "appearance_name": appearance.get("name"),
+        "lap": event.get("lap"),
+        "uap": event.get("uap"),
+        "nap": event.get("nap"),
+        "full_mac": event.get("full_mac"),
+        "status": event.get("status"),
+        "target": event.get("target"),
+        "candidate_count": event.get("candidate_count"),
+        "processed_packets": event.get("processed_packets"),
+        "broken_packets": event.get("broken_packets"),
+        "repaired": event.get("repaired"),
+        "repair_distance": event.get("repair_distance"),
+        "pan_id": event.get("pan_id"),
+        "fcs_ok": event.get("fcs_ok"),
+        "fcs_hex": event.get("fcs_hex"),
+        "decoded_text": event.get("decoded_text"),
+        "sequence_number": event.get("sequence_number"),
+        "psdu_hex": event.get("psdu_hex"),
+        "protocol_variant": event.get("protocol_variant") or event.get("device_type_detail"),
+        "sensor_id": event.get("sensor_id") or event.get("mac") or event.get("identity"),
+        "ssid_visible": event.get("ssid_visible"),
+        "count": event.get("count"),
+        "power_dbfs": event.get("power_dbfs"),
+        "noise_dbfs": event.get("noise_dbfs"),
+        "excess_db": event.get("excess_db"),
+        "audio_rms": event.get("audio_rms"),
+        "pilot_db": event.get("pilot_db"),
+        "rds_subcarrier_db": event.get("rds_subcarrier_db"),
+        "stereo_likely": event.get("stereo_likely"),
+        "rds_likely": event.get("rds_likely"),
+        "frequency_khz": event.get("frequency_khz"),
+        "carrier_dbfs": event.get("carrier_dbfs"),
+        "carrier_snr_db": event.get("carrier_snr_db"),
+        "audio_dbfs": event.get("audio_dbfs"),
+        "modulation_pct": event.get("modulation_pct"),
+        "band": event.get("band"),
+        "band_label": event.get("band_label"),
+        "active": event.get("active"),
+    }
+    return {column: _csv_cell(row_values.get(column)) for column in columns}
+
+
+def _write_csv_schema(run_dir: Path, run_id: str) -> None:
+    schema = {
+        "run_id": run_id,
+        "created_at": _iso_from_epoch(time.time()),
+        "description": "RF Sentinel observation CSVs. Each row is one normalized protocol observation.",
+        "folder": str(run_dir),
+        "files": {
+            "combined.csv": {
+                "protocols": sorted(CSV_PROTOCOL_FILE_NAMES),
+                "columns": CSV_COMBINED_COLUMNS,
+            },
+            **{
+                file_name: {
+                    "protocol": protocol,
+                    "columns": CSV_COMMON_COLUMNS + CSV_PROTOCOL_COLUMNS.get(protocol.lower(), []),
+                }
+                for protocol, file_name in CSV_PROTOCOL_FILE_NAMES.items()
+            },
+        },
+    }
+    (run_dir / "schema.json").write_text(json.dumps(schema, indent=2, sort_keys=True), encoding="utf-8")
+
+
+def _write_csv_header(path: Path, columns: list[str]) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    if path.exists() and path.stat().st_size > 0:
+        return
+    with path.open("w", newline="", encoding="utf-8") as handle:
+        csv.DictWriter(handle, fieldnames=columns, extrasaction="ignore").writeheader()
+
+
+def _initialize_csv_files(run_dir: Path) -> None:
+    _write_csv_header(run_dir / "combined.csv", CSV_COMBINED_COLUMNS)
+    for protocol, file_name in CSV_PROTOCOL_FILE_NAMES.items():
+        columns = CSV_COMMON_COLUMNS + CSV_PROTOCOL_COLUMNS.get(protocol.lower(), [])
+        _write_csv_header(run_dir / file_name, columns)
+
+
+def _csv_run_epoch(path: Path) -> float:
+    run_id = path.name.split("-", 1)[0]
+    try:
+        return float(calendar.timegm(time.strptime(run_id, "%Y%m%dT%H%M%SZ")))
+    except ValueError:
+        try:
+            return path.stat().st_mtime
+        except OSError:
+            return time.time()
+
+
+def _archive_run_dir(run_dir: Path) -> Path | None:
+    RF_SENTINEL_ARCHIVE_DIR.mkdir(parents=True, exist_ok=True)
+    archive_path = RF_SENTINEL_ARCHIVE_DIR / f"{run_dir.name}.zip"
+    if archive_path.exists():
+        suffix = 1
+        while archive_path.exists():
+            suffix += 1
+            archive_path = RF_SENTINEL_ARCHIVE_DIR / f"{run_dir.name}-{suffix:02d}.zip"
+    tmp_path = archive_path.with_suffix(".zip.tmp")
+    try:
+        with zipfile.ZipFile(tmp_path, "w", compression=zipfile.ZIP_DEFLATED) as archive:
+            for child in sorted(run_dir.rglob("*")):
+                if child.is_file():
+                    archive.write(child, arcname=str(Path(run_dir.name) / child.relative_to(run_dir)))
+        tmp_path.replace(archive_path)
+        shutil.rmtree(run_dir)
+        app.logger.info("csv_run_archived source=%s archive=%s", run_dir, archive_path)
+        return archive_path
+    except OSError as exc:
+        with contextlib.suppress(OSError):
+            tmp_path.unlink()
+        app.logger.warning("csv_run_archive_failed path=%s error=%s", run_dir, exc)
+        return None
+
+
+def _trim_csv_archives(max_mb: int = RF_SENTINEL_CSV_ARCHIVE_MAX_MB) -> None:
+    max_bytes = max(1, int(max_mb)) * 1024 * 1024
+    try:
+        archives = [path for path in RF_SENTINEL_ARCHIVE_DIR.glob("*.zip") if path.is_file()]
+    except OSError as exc:
+        app.logger.warning("csv_archive_list_failed path=%s error=%s", RF_SENTINEL_ARCHIVE_DIR, exc)
+        return
+    archive_stats: list[tuple[float, int, Path]] = []
+    for path in archives:
+        try:
+            stat = path.stat()
+        except OSError:
+            continue
+        archive_stats.append((stat.st_mtime, stat.st_size, path))
+    total_bytes = sum(size for _, size, _ in archive_stats)
+    for _, size, path in sorted(archive_stats, key=lambda item: item[0]):
+        if total_bytes <= max_bytes:
+            break
+        try:
+            path.unlink()
+            total_bytes -= size
+            app.logger.info("csv_archive_pruned path=%s max_mb=%s", path, max_mb)
+        except OSError as exc:
+            app.logger.warning("csv_archive_prune_failed path=%s error=%s", path, exc)
+
+
+def _archive_old_csv_runs(
+    retention_days: int = RF_SENTINEL_CSV_RETENTION_DAYS,
+    max_archive_mb: int = RF_SENTINEL_CSV_ARCHIVE_MAX_MB,
+) -> None:
+    cutoff = time.time() - (max(1, int(retention_days)) * 86400)
+    try:
+        entries = list(RF_SENTINEL_RUNS_DIR.iterdir())
+    except FileNotFoundError:
+        return
+    except OSError as exc:
+        app.logger.warning("csv_retention_list_failed path=%s error=%s", RF_SENTINEL_RUNS_DIR, exc)
+        return
+    for entry in entries:
+        if not entry.is_dir():
+            continue
+        if _csv_run_epoch(entry) >= cutoff:
+            continue
+        _archive_run_dir(entry)
+    _trim_csv_archives(max_archive_mb)
+
+
+def _start_csv_run() -> None:
+    _archive_old_csv_runs()
+    base_run_id = time.strftime("%Y%m%dT%H%M%SZ", time.gmtime())
+    run_id = base_run_id
+    run_dir = RF_SENTINEL_RUNS_DIR / run_id
+    suffix = 1
+    while run_dir.exists():
+        suffix += 1
+        run_id = f"{base_run_id}-{suffix:02d}"
+        run_dir = RF_SENTINEL_RUNS_DIR / run_id
+    run_dir.mkdir(parents=True, exist_ok=True)
+    _write_csv_schema(run_dir, run_id)
+    _initialize_csv_files(run_dir)
+    state.csv_run_id = run_id
+    state.csv_log_dir = str(run_dir)
+
+
+def _append_csv_rows(events: list[dict[str, Any]]) -> None:
+    loggable_events = [event for event in events if _csv_loggable_event(event)]
+    if not loggable_events or not state.csv_log_dir:
+        return
+    run_dir = Path(state.csv_log_dir)
+    with csv_log_lock:
+        for file_name, columns, rows in _csv_batches(loggable_events):
+            path = run_dir / file_name
+            needs_header = not path.exists() or path.stat().st_size == 0
+            with path.open("a", newline="", encoding="utf-8") as handle:
+                writer = csv.DictWriter(handle, fieldnames=columns, extrasaction="ignore")
+                if needs_header:
+                    writer.writeheader()
+                for row in rows:
+                    writer.writerow(row)
+
+
+def _csv_batches(events: list[dict[str, Any]]) -> list[tuple[str, list[str], list[dict[str, str]]]]:
+    combined_rows = [_csv_event_row(event, CSV_COMBINED_COLUMNS) for event in events]
+    batches: list[tuple[str, list[str], list[dict[str, str]]]] = [("combined.csv", CSV_COMBINED_COLUMNS, combined_rows)]
+    for protocol, file_name in CSV_PROTOCOL_FILE_NAMES.items():
+        protocol_events = [event for event in events if _csv_protocol_key(event) == protocol]
+        if not protocol_events:
+            continue
+        columns = CSV_COMMON_COLUMNS + CSV_PROTOCOL_COLUMNS.get(protocol.lower(), [])
+        batches.append((file_name, columns, [_csv_event_row(event, columns) for event in protocol_events]))
+    return batches
+
+
 def _scanner_json_to_events(source: str, payload: dict[str, Any]) -> list[dict[str, Any]]:
     now = float(payload.get("timestamp") or payload.get("seen_at") or time.time())
     protocol = str(payload.get("protocol") or "").lower()
@@ -3297,6 +3709,7 @@ def _append_detections(events: list[dict[str, Any]], candidates: list[dict[str, 
             item["uap"] = str(uap_value or "XX").upper()
             item["full_mac"] = _classic_full_mac(item.get("nap"), item.get("uap"), item.get("lap"))
             item.setdefault("mac", item["full_mac"])
+    _append_csv_rows(events)
     with state_lock:
         for event in events:
             state.bursts_seen += 1 if event["kind"].endswith("burst") else 0
@@ -4245,6 +4658,8 @@ def _rf_sentinel_loop(proc: subprocess.Popen[str]) -> None:
             if payload is None:
                 continue
             events = _scanner_json_to_events(source, payload)
+            for event in events:
+                event.setdefault("scanner_source", source)
             if events:
                 _append_detections(events, [])
         rc = proc.wait()
@@ -4969,6 +5384,7 @@ def start_scan():
     single_radio_bluetooth = mode == "both" and btc_engine == "python" and bool(btc_device_id) and btc_device_id == btle_device_id
     if state.running:
         _stop_scan()
+    _start_csv_run()
     if btc_device_id:
         _stop_duplicate_gateway_streams(btc_device_id)
     if btle_device_id and btle_device_id != btc_device_id:
@@ -5269,6 +5685,8 @@ def status():
                 "btc_engine_log": state.btc_engine_log,
                 "scanner_log": state.scanner_log[-160:],
                 "scanner_assignments": state.scanner_assignments,
+                "csv_run_id": state.csv_run_id,
+                "csv_log_dir": state.csv_log_dir,
                 "ui_config": ui_config,
                 "fm_playback": _fm_playback_status_payload(),
                 "available_devices": devices,
