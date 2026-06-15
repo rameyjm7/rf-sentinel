@@ -274,19 +274,92 @@
       }
 
       .protocol-toggles {
-        display: flex;
-        align-items: center;
-        flex-wrap: wrap;
-        gap: 10px;
+        display: grid;
+        grid-template-columns: 1fr;
+        gap: 8px;
         min-height: 38px;
-        padding: 0 10px;
+        padding: 8px;
         border: 1px solid var(--line);
         border-radius: 6px;
-        background: #fffdf8;
+        background: rgba(255, 253, 248, 0.04);
       }
 
       .protocol-select {
         flex: 2 1 420px;
+      }
+
+      .protocol-row {
+        display: grid;
+        grid-template-columns: auto minmax(0, 1fr) auto;
+        align-items: center;
+        gap: 10px;
+        min-height: 42px;
+        padding: 8px 10px;
+        border: 1px solid rgba(215, 208, 191, 0.28);
+        border-radius: 7px;
+        color: var(--muted);
+        background: rgba(255, 253, 248, 0.045);
+        cursor: context-menu;
+        user-select: none;
+      }
+
+      .protocol-row.enabled {
+        color: var(--ink);
+        border-color: rgba(13, 148, 161, 0.75);
+        background: linear-gradient(90deg, rgba(13, 148, 161, 0.24), rgba(255, 253, 248, 0.06));
+        box-shadow: inset 3px 0 0 var(--teal);
+      }
+
+      .protocol-row.missing {
+        opacity: 0.42;
+        filter: grayscale(0.85);
+        cursor: not-allowed;
+      }
+
+      .protocol-row input {
+        position: absolute;
+        opacity: 0;
+        pointer-events: none;
+      }
+
+      .protocol-row .chip {
+        justify-self: start;
+      }
+
+      .protocol-row-main {
+        min-width: 0;
+      }
+
+      .protocol-row-main strong,
+      .protocol-row-main span {
+        display: block;
+        overflow: hidden;
+        text-overflow: ellipsis;
+        white-space: nowrap;
+      }
+
+      .protocol-row-main strong {
+        color: inherit;
+        font-size: 0.86rem;
+      }
+
+      .protocol-row-main span {
+        color: var(--muted);
+        font-size: 0.72rem;
+      }
+
+      .protocol-state-pill {
+        padding: 3px 8px;
+        border-radius: 999px;
+        color: var(--paper);
+        background: rgba(255, 253, 248, 0.16);
+        font-size: 0.68rem;
+        font-weight: 900;
+        text-transform: uppercase;
+      }
+
+      .protocol-row.enabled .protocol-state-pill {
+        background: var(--teal);
       }
 
       .config-menu {
@@ -314,11 +387,15 @@
       }
 
       .config-panel {
-        position: absolute;
+        position: fixed;
         z-index: 30;
-        top: calc(100% + 8px);
-        right: 0;
-        width: min(560px, calc(100vw - 36px));
+        top: 50%;
+        left: 50%;
+        width: min(760px, calc(100vw - 48px));
+        max-height: min(760px, calc(100vh - 72px));
+        overflow-x: hidden;
+        overflow-y: auto;
+        transform: translate(-50%, -50%);
         padding: 12px;
         border: 1px solid var(--line);
         border-radius: 8px;
@@ -1636,13 +1713,13 @@
               <div class="config-section">
                 <div class="config-title">Protocol Groups</div>
                 <div class="protocol-toggles">
-                  <span class="toggle"><input id="btcInput" type="checkbox" checked /> 2.4G BTC</span>
-                  <span class="toggle"><input id="btleInput" type="checkbox" checked /> 2.4G BLE</span>
-                  <span class="toggle"><input id="zigbeeInput" type="checkbox" checked /> 2.4G Zigbee</span>
-                  <span class="toggle"><input id="tpmsInput" type="checkbox" checked /> TPMS</span>
-                  <span class="toggle" id="wifiToggle"><input id="wifiInput" type="checkbox" checked /> WiFi</span>
-                  <span class="toggle"><input id="fmInput" type="checkbox" checked /> FM</span>
-                  <span class="toggle" id="lfmfToggle"><input id="lfmfInput" type="checkbox" checked /> VLF/LF/MF</span>
+                  <label class="protocol-row" data-protocol-row="btc"><input id="btcInput" type="checkbox" checked /></label>
+                  <label class="protocol-row" data-protocol-row="ble"><input id="btleInput" type="checkbox" checked /></label>
+                  <label class="protocol-row" data-protocol-row="zigbee"><input id="zigbeeInput" type="checkbox" checked /></label>
+                  <label class="protocol-row" data-protocol-row="tpms"><input id="tpmsInput" type="checkbox" checked /></label>
+                  <label class="protocol-row" id="wifiToggle" data-protocol-row="wifi"><input id="wifiInput" type="checkbox" checked /></label>
+                  <label class="protocol-row" data-protocol-row="fm"><input id="fmInput" type="checkbox" checked /></label>
+                  <label class="protocol-row" id="lfmfToggle" data-protocol-row="lfmf"><input id="lfmfInput" type="checkbox" checked /></label>
                 </div>
                 <div class="config-note">BTC and BLE share one 2.4 GHz ISM SDR stream when a wideband radio is available. VLF/LF/MF is SDRplay RSP2-only and scans the low-frequency spectrum separately.</div>
               </div>
@@ -1793,6 +1870,7 @@
       let savedProtocolList = [];
       const disabledSdrIds = new Set();
       let configLoaded = false;
+      let protocolConfigDirty = false;
       let activeDetectionTab = "ALL";
       let tableSort = { key: "last_seen_at", direction: "desc" };
       let fmAudioCtx = null;
@@ -1814,6 +1892,15 @@
         fm: document.getElementById("fmMetric"),
         lfmf: document.getElementById("lfmfMetric"),
       };
+      const protocolControls = [
+        { key: "btc", label: "2.4G BTC", protocol: "BTC", input: btcInput, detail: "Classic Bluetooth hopping" },
+        { key: "ble", label: "2.4G BLE", protocol: "BTLE", input: btleInput, detail: "BLE advertisements" },
+        { key: "zigbee", label: "2.4G Zigbee", protocol: "ZIGBEE", input: zigbeeInput, detail: "802.15.4 channels" },
+        { key: "tpms", label: "TPMS", protocol: "TPMS", input: tpmsInput, detail: "315 / 433.92 MHz sensors" },
+        { key: "wifi", label: "WiFi", protocol: "WIFI", input: wifiInput, detail: "802.11 monitor frames", available: () => wifiDeviceAvailable },
+        { key: "fm", label: "FM", protocol: "FM", input: fmInput, detail: "Broadcast FM stations" },
+        { key: "lfmf", label: "VLF/LF/MF", protocol: "LFMF", input: lfmfInput, detail: "SDRplay RSP2 low-frequency scan", available: () => lfmfDeviceAvailable },
+      ];
 
       const bars = Array.from({ length: 40 }, (_, idx) => {
         const bar = document.createElement("div");
@@ -1931,20 +2018,52 @@
         return text.includes("sdrplay") && (text.includes("rsp2") || String(device?.id || "").toLowerCase().startsWith("sdrplay:"));
       }
 
+      function protocolAvailable(control) {
+        return typeof control.available === "function" ? Boolean(control.available()) : true;
+      }
+
+      function protocolConfigStaged() {
+        return Boolean(protocolConfigDirty || configMenu.open);
+      }
+
+      function renderProtocolControls() {
+        protocolControls.forEach((control) => {
+          const row = document.querySelector(`[data-protocol-row="${control.key}"]`);
+          if (!row) return;
+          const available = protocolAvailable(control);
+          const enabled = available && Boolean(control.input.checked);
+          row.classList.toggle("enabled", enabled);
+          row.classList.toggle("missing", !available);
+          row.title = available ? "Right-click to enable or disable" : `${control.label} source is missing`;
+          control.input.disabled = !available;
+          const stateText = available ? (enabled ? "Enabled" : "Off") : "Missing";
+          const template = document.createElement("template");
+          template.innerHTML = `
+            ${protocolChip(control.protocol)}
+            <span class="protocol-row-main">
+              <strong>${control.label}</strong>
+              <span>${control.detail}</span>
+            </span>
+            <span class="protocol-state-pill">${stateText}</span>
+          `;
+          row.replaceChildren(control.input, template.content.cloneNode(true));
+        });
+      }
+
       function updateWifiAvailability(devices = knownSdrDevices) {
         wifiDeviceAvailable = (Array.isArray(devices) ? devices : []).some(isWifiDevice);
         wifiInput.disabled = !wifiDeviceAvailable;
-        wifiToggle.classList.toggle("disabled", !wifiDeviceAvailable);
         wifiToggle.title = wifiDeviceAvailable ? "" : "WiFi requires a WiFi interface listed by sdr-gateway";
         if (!wifiDeviceAvailable) wifiInput.checked = false;
+        renderProtocolControls();
       }
 
       function updateLfmfAvailability(devices = knownSdrDevices) {
         lfmfDeviceAvailable = (Array.isArray(devices) ? devices : []).some(isSdrplayRsp2Device);
         lfmfInput.disabled = !lfmfDeviceAvailable;
-        lfmfToggle.classList.toggle("disabled", !lfmfDeviceAvailable);
         lfmfToggle.title = lfmfDeviceAvailable ? "VLF/LF/MF uses the SDRplay RSP2 only" : "VLF/LF/MF requires an SDRplay RSP2 listed by sdr-gateway";
         if (!lfmfDeviceAvailable) lfmfInput.checked = false;
+        renderProtocolControls();
       }
 
       function bestSharedBluetoothDevice(devices) {
@@ -2035,6 +2154,7 @@
         wifiInput.checked = wifiDeviceAvailable && values.has("wifi");
         fmInput.checked = values.has("fm");
         lfmfInput.checked = lfmfDeviceAvailable && values.has("lfmf");
+        renderProtocolControls();
       }
 
       function applyDisabledSdrList(devices) {
@@ -2095,7 +2215,7 @@
         knownSdrDevices = nextDevices;
         updateWifiAvailability(knownSdrDevices);
         updateLfmfAvailability(knownSdrDevices);
-        if (savedProtocolList.length) applyProtocolList(savedProtocolList);
+        if (savedProtocolList.length && !protocolConfigStaged()) applyProtocolList(savedProtocolList);
         sdrConfigList.innerHTML = knownSdrDevices.length
           ? knownSdrDevices.map((dev) => {
               const id = String(dev.id || "").trim();
@@ -2146,6 +2266,10 @@
       }
 
       function syncProtocolCheckboxes(status) {
+        if (protocolConfigStaged()) {
+          renderProtocolControls();
+          return;
+        }
         const enabled = status?.decoder_stats?.enabled_protocols;
         if (!Array.isArray(enabled)) return;
         applyProtocolList(enabled);
@@ -3474,7 +3598,7 @@
           runToggleBtn.querySelector(".material-symbols-rounded").textContent = status.running ? "stop" : "play_arrow";
           if (status.running) syncModeCheckboxes(status.mode);
           if (status.running) syncProtocolCheckboxes(status);
-          if (configLoaded && !status.running && Array.isArray(status.ui_config?.protocols)) applyProtocolList(status.ui_config.protocols);
+          if (configLoaded && !status.running && Array.isArray(status.ui_config?.protocols) && !protocolConfigStaged()) applyProtocolList(status.ui_config.protocols);
           if (configLoaded && Array.isArray(status.ui_config?.disabled_devices)) applyDisabledSdrList(status.ui_config.disabled_devices);
           if (Array.isArray(status.available_devices)) renderSdrConfigList(status.available_devices, { preserveOnEmpty: true });
           const rows = status.discovery_table || [];
@@ -3507,10 +3631,17 @@
         }
       }
 
-      async function applyProtocolSelection() {
+      async function applyProtocolSelection({ commit = true } = {}) {
+        renderProtocolControls();
         refreshPlannedStatusLabel();
         const protocols = selectedProtocols();
         const label = protocols.map((item) => item.toUpperCase()).join("+") || "paused";
+        if (!commit) {
+          protocolConfigDirty = true;
+          runState.textContent = `Pending config: ${label}`;
+          return;
+        }
+        protocolConfigDirty = false;
         if (!latestStatus?.running) {
           try {
             await saveConfig({ toastMessage: `Config saved: ${label}` });
@@ -3535,9 +3666,37 @@
         }
       }
 
+      function toggleProtocolRow(row) {
+        const key = String(row?.dataset?.protocolRow || "");
+        const control = protocolControls.find((item) => item.key === key);
+        if (!control || !protocolAvailable(control)) return;
+        control.input.checked = !control.input.checked;
+        renderProtocolControls();
+        applyProtocolSelection({ commit: false });
+      }
+
+      function setProtocolEnabled(key, enabled) {
+        const control = protocolControls.find((item) => item.key === key);
+        if (!control || !protocolAvailable(control)) return;
+        control.input.checked = Boolean(enabled);
+        renderProtocolControls();
+        applyProtocolSelection({ commit: false });
+      }
+
+      async function commitProtocolConfigIfDirty() {
+        if (!protocolConfigDirty) return;
+        await applyProtocolSelection({ commit: true });
+      }
+
       function hideFollowMenu() {
         followMenu.hidden = true;
         followMenu.innerHTML = "";
+      }
+
+      function positionContextMenu(event, width = 230) {
+        followMenu.style.left = `${Math.min(event.clientX, window.innerWidth - width - 12)}px`;
+        followMenu.style.top = `${Math.min(event.clientY, window.innerHeight - 96)}px`;
+        followMenu.hidden = false;
       }
 
       async function setZigbeeFollow(channel) {
@@ -3666,10 +3825,7 @@
           `);
         }
         followMenu.innerHTML = actions.join("");
-        const width = 210;
-        followMenu.style.left = `${Math.min(event.clientX, window.innerWidth - width - 12)}px`;
-        followMenu.style.top = `${Math.min(event.clientY, window.innerHeight - 58)}px`;
-        followMenu.hidden = false;
+        positionContextMenu(event, 210);
       }
 
       function handleFollowContextMenu(event) {
@@ -3678,17 +3834,49 @@
         showFollowMenu(event, card);
       }
 
+      function showProtocolMenu(event, row) {
+        const key = String(row?.dataset?.protocolRow || "");
+        const control = protocolControls.find((item) => item.key === key);
+        if (!control) return;
+        event.preventDefault();
+        if (!protocolAvailable(control)) {
+          showToast(`${control.label} source is missing`);
+          return;
+        }
+        const enabled = Boolean(control.input.checked);
+        followMenu.innerHTML = `
+          <button type="button" data-protocol-menu-action="${enabled ? "disable" : "enable"}" data-protocol-key="${control.key}">
+            ${materialIcon(enabled ? "toggle_off" : "toggle_on")}
+            ${enabled ? `Disable ${control.label}` : `Enable ${control.label}`}
+          </button>
+          <button type="button" data-protocol-menu-action="configure" data-protocol-key="${control.key}">
+            ${materialIcon("settings")}
+            Configure ${control.label}
+          </button>
+        `;
+        positionContextMenu(event, 250);
+      }
+
       async function handleFollowClick(event) {
         const menuButton = event.target.closest("[data-follow-menu-action]");
         const fmButton = event.target.closest("[data-fm-menu-action]");
+        const protocolButton = event.target.closest("[data-protocol-menu-action]");
         const unlockButton = event.target.closest("[data-unfollow-zigbee]");
         const stopFmButton = event.target.closest("[data-stop-fm]");
-        if (!menuButton && !unlockButton && !fmButton && !stopFmButton) return;
+        if (!menuButton && !unlockButton && !fmButton && !stopFmButton && !protocolButton) return;
         event.preventDefault();
         event.stopPropagation();
         hideFollowMenu();
         try {
-          if (stopFmButton || (fmButton && fmButton.dataset.fmMenuAction === "stop")) {
+          if (protocolButton) {
+            const key = String(protocolButton.dataset.protocolKey || "");
+            const action = String(protocolButton.dataset.protocolMenuAction || "");
+            if (action === "configure") {
+              showToast("TBD later");
+            } else {
+              setProtocolEnabled(key, action === "enable");
+            }
+          } else if (stopFmButton || (fmButton && fmButton.dataset.fmMenuAction === "stop")) {
             await setFmPlayback(null);
           } else if (fmButton) {
             await setFmPlayback(Number(fmButton.dataset.freqMhz));
@@ -3803,8 +3991,14 @@
       detectionViewSelect.addEventListener("change", pollStatus);
       hopDwellInput.addEventListener("change", scheduleAutoHop);
       document.addEventListener("click", (event) => {
+        if (event.target.closest("#followMenu")) return;
         if (!configMenu.open || configMenu.contains(event.target)) return;
         configMenu.open = false;
+      });
+      configMenu.addEventListener("toggle", () => {
+        if (!configMenu.open) {
+          commitProtocolConfigIfDirty();
+        }
       });
       sdrConfigList.addEventListener("change", async (event) => {
         const input = event.target.closest("[data-sdr-id]");
@@ -3816,6 +4010,14 @@
         showToast(`${id} ${input.checked ? "enabled" : "disabled"}`);
         await applyProtocolSelection();
         refreshPlannedStatusLabel();
+      });
+      document.querySelector(".protocol-toggles")?.addEventListener("click", (event) => {
+        if (event.target.closest(".protocol-row")) event.preventDefault();
+      });
+      document.querySelector(".protocol-toggles")?.addEventListener("contextmenu", (event) => {
+        const row = event.target.closest(".protocol-row");
+        if (!row) return;
+        showProtocolMenu(event, row);
       });
       function setDetectionTab(protocol) {
         activeDetectionTab = protocol;
@@ -3848,18 +4050,18 @@
       btcInput.addEventListener("change", () => {
         setChannels();
         scheduleAutoHop();
-        applyProtocolSelection();
+        applyProtocolSelection({ commit: false });
       });
       btleInput.addEventListener("change", () => {
         setChannels();
         scheduleAutoHop();
-        applyProtocolSelection();
+        applyProtocolSelection({ commit: false });
       });
-      zigbeeInput.addEventListener("change", applyProtocolSelection);
-      tpmsInput.addEventListener("change", applyProtocolSelection);
-      wifiInput.addEventListener("change", applyProtocolSelection);
-      fmInput.addEventListener("change", applyProtocolSelection);
-      lfmfInput.addEventListener("change", applyProtocolSelection);
+      zigbeeInput.addEventListener("change", () => applyProtocolSelection({ commit: false }));
+      tpmsInput.addEventListener("change", () => applyProtocolSelection({ commit: false }));
+      wifiInput.addEventListener("change", () => applyProtocolSelection({ commit: false }));
+      fmInput.addEventListener("change", () => applyProtocolSelection({ commit: false }));
+      lfmfInput.addEventListener("change", () => applyProtocolSelection({ commit: false }));
       identityTableWrap.addEventListener("contextmenu", handleFollowContextMenu);
       candidatesEl.addEventListener("contextmenu", handleFollowContextMenu);
       document.addEventListener("click", handleFollowClick);
@@ -3868,6 +4070,7 @@
       });
       window.addEventListener("blur", hideFollowMenu);
       setChannels();
+      renderProtocolControls();
       (async () => {
         await loadConfig();
         await loadDevices();
