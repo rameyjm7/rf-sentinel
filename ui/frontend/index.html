@@ -1023,6 +1023,19 @@
         overflow: hidden;
       }
 
+      .detection-subgroups {
+        display: grid;
+        gap: 8px;
+        padding: 10px;
+      }
+
+      .detection-subgroup {
+        border: 1px solid rgba(23, 33, 27, 0.14);
+        border-radius: 8px;
+        background: rgba(247, 244, 229, 0.74);
+        overflow: hidden;
+      }
+
       .detection-group summary {
         display: flex;
         align-items: center;
@@ -1031,6 +1044,19 @@
         padding: 9px 10px;
         cursor: pointer;
         color: var(--ink);
+        font-weight: 800;
+        list-style: none;
+      }
+
+      .detection-subgroup summary {
+        display: flex;
+        align-items: center;
+        justify-content: space-between;
+        gap: 10px;
+        padding: 8px 10px;
+        cursor: pointer;
+        color: var(--ink);
+        background: rgba(213, 191, 112, 0.16);
         font-weight: 800;
         list-style: none;
       }
@@ -1056,6 +1082,10 @@
       }
 
       .detection-group summary::-webkit-details-marker {
+        display: none;
+      }
+
+      .detection-subgroup summary::-webkit-details-marker {
         display: none;
       }
 
@@ -2892,6 +2922,86 @@
         `;
       }
 
+      function protocolGroupLabel(protocol) {
+        const map = {
+          BTC: "Bluetooth Classic",
+          BTLE: "Bluetooth Low Energy",
+          ZIGBEE: "Zigbee / 802.15.4",
+          TPMS: "TPMS / Sub-GHz",
+          WIFI: "WiFi",
+          FM: "FM Broadcast",
+          LFMF: "VLF/LF/MF Signals",
+        };
+        return map[String(protocol || "").toUpperCase()] || String(protocol || "Unknown Protocol");
+      }
+
+      function protocolSortRank(protocol) {
+        return ["BTC", "BTLE", "ZIGBEE", "TPMS", "WIFI", "FM", "LFMF"].indexOf(String(protocol || "").toUpperCase());
+      }
+
+      function sortDetectionRows(rows) {
+        return [...rows].sort((a, b) => {
+          const hiddenDelta = Number(isHiddenWifiAp(a)) - Number(isHiddenWifiAp(b));
+          if (hiddenDelta) return hiddenDelta;
+          const ai = String(a.identity || a.name || a.mac || "");
+          const bi = String(b.identity || b.name || b.mac || "");
+          return ai.localeCompare(bi);
+        });
+      }
+
+      function detectionSummaryChips(rows, label = "device") {
+        const detections = rows.reduce((sum, row) => sum + Number(row.detections || 0), 0);
+        const bestRssi = Math.max(...rows.map((row) => Number(row.last_rssi_dbfs || -120)));
+        const lastSeen = Math.max(...rows.map((row) => Number(row.last_seen_at || 0)));
+        return `
+          <span class="chip">${rows.length} ${label}${rows.length === 1 ? "" : "s"}</span>
+          <span class="chip">${Number(detections || 0).toLocaleString()} detections</span>
+          <span class="chip">${fmtMaybeDb(bestRssi)}</span>
+          <span class="chip">${age(lastSeen)}</span>
+        `;
+      }
+
+      function detectionCardsHtml(rows) {
+        return sortDetectionRows(rows)
+          .map((row) => {
+            const uuid = fmtUuid16(row);
+            const manufacturer = fmtManufacturer(row);
+            const deviceType = fmtDeviceType(row);
+            const deviceTypeDetail = fmtDeviceTypeDetail(row);
+            return `
+              <article class="detection-card ${protocolClass(row.protocol)}"${followAttrs(row)}>
+                <h3>${titleWithFollowLock(row)}</h3>
+                <div class="chips">
+                  ${protocolChip(row.protocol)}
+                  ${fcsChip(row)}
+                  ${row.inferred_merge ? `<span class="chip inferred">inferred merge${Number(row.inferred_merge_count || 0) > 1 ? ` · ${Number(row.inferred_merge_count || 0)} linked` : ""}</span>` : ""}
+                  ${deviceType ? `<span class="chip">Type ${deviceType}</span>` : ""}
+                  ${deviceTypeDetail ? `<span class="chip">${deviceTypeDetail}</span>` : ""}
+                  <span class="chip">${Number(row.detections || 0).toLocaleString()} hits</span>
+                  <span class="chip">${age(row.last_seen_at)}</span>
+                  <span class="chip">${fmtMaybeDb(row.last_rssi_dbfs)}</span>
+                  <span class="chip">CH ${row.channel ?? ""}</span>
+                  ${row.mac ? `<span class="chip">${row.mac}</span>` : ""}
+                  ${uuid ? `<span class="chip">UUID ${uuid}</span>` : ""}
+                  ${manufacturer ? `<span class="chip">${manufacturer}</span>` : ""}
+                </div>
+                ${decodedTextBlock(row)}
+                <p class="small">${row.identity_source || row.detail || "Observed from SDR packet evidence."}</p>
+              </article>
+            `;
+          })
+          .join("");
+      }
+
+      function groupRowsBy(rows, labelFn) {
+        return rows.reduce((groups, row) => {
+          const label = labelFn(row);
+          if (!groups.has(label)) groups.set(label, []);
+          groups.get(label).push(row);
+          return groups;
+        }, new Map());
+      }
+
       function renderIdentityTable(rows) {
         const filtered = activeDetectionTab === "ALL" ? rows : rows.filter((row) => row.protocol === activeDetectionTab);
         const displayRows = activeDetectionTab === "BTC" ? mergeBtcRows(filtered) : filtered;
@@ -2910,82 +3020,64 @@
           renderDetectionTable(displayRows);
           return;
         }
-        const groupedRows = displayRows.reduce((groups, row) => {
-          const label = manufacturerGroupLabel(row);
-          if (!groups.has(label)) groups.set(label, []);
-          groups.get(label).push(row);
-          return groups;
-        }, new Map());
-        const collapseAll = groupedRows.size > 1;
-        const groupCards = [...groupedRows.entries()]
-          .sort(([a], [b]) => a.localeCompare(b))
-          .map(([label, groupRows], index) => {
-            const devices = [...groupRows].sort((a, b) => {
-              const hiddenDelta = Number(isHiddenWifiAp(a)) - Number(isHiddenWifiAp(b));
-              if (hiddenDelta) return hiddenDelta;
-              const ai = String(a.identity || a.name || a.mac || "");
-              const bi = String(b.identity || b.name || b.mac || "");
-              return ai.localeCompare(bi);
-            });
-            const detections = devices.reduce((sum, row) => sum + Number(row.detections || 0), 0);
-            const bestRssi = Math.max(...devices.map((row) => Number(row.last_rssi_dbfs || -120)));
-            const lastSeen = Math.max(...devices.map((row) => Number(row.last_seen_at || 0)));
-            const groupKey = encodeURIComponent(label);
-            const groupProtocol = devices[0]?.protocol || "";
-            const isOpen = detectionGroupOpen.has(groupKey)
-              ? detectionGroupOpen.get(groupKey)
+        const protocolGroups = groupRowsBy(displayRows, (row) => row.protocol || "RF");
+        const collapseAll = protocolGroups.size > 1;
+        const groupCards = [...protocolGroups.entries()]
+          .sort(([a], [b]) => {
+            const ar = protocolSortRank(a);
+            const br = protocolSortRank(b);
+            if (ar !== br) return (ar < 0 ? 999 : ar) - (br < 0 ? 999 : br);
+            return a.localeCompare(b);
+          })
+          .map(([protocol, protocolRows], index) => {
+            const groupProtocol = String(protocol || "RF").toUpperCase();
+            const groupKey = `protocol:${groupProtocol}`;
+            const encodedGroupKey = encodeURIComponent(groupKey);
+            const isOpen = detectionGroupOpen.has(encodedGroupKey)
+              ? detectionGroupOpen.get(encodedGroupKey)
               : collapseAll ? false : index < 3;
-            return `
-              <details class="detection-group ${protocolClass(groupProtocol)}" data-group="${groupKey}" ${isOpen ? "open" : ""}>
-                <summary>
-                  <span class="detection-group-title">
-                    ${groupProtocol ? protocolChip(groupProtocol) : ""}
-                    <span class="detection-group-label">${brandIcon(label)}${label}</span>
-                  </span>
-                  <span class="chips">
-                    <span class="chip">${devices.length} device${devices.length === 1 ? "" : "s"}</span>
-                    <span class="chip">${Number(detections || 0).toLocaleString()} detections</span>
-                    <span class="chip">${fmtMaybeDb(bestRssi)}</span>
-                    <span class="chip">${age(lastSeen)}</span>
-                  </span>
-                </summary>
-                <div class="detection-grid">
-                  ${devices
-                    .map((row) => {
-                      const uuid = fmtUuid16(row);
-                      const manufacturer = fmtManufacturer(row);
-                      const deviceType = fmtDeviceType(row);
-                      const deviceTypeDetail = fmtDeviceTypeDetail(row);
+            const body = groupProtocol === "BTLE"
+              ? `<div class="detection-subgroups">${
+                  [...groupRowsBy(protocolRows, manufacturerGroupLabel).entries()]
+                    .sort(([a], [b]) => a.localeCompare(b))
+                    .map(([label, manufacturerRows], manufacturerIndex) => {
+                      const subgroupKey = `manufacturer:${groupProtocol}:${label}`;
+                      const encodedSubgroupKey = encodeURIComponent(subgroupKey);
+                      const subgroupOpen = detectionGroupOpen.has(encodedSubgroupKey)
+                        ? detectionGroupOpen.get(encodedSubgroupKey)
+                        : manufacturerIndex < 2;
                       return `
-                        <article class="detection-card ${protocolClass(row.protocol)}"${followAttrs(row)}>
-                          <h3>${titleWithFollowLock(row)}</h3>
-                          <div class="chips">
-                            ${protocolChip(row.protocol)}
-                            ${fcsChip(row)}
-                            ${row.inferred_merge ? `<span class="chip inferred">inferred merge${Number(row.inferred_merge_count || 0) > 1 ? ` · ${Number(row.inferred_merge_count || 0)} linked` : ""}</span>` : ""}
-                            ${deviceType ? `<span class="chip">Type ${deviceType}</span>` : ""}
-                            ${deviceTypeDetail ? `<span class="chip">${deviceTypeDetail}</span>` : ""}
-                            <span class="chip">${Number(row.detections || 0).toLocaleString()} hits</span>
-                            <span class="chip">${age(row.last_seen_at)}</span>
-                            <span class="chip">${fmtMaybeDb(row.last_rssi_dbfs)}</span>
-                            <span class="chip">CH ${row.channel ?? ""}</span>
-                            ${row.mac ? `<span class="chip">${row.mac}</span>` : ""}
-                            ${uuid ? `<span class="chip">UUID ${uuid}</span>` : ""}
-                            ${manufacturer ? `<span class="chip">${manufacturer}</span>` : ""}
-                          </div>
-                          ${decodedTextBlock(row)}
-                          <p class="small">${row.identity_source || row.detail || "Observed from SDR packet evidence."}</p>
-                        </article>
+                        <details class="detection-subgroup ${protocolClass(groupProtocol)}" data-group="${encodedSubgroupKey}" ${subgroupOpen ? "open" : ""}>
+                          <summary>
+                            <span class="detection-group-title">
+                              ${protocolChip(groupProtocol)}
+                              <span class="detection-group-label">${brandIcon(label)}${label}</span>
+                            </span>
+                            <span class="chips">${detectionSummaryChips(manufacturerRows)}</span>
+                          </summary>
+                          <div class="detection-grid">${detectionCardsHtml(manufacturerRows)}</div>
+                        </details>
                       `;
                     })
-                    .join("")}
-                </div>
+                    .join("")
+                }</div>`
+              : `<div class="detection-grid">${detectionCardsHtml(protocolRows)}</div>`;
+            return `
+              <details class="detection-group ${protocolClass(groupProtocol)}" data-group="${encodedGroupKey}" ${isOpen ? "open" : ""}>
+                <summary>
+                  <span class="detection-group-title">
+                    ${protocolChip(groupProtocol)}
+                    <span class="detection-group-label">${protocolGroupLabel(groupProtocol)}</span>
+                  </span>
+                  <span class="chips">${detectionSummaryChips(protocolRows)}</span>
+                </summary>
+                ${body}
               </details>
             `;
           })
           .join("");
         identityTableWrap.innerHTML = `<div class="detection-groups">${groupCards}</div>`;
-        identityTableWrap.querySelectorAll(".detection-group").forEach((group) => {
+        identityTableWrap.querySelectorAll(".detection-group, .detection-subgroup").forEach((group) => {
           group.addEventListener("toggle", () => {
             detectionGroupOpen.set(group.dataset.group || "", group.open);
           });
