@@ -3272,6 +3272,7 @@
             : "";
           const selectedHop = String(status?.device_ids?.hop || status?.device_ids?.radio_b || inferredHop || selectedDeviceId(btleDeviceSelect) || "");
           const isLfmf = enabledProtocols.has("lfmf") && isSdrplayRsp2Device(device);
+          const isWifi = enabledProtocols.has("wifi") && isWifiDevice(device);
           const isClassic = selectedClassic && id === selectedClassic;
           const isHop = selectedHop && id === selectedHop;
           const protocols = [];
@@ -3280,8 +3281,9 @@
           if (isHop && enabledProtocols.has("zigbee")) protocols.push("ZIGBEE");
           if (isHop && enabledProtocols.has("tpms")) protocols.push("TPMS");
           if (isHop && enabledProtocols.has("fm")) protocols.push("FM");
+          if (isWifi) protocols.push("WIFI");
           if (isLfmf) protocols.push("LFMF");
-          return { isClassic, isHop, isLfmf, protocols };
+          return { isClassic, isHop, isWifi, isLfmf, protocols };
         }
         function fallbackSdrBand(device) {
           const role = deviceRole(device);
@@ -3297,6 +3299,7 @@
             if (enabledProtocols.has("fm")) parts.push("FM 87.7-107.9 MHz");
             return parts.length ? parts.join(" · ") : "RF hopping";
           }
+          if (role.isWifi) return "WiFi monitor · channels 1,6,11 · 802.11 frames";
           if (role.isLfmf) return "VLF/LF/MF survey · SDRplay RSP2 · 1 kHz-3 MHz";
           const minHz = Number(device.freq_min_hz || 0);
           const maxHz = Number(device.freq_max_hz || 0);
@@ -3356,7 +3359,7 @@
           return chips.length ? chips.map((protocol) => sdrRoleChip(protocol)).join("") : "";
         }
         devices
-          .filter((device) => String(device?.id || "").trim() && String(device?.id || "").trim() !== "wlan0")
+          .filter((device) => String(device?.id || "").trim())
           .sort((a, b) => String(a.id || "").localeCompare(String(b.id || "")))
           .forEach((device) => {
             const assignment = assignments[device.id] || null;

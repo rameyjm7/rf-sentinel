@@ -768,7 +768,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--wifi-event-limit", type=int, default=500)
     parser.add_argument("--wifi-active-scan", action="store_true")
     parser.add_argument("--wifi-active-scan-interval-s", type=float, default=60.0)
-    parser.add_argument("--wifi-set-monitor", action="store_true", default=False)
+    parser.add_argument("--wifi-set-monitor", action="store_true", default=True)
     parser.add_argument("--wifi-set-channel", action="store_true", default=True)
 
     parser.add_argument("--fm-slice-s", type=float, default=DEFAULT_JOB_DWELL_S)

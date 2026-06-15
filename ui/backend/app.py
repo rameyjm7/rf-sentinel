@@ -4011,6 +4011,17 @@ def _has_wifi_device(devices: list[dict[str, Any]], enabled_devices: set[str] | 
     return False
 
 
+def _wifi_interface_from_devices(devices: list[dict[str, Any]], enabled_devices: set[str] | None = None) -> str:
+    for item in devices:
+        device_id = str(item.get("id") or "").strip()
+        if enabled_devices is not None and device_id not in enabled_devices:
+            continue
+        text = f"{device_id} {item.get('label') or ''} {item.get('driver') or ''}".lower()
+        if "wlan" in text or "wifi" in text or "802.11" in text:
+            return device_id
+    return ""
+
+
 def _is_sdrplay_device(item: dict[str, Any]) -> bool:
     text = f"{item.get('id') or ''} {item.get('label') or ''} {item.get('driver') or ''}".lower()
     return "sdrplay" in text and ("rsp2" in text or str(item.get("id") or "").lower().startswith("sdrplay:"))
@@ -4166,11 +4177,13 @@ def _parse_scanner_assignment(line: str) -> dict[str, Any] | None:
     )
     if hop_match:
         command = hop_match.group("command")
-        device_match = re.search(r"--device-id\s+(\S+)", command)
-        if not device_match:
-            return None
         job_name = hop_match.group("job")
         protocol = _scanner_protocol_from_job_name(job_name)
+        device_match = re.search(r"--device-id\s+(\S+)", command)
+        if protocol == "wifi" and not device_match:
+            device_match = re.search(r"--interface\s+(\S+)", command)
+        if not device_match:
+            return None
         return {
             "device_id": device_match.group(1),
             "job_name": job_name,
@@ -4298,6 +4311,10 @@ def _start_rf_sentinel_engine(
     devices = enabled_devices or set()
     for device_id in sorted(devices):
         cmd.extend(["--allowed-device-id", device_id])
+    if "wifi" in protocols:
+        wifi_interface = _wifi_interface_from_devices(_available_devices(), enabled_devices)
+        if wifi_interface:
+            cmd.extend(["--wifi-interface", wifi_interface])
     if "btc" not in protocols:
         cmd.append("--no-btc")
     if "ble" not in protocols:
@@ -4550,9 +4567,63 @@ def _fetch_gateway_devices() -> list[dict[str, Any]]:
         resp.raise_for_status()
     body = resp.json()
     devices = body if isinstance(body, list) else []
+    devices = [dict(item) for item in devices if isinstance(item, dict)]
+    devices.extend(_fetch_gateway_wifi_devices())
     with devices_cache_lock:
-        devices_cache = [dict(item) for item in devices if isinstance(item, dict)]
+        devices_cache = devices
         devices_cache_updated_at = time.time()
+    return devices
+
+
+def _fetch_gateway_wifi_devices() -> list[dict[str, Any]]:
+    try:
+        resp = requests.get(
+            f"{_gateway_base()}/wifi/interfaces",
+            headers=_gateway_headers(),
+            timeout=min(SDR_GATEWAY_DEVICES_TIMEOUT_SECONDS, 5.0),
+        )
+        if resp.status_code >= 400:
+            return []
+        body = resp.json()
+    except (requests.RequestException, ValueError):
+        return []
+    if not isinstance(body, list):
+        return []
+    devices: list[dict[str, Any]] = []
+    for item in body:
+        if not isinstance(item, dict):
+            continue
+        name = str(item.get("name") or "").strip()
+        if not name:
+            continue
+        frequency_mhz = item.get("frequency_mhz")
+        channel = item.get("channel")
+        details = []
+        if channel:
+            details.append(f"channel {channel}")
+        if frequency_mhz:
+            details.append(f"{frequency_mhz} MHz")
+        if item.get("type"):
+            details.append(str(item.get("type")))
+        devices.append(
+            {
+                "id": name,
+                "driver": "wifi",
+                "label": f"WiFi interface {name}",
+                "serial": item.get("mac"),
+                "freq_min_hz": 2_400_000_000,
+                "freq_max_hz": 5_900_000_000,
+                "max_sample_rate_sps": 0,
+                "notes": "802.11 monitor/capture source from sdr-gateway"
+                + (f" ({', '.join(details)})" if details else ""),
+                "occupied": False,
+                "occupied_by": None,
+                "occupied_id": None,
+                "up": bool(item.get("up")),
+                "channel": channel,
+                "frequency_mhz": frequency_mhz,
+            }
+        )
     return devices
 
 
