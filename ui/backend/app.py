@@ -1500,6 +1500,7 @@ class CombinedBluetoothDetector:
 
 app = Flask(__name__, static_folder=str(PROJECT_ROOT / "ui" / "frontend"), static_url_path="")
 app.logger.setLevel(logging.INFO)
+logging.getLogger("werkzeug").setLevel(logging.WARNING)
 state = ExplorerState()
 fm_playback = FmPlaybackState()
 state_lock = threading.Lock()
@@ -2540,14 +2541,16 @@ def _btcsniffer_loop(proc: subprocess.Popen[str], center_freq_hz: int, bank_star
             line = raw_line.strip()
             if not line:
                 continue
-            _btc_log("%s", line)
             events: list[dict[str, Any]] = []
             candidates: list[dict[str, Any]] = []
             json_start = line.find("{")
+            if json_start < 0:
+                _btc_log("%s", line)
             if json_start > 0:
                 text_part = line[:json_start].strip()
                 json_part = line[json_start:].strip()
                 if text_part:
+                    _btc_log("%s", text_part)
                     text_events, text_candidates = _btcsniffer_event_from_line(text_part, center_freq_hz, bank_start_channel)
                     events.extend(text_events)
                     candidates.extend(text_candidates)
@@ -4645,10 +4648,11 @@ def _rf_sentinel_loop(proc: subprocess.Popen[str]) -> None:
             payload_protocol = str((payload or {}).get("protocol") or "").lower()
             payload_kind = str((payload or {}).get("kind") or "").lower()
             noisy_packet_line = payload is not None and (
-                source_protocol in {"ble", "wifi"}
-                or payload_protocol in {"ble", "btle", "wifi"}
-                or payload_kind == "ble_adv"
+                source_protocol in {"ble", "btc", "bluetooth", "classic", "zigbee", "wifi"}
+                or payload_protocol in {"ble", "btle", "btc", "bluetooth_classic", "ieee802154", "wifi"}
+                or payload_kind in {"ble_adv", "classic_lap", "zigbee_frame", "wifi_frame"}
                 or payload_kind.startswith(("mgmt.", "ctrl.", "data."))
+                or str((payload or {}).get("type") or "").lower() == "metrics"
             )
             with state_lock:
                 if not noisy_packet_line:
