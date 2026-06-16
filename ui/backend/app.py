@@ -1618,6 +1618,14 @@ CSV_PROTOCOL_COLUMNS = {
         "decoded_mcc",
         "decoded_mnc",
         "decoded_plmn",
+        "decoded_plmn_source",
+        "lte_sync_status",
+        "lte_pss_detected",
+        "lte_n_id_2",
+        "lte_pss_metric",
+        "lte_cell_id_status",
+        "lte_mib_status",
+        "lte_sib1_status",
         "excess_db",
         "noise_floor_dbfs",
         "occupied_width_hz",
@@ -3758,12 +3766,16 @@ def _scanner_json_to_events(source: str, payload: dict[str, Any]) -> list[dict[s
         likely_plmn = str(payload.get("likely_plmn") or "").strip()
         plmn_source = str(payload.get("plmn_source") or "").strip()
         decoded_plmn = str(payload.get("decoded_plmn") or "").strip()
+        lte_pss_detected = bool(payload.get("lte_pss_detected"))
+        lte_n_id_2 = payload.get("lte_n_id_2")
+        lte_sync_status = str(payload.get("lte_sync_status") or "").strip()
         classification = str(payload.get("classification") or "Passive cellular spectrum activity").strip()
         detail_bits = [
             technology,
             cellular_type if cellular_type != technology else "",
             likely_operator if likely_operator else "",
             f"PLMN {decoded_plmn}" if decoded_plmn else (f"likely PLMN {likely_plmn}" if likely_plmn else ""),
+            f"LTE PSS N_id_2={lte_n_id_2}" if lte_pss_detected and lte_n_id_2 is not None else (lte_sync_status.replace("_", " ") if lte_sync_status and lte_sync_status not in {"not_attempted", "not_lte_band"} else ""),
             band,
             link,
             f"excess {float(payload.get('excess_db')):.1f} dB" if payload.get("excess_db") is not None else "",
@@ -3801,6 +3813,14 @@ def _scanner_json_to_events(source: str, payload: dict[str, Any]) -> list[dict[s
                 "decoded_mcc": payload.get("decoded_mcc"),
                 "decoded_mnc": payload.get("decoded_mnc"),
                 "decoded_plmn": decoded_plmn,
+                "decoded_plmn_source": payload.get("decoded_plmn_source"),
+                "lte_sync_status": lte_sync_status,
+                "lte_pss_detected": lte_pss_detected,
+                "lte_n_id_2": lte_n_id_2,
+                "lte_pss_metric": payload.get("lte_pss_metric"),
+                "lte_cell_id_status": payload.get("lte_cell_id_status"),
+                "lte_mib_status": payload.get("lte_mib_status"),
+                "lte_sib1_status": payload.get("lte_sib1_status"),
                 "classification": classification,
                 "target": payload.get("target"),
                 "passive_only": payload.get("passive_only", True),
@@ -4134,6 +4154,14 @@ def _upsert_discovery_row(event: dict[str, Any]) -> None:
             "decoded_mcc": event.get("decoded_mcc"),
             "decoded_mnc": event.get("decoded_mnc"),
             "decoded_plmn": event.get("decoded_plmn"),
+            "decoded_plmn_source": event.get("decoded_plmn_source"),
+            "lte_sync_status": event.get("lte_sync_status"),
+            "lte_pss_detected": event.get("lte_pss_detected"),
+            "lte_n_id_2": event.get("lte_n_id_2"),
+            "lte_pss_metric": event.get("lte_pss_metric"),
+            "lte_cell_id_status": event.get("lte_cell_id_status"),
+            "lte_mib_status": event.get("lte_mib_status"),
+            "lte_sib1_status": event.get("lte_sib1_status"),
             "classification": event.get("classification"),
             "target": event.get("target"),
             "passive_only": event.get("passive_only", True),

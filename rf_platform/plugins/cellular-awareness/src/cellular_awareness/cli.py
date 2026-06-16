@@ -65,6 +65,14 @@ class Detection:
     decoded_plmn: str
     classification: str
     notes: str
+    lte_sync_status: str = "not_attempted"
+    lte_pss_detected: bool = False
+    lte_n_id_2: int | None = None
+    lte_pss_metric: float = 0.0
+    lte_cell_id_status: str = "requires_sss"
+    lte_mib_status: str = "requires_pbch"
+    lte_sib1_status: str = "requires_mib_and_pdsch"
+    decoded_plmn_source: str = ""
     target: bool = False
 
 
@@ -83,6 +91,10 @@ CELLULAR_BANDS: tuple[CellularBand, ...] = (
     CellularBand("3GPP n78 / C-band", 3_300_000_000, 3_800_000_000, None, None, "5G NR TDD", "5G NR", "C-band 5G", "5G C-band operator", "ambiguous"),
     CellularBand("3GPP n79 / 4.7 GHz", 4_400_000_000, 5_000_000_000, None, None, "5G NR TDD", "5G NR", "4.7 GHz 5G", "5G operator", "ambiguous"),
 )
+
+LTE_SAMPLE_RATES_SPS = (1_920_000, 3_840_000, 7_680_000, 15_360_000, 30_720_000)
+LTE_PSS_ROOTS = (25, 29, 34)
+LTE_DECODE_LADDER = "PSS -> SSS/PCI -> PBCH/MIB -> PDCCH/PDSCH SIB1 -> decoded MCC/MNC"
 
 
 class GatewayStream:
@@ -277,6 +289,7 @@ def _analyze_iq(args: argparse.Namespace, iq: np.ndarray) -> list[Detection]:
             guard_hz = max(int(args.target_width_hz), int(args.candidate_guard_hz))
             detections = [row for row in detections if abs(row.frequency_hz - target.frequency_hz) > guard_hz]
             detections.insert(0, target)
+    _annotate_lte_sync(args, samples, detections)
     return detections[: int(args.top)]
 
 
@@ -394,6 +407,116 @@ def _target_frequency_detection(args: argparse.Namespace, freqs: np.ndarray, pow
     )
 
 
+def _annotate_lte_sync(args: argparse.Namespace, samples: np.ndarray, rows: list[Detection]) -> None:
+    if not bool(getattr(args, "lte_sync", True)):
+        for row in rows:
+            row.lte_sync_status = "disabled"
+        return
+    if samples.size < 4096:
+        for row in rows:
+            row.lte_sync_status = "insufficient_iq"
+        return
+    for row in rows:
+        technology = f"{row.technology} {row.band}".lower()
+        if "lte" not in technology:
+            row.lte_sync_status = "not_lte_band"
+            continue
+        probe_frequency_hz = int(getattr(args, "target_freq_hz", row.frequency_hz)) if row.target else int(row.frequency_hz)
+        offset_hz = int(probe_frequency_hz - int(args.center_freq_hz))
+        result = _lte_pss_probe(
+            samples=samples,
+            sample_rate_sps=int(args.sample_rate_sps),
+            offset_hz=offset_hz,
+            threshold=float(args.lte_pss_threshold),
+            max_segments=int(args.lte_sync_max_segments),
+        )
+        row.lte_sync_status = result["status"]
+        row.lte_pss_detected = bool(result["detected"])
+        row.lte_n_id_2 = result["n_id_2"]
+        row.lte_pss_metric = round(float(result["metric"]), 3)
+        row.lte_cell_id_status = "requires_sss_for_full_pci" if row.lte_pss_detected else "requires_pss"
+        row.lte_mib_status = "requires_pbch_after_pss_sss" if row.lte_pss_detected else "requires_sync"
+        row.lte_sib1_status = "requires_mib_and_pdsch_for_plmn" if row.lte_pss_detected else "requires_sync"
+        row.decoded_plmn_source = "not_decoded_sib1_required"
+        if row.lte_pss_detected:
+            row.classification = "Passive LTE synchronization signal candidate"
+            ladder = f"LTE PSS N_id_2={row.lte_n_id_2} metric={row.lte_pss_metric:.3f}; {LTE_DECODE_LADDER}"
+            row.notes = f"{row.notes}; {ladder}" if row.notes else ladder
+
+
+def _lte_pss_probe(
+    *,
+    samples: np.ndarray,
+    sample_rate_sps: int,
+    offset_hz: int,
+    threshold: float,
+    max_segments: int,
+) -> dict[str, Any]:
+    sample_rate = float(sample_rate_sps)
+    if abs(float(offset_hz)) > sample_rate / 2.0 - 600_000.0:
+        return {"status": "outside_passband", "detected": False, "n_id_2": None, "metric": 0.0}
+    nfft = int(round(sample_rate / 15_000.0))
+    if nfft < 128:
+        return {"status": "sample_rate_too_low_for_lte_pss", "detected": False, "n_id_2": None, "metric": 0.0}
+    nfft = min(nfft, int(samples.size))
+    if nfft < 128:
+        return {"status": "insufficient_iq", "detected": False, "n_id_2": None, "metric": 0.0}
+
+    bin_hz = sample_rate / float(nfft)
+    center_bin = nfft // 2 + int(round(float(offset_hz) / bin_hz))
+    subcarrier_step = max(1, int(round(15_000.0 / bin_hz)))
+    rel_bins = np.concatenate((np.arange(-31, 0), np.arange(1, 32))) * subcarrier_step
+    bins = center_bin + rel_bins
+    if int(np.min(bins)) < 0 or int(np.max(bins)) >= nfft:
+        return {"status": "pss_bins_outside_fft", "detected": False, "n_id_2": None, "metric": 0.0}
+
+    seqs = [_lte_pss_sequence(n_id_2) for n_id_2 in range(3)]
+    window = np.hanning(nfft).astype(np.float32)
+    step = max(1, nfft // 4)
+    best_metric = 0.0
+    best_n_id_2: int | None = None
+    segments = 0
+    for start in range(0, max(1, samples.size - nfft + 1), step):
+        chunk = samples[start : start + nfft]
+        if chunk.size < nfft:
+            break
+        spectrum = np.fft.fftshift(np.fft.fft((chunk - np.mean(chunk)) * window))
+        vector = spectrum[bins]
+        energy = np.abs(vector)
+        if not np.all(np.isfinite(energy)) or float(np.mean(energy)) <= 1e-12:
+            continue
+        # Equalize amplitude roughly so the correlation is driven by PSS phase structure.
+        vector = vector / np.maximum(energy, 1e-12)
+        for n_id_2, seq in enumerate(seqs):
+            candidate = float(abs(np.vdot(seq, vector)) / float(seq.size))
+            if candidate > best_metric:
+                best_metric = candidate
+                best_n_id_2 = int(n_id_2)
+        segments += 1
+        if segments >= max(1, max_segments):
+            break
+
+    status = "pss_detected" if best_metric >= threshold else "pss_not_detected"
+    if not _is_lte_standard_sample_rate(sample_rate_sps):
+        status = f"{status}_nonstandard_sample_rate"
+    return {"status": status, "detected": best_metric >= threshold, "n_id_2": best_n_id_2, "metric": best_metric}
+
+
+def _lte_pss_sequence(n_id_2: int) -> np.ndarray:
+    root = LTE_PSS_ROOTS[int(n_id_2)]
+    values: list[complex] = []
+    for n in range(31):
+        values.append(complex(np.exp(-1j * np.pi * root * n * (n + 1) / 63.0)))
+    for n in range(31, 62):
+        values.append(complex(np.exp(-1j * np.pi * root * (n + 1) * (n + 2) / 63.0)))
+    return np.asarray(values, dtype=np.complex64)
+
+
+def _is_lte_standard_sample_rate(sample_rate_sps: int) -> bool:
+    sample_rate = float(sample_rate_sps)
+    return any(abs(sample_rate - float(rate)) / float(rate) < 0.01 for rate in LTE_SAMPLE_RATES_SPS)
+
+
 def _mask_regions(mask: np.ndarray) -> list[tuple[int, int]]:
     regions: list[tuple[int, int]] = []
     start: int | None = None
@@ -501,13 +624,17 @@ def _print_detections(args: argparse.Namespace, rows: list[Detection]) -> None:
             writer.writerow(asdict(row))
         return
     print("Passive cellular spectrum awareness only. No subscriber traffic/content is decoded.")
-    print("freq_mhz  link      tech      excess  power   operator / PLMN hint         band")
+    print("freq_mhz  link      tech      excess  power   LTE sync              operator / PLMN hint         band")
     for row in rows:
         operator = row.likely_operator or "-"
         plmn = row.likely_plmn or "-"
+        if row.lte_pss_detected:
+            sync = f"PSS N2={row.lte_n_id_2} {row.lte_pss_metric:.2f}"
+        else:
+            sync = row.lte_sync_status.replace("_", " ")[:20] or "-"
         print(
             f"{row.frequency_mhz:8.3f}  {row.link:8s}  {row.technology[:8]:8s}  {row.excess_db:6.1f}  "
-            f"{row.power_dbfs:6.1f}  {operator[:18]:18s} {plmn:8s}  {row.band}"
+            f"{row.power_dbfs:6.1f}  {sync[:20]:20s}  {operator[:18]:18s} {plmn:8s}  {row.band}"
         )
 
 
@@ -540,6 +667,10 @@ def build_parser() -> argparse.ArgumentParser:
     scan.add_argument("--target-threshold-db", type=float, default=1.5)
     scan.add_argument("--target-report", dest="target_report", action="store_true", default=True)
     scan.add_argument("--no-target-report", dest="target_report", action="store_false")
+    scan.add_argument("--lte-sync", dest="lte_sync", action="store_true", default=True, help="run a passive LTE PSS sync probe on LTE-band candidates")
+    scan.add_argument("--no-lte-sync", dest="lte_sync", action="store_false", help="skip LTE PSS sync probing and report spectrum only")
+    scan.add_argument("--lte-pss-threshold", type=float, default=0.55)
+    scan.add_argument("--lte-sync-max-segments", type=int, default=96)
     scan.add_argument("--top", type=int, default=12)
     scan.add_argument("--jsonl", action="store_true")
     scan.add_argument("--json", action="store_true")
