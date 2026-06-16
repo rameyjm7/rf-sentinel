@@ -28,6 +28,9 @@ DEFAULT_WIFI_INTERFACE = "wlan0"
 DEFAULT_FM_SAMPLE_RATE_SPS = 20_000_000
 DEFAULT_FM_INTERVAL_S = 60.0
 DEFAULT_LFMF_INTERVAL_S = 120.0
+DEFAULT_CELLULAR_CENTER_FREQ_HZ = 751_000_000
+DEFAULT_CELLULAR_SAMPLE_RATE_SPS = 20_000_000
+DEFAULT_CELLULAR_SLICE_S = 12.0
 
 
 @dataclass(frozen=True)
@@ -348,6 +351,43 @@ def _build_jobs(args: argparse.Namespace) -> tuple[list[ScanJob], list[ScanJob]]
             command.extend(["--serial", args.lfmf_serial])
         return ScanJob(name=name, protocol="lfmf", dwell_s=args.lfmf_slice_s, command=command)
 
+    def cellular_job(name: str, device_id: str) -> ScanJob:
+        return ScanJob(
+            name=name,
+            protocol="cellular",
+            dwell_s=args.cellular_slice_s,
+            command=[
+                _bin("cellular_awareness"),
+                "scan",
+                "--device-id",
+                device_id,
+                "--center-freq-hz",
+                str(args.cellular_center_freq_hz),
+                "--target-freq-hz",
+                str(args.cellular_target_freq_hz),
+                "--sample-rate-sps",
+                str(args.cellular_sample_rate_sps),
+                "--bandwidth-hz",
+                str(args.cellular_bandwidth_hz),
+                "--dwell-s",
+                str(args.cellular_dwell_s),
+                "--lna-gain-db",
+                str(args.cellular_lna_gain_db),
+                "--vga-gain-db",
+                str(args.cellular_vga_gain_db),
+                "--active-threshold-db",
+                str(args.cellular_active_threshold_db),
+                "--candidate-threshold-db",
+                str(args.cellular_candidate_threshold_db),
+                "--target-threshold-db",
+                str(args.cellular_target_threshold_db),
+                "--top",
+                str(args.cellular_top),
+                "--replace-existing",
+                "--jsonl",
+            ],
+        )
+
     if bool(args.sweep_both_radios):
         radios = [
             ("radio_a", args.radio_a_device_id or args.btc_device_id, args.radio_a_btc_bandwidth_mhz, args.btc_lna_gain_db, args.btc_vga_gain_db),
@@ -368,6 +408,8 @@ def _build_jobs(args: argparse.Namespace) -> tuple[list[ScanJob], list[ScanJob]]
                 cycled.append(fm_job(f"{prefix}:fm", device_id))
             if not args.no_lfmf and _is_sdrplay_device_id(device_id):
                 cycled.append(lfmf_job(f"{prefix}:lfmf", device_id))
+            if not args.no_cellular:
+                cycled.append(cellular_job(f"{prefix}:cellular", device_id))
         if not args.no_wifi:
             cycled.append(wifi_job("wifi"))
         return continuous, cycled
@@ -399,6 +441,9 @@ def _build_jobs(args: argparse.Namespace) -> tuple[list[ScanJob], list[ScanJob]]
         else:
             print("[rf-sentinel] VLF/LF/MF disabled; no allowed SDRplay RSP2 device", flush=True)
 
+    if not args.no_cellular:
+        cycled.append(cellular_job("cellular", args.hop_device_id))
+
     if not args.no_wifi:
         cycled.append(wifi_job("wifi"))
 
@@ -406,7 +451,7 @@ def _build_jobs(args: argparse.Namespace) -> tuple[list[ScanJob], list[ScanJob]]
 
 
 def _configured_protocols(args: argparse.Namespace) -> set[str]:
-    protocols = {"btc", "ble", "zigbee", "tpms", "wifi", "fm", "lfmf"}
+    protocols = {"btc", "ble", "zigbee", "tpms", "wifi", "fm", "lfmf", "cellular"}
     if args.no_btc:
         protocols.discard("btc")
     if args.no_ble:
@@ -421,6 +466,8 @@ def _configured_protocols(args: argparse.Namespace) -> set[str]:
         protocols.discard("fm")
     if args.no_lfmf:
         protocols.discard("lfmf")
+    if args.no_cellular:
+        protocols.discard("cellular")
     return protocols
 
 
@@ -553,6 +600,8 @@ def _job_interval_s(args: argparse.Namespace, job: ScanJob) -> float:
         return max(1.0, float(args.fm_interval_s))
     if job.protocol == "lfmf":
         return max(1.0, float(args.lfmf_interval_s))
+    if job.protocol == "cellular":
+        return max(1.0, float(args.cellular_interval_s))
     return 0.0
 
 
@@ -793,6 +842,20 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--lfmf-active-threshold-db", type=float, default=6.0)
     parser.add_argument("--lfmf-top-signals", type=int, default=50)
 
+    parser.add_argument("--cellular-slice-s", type=float, default=DEFAULT_CELLULAR_SLICE_S)
+    parser.add_argument("--cellular-interval-s", type=float, default=30.0)
+    parser.add_argument("--cellular-center-freq-hz", type=int, default=DEFAULT_CELLULAR_CENTER_FREQ_HZ)
+    parser.add_argument("--cellular-target-freq-hz", type=int, default=DEFAULT_CELLULAR_CENTER_FREQ_HZ)
+    parser.add_argument("--cellular-sample-rate-sps", type=int, default=DEFAULT_CELLULAR_SAMPLE_RATE_SPS)
+    parser.add_argument("--cellular-bandwidth-hz", type=int, default=DEFAULT_CELLULAR_SAMPLE_RATE_SPS)
+    parser.add_argument("--cellular-dwell-s", type=float, default=0.35)
+    parser.add_argument("--cellular-active-threshold-db", type=float, default=5.0)
+    parser.add_argument("--cellular-candidate-threshold-db", type=float, default=1.5)
+    parser.add_argument("--cellular-target-threshold-db", type=float, default=1.5)
+    parser.add_argument("--cellular-top", type=int, default=8)
+    parser.add_argument("--cellular-lna-gain-db", type=int, default=32)
+    parser.add_argument("--cellular-vga-gain-db", type=int, default=40)
+
     parser.add_argument("--no-btc", action="store_true")
     parser.add_argument("--no-ble", action="store_true")
     parser.add_argument("--no-zigbee", action="store_true")
@@ -800,6 +863,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--no-wifi", action="store_true")
     parser.add_argument("--no-fm", action="store_true")
     parser.add_argument("--no-lfmf", action="store_true")
+    parser.add_argument("--no-cellular", action="store_true")
     parser.add_argument(
         "--allowed-device-id",
         action="append",

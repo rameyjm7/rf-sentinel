@@ -24,6 +24,7 @@
         --wifi-green: #16a34a;
         --fm-amber: #f59e0b;
         --lfmf-cyan: #0891b2;
+        --cellular-magenta: #db2777;
         --shadow: 0 18px 60px rgba(23, 33, 27, 0.12);
       }
 
@@ -1145,6 +1146,12 @@
         background: linear-gradient(90deg, rgba(8, 145, 178, 0.14), rgba(255, 250, 240, 0.86) 34%);
       }
 
+      .detection-card.protocol-cellular,
+      .candidate.protocol-cellular {
+        border-left-color: var(--cellular-magenta);
+        background: linear-gradient(90deg, rgba(219, 39, 119, 0.13), rgba(255, 250, 240, 0.86) 34%);
+      }
+
       .wifi-topology {
         display: grid;
         gap: 10px;
@@ -1507,6 +1514,11 @@
         background: #a5f3fc;
       }
 
+      .chip.protocol-cellular {
+        color: #500724;
+        background: #fbcfe8;
+      }
+
       .chip.sdr-role-selected {
         border: 2px solid currentColor;
         box-shadow: 0 0 0 2px rgba(255, 253, 248, 0.18);
@@ -1530,6 +1542,10 @@
 
       .chip.sdr-role-selected.protocol-lfmf {
         border-color: var(--lfmf-cyan);
+      }
+
+      .chip.sdr-role-selected.protocol-cellular {
+        border-color: var(--cellular-magenta);
       }
 
       .brand-icon-inline {
@@ -1617,6 +1633,10 @@
 
       .candidate.protocol-lfmf {
         border-left: 4px solid var(--lfmf-cyan);
+      }
+
+      .candidate.protocol-cellular {
+        border-left: 4px solid var(--cellular-magenta);
       }
 
       .candidate-top {
@@ -1750,6 +1770,7 @@
                   <label class="protocol-row" id="wifiToggle" data-protocol-row="wifi"><input id="wifiInput" type="checkbox" checked /></label>
                   <label class="protocol-row" data-protocol-row="fm"><input id="fmInput" type="checkbox" checked /></label>
                   <label class="protocol-row" id="lfmfToggle" data-protocol-row="lfmf"><input id="lfmfInput" type="checkbox" checked /></label>
+                  <label class="protocol-row" data-protocol-row="cellular"><input id="cellularInput" type="checkbox" checked /></label>
                 </div>
                 <div class="config-note">BTC and BLE share one 2.4 GHz ISM SDR stream when a wideband radio is available. VLF/LF/MF is SDRplay RSP2-only and scans the low-frequency spectrum separately.</div>
               </div>
@@ -1779,6 +1800,7 @@
             <div class="metric"><span>WiFi Frames</span><strong id="wifiMetric">0</strong></div>
             <div class="metric"><span>FM Stations</span><strong id="fmMetric">0</strong></div>
             <div class="metric"><span>VLF/LF/MF</span><strong id="lfmfMetric">0</strong></div>
+            <div class="metric"><span>Cellular</span><strong id="cellularMetric">0</strong></div>
           </div>
           <div class="sdr-assignment-list" id="sdrAssignmentList"></div>
           <div class="spectrum" id="spectrum"></div>
@@ -1797,6 +1819,7 @@
                 <button class="tab-btn" id="wifiTabBtn" type="button">WiFi</button>
                 <button class="tab-btn" id="fmTabBtn" type="button">FM</button>
                 <button class="tab-btn" id="lfmfTabBtn" type="button">VLF/LF/MF</button>
+                <button class="tab-btn" id="cellularTabBtn" type="button">Cellular</button>
               </div>
               <select class="view-select" id="detectionViewSelect">
                 <option value="cards">Cards</option>
@@ -1861,6 +1884,7 @@
       const fmInput = document.getElementById("fmInput");
       const lfmfInput = document.getElementById("lfmfInput");
       const lfmfToggle = document.getElementById("lfmfToggle");
+      const cellularInput = document.getElementById("cellularInput");
       const sdrConfigList = document.getElementById("sdrConfigList");
       const channelSelect = document.getElementById("channelSelect");
       const scanForm = document.getElementById("scanForm");
@@ -1887,6 +1911,7 @@
       const wifiTabBtn = document.getElementById("wifiTabBtn");
       const fmTabBtn = document.getElementById("fmTabBtn");
       const lfmfTabBtn = document.getElementById("lfmfTabBtn");
+      const cellularTabBtn = document.getElementById("cellularTabBtn");
       const candidatePanelTitle = document.getElementById("candidatePanelTitle");
       const candidatesEl = document.getElementById("candidates");
       const detectionViewSelect = document.getElementById("detectionViewSelect");
@@ -1921,6 +1946,7 @@
         wifi: document.getElementById("wifiMetric"),
         fm: document.getElementById("fmMetric"),
         lfmf: document.getElementById("lfmfMetric"),
+        cellular: document.getElementById("cellularMetric"),
       };
       const protocolControls = [
         { key: "btc", label: "2.4G BTC", protocol: "BTC", input: btcInput, detail: "Classic Bluetooth hopping" },
@@ -1930,6 +1956,7 @@
         { key: "wifi", label: "WiFi", protocol: "WIFI", input: wifiInput, detail: "802.11 monitor frames", available: () => wifiDeviceAvailable },
         { key: "fm", label: "FM", protocol: "FM", input: fmInput, detail: "Broadcast FM stations" },
         { key: "lfmf", label: "VLF/LF/MF", protocol: "LFMF", input: lfmfInput, detail: "SDRplay RSP2 low-frequency scan", available: () => lfmfDeviceAvailable },
+        { key: "cellular", label: "Cellular", protocol: "CELLULAR", input: cellularInput, detail: "Passive 700 MHz-6 GHz infrastructure awareness" },
       ];
 
       const bars = Array.from({ length: 40 }, (_, idx) => {
@@ -2154,6 +2181,7 @@
         if (!wifiInput.disabled && wifiInput.checked) protocols.push("wifi");
         if (fmInput.checked) protocols.push("fm");
         if (!lfmfInput.disabled && lfmfInput.checked) protocols.push("lfmf");
+        if (cellularInput.checked) protocols.push("cellular");
         return protocols;
       }
 
@@ -2184,6 +2212,7 @@
         wifiInput.checked = wifiDeviceAvailable && values.has("wifi");
         fmInput.checked = values.has("fm");
         lfmfInput.checked = lfmfDeviceAvailable && values.has("lfmf");
+        cellularInput.checked = values.has("cellular");
         renderProtocolControls();
       }
 
@@ -2287,6 +2316,7 @@
           wifi: "WiFi",
           fm: "FM",
           lfmf: "VLF/LF/MF",
+          cellular: "Cellular",
         };
         return map[String(protocol || "").toLowerCase()] || String(protocol || "Idle");
       }
@@ -2468,6 +2498,7 @@
         if (value === "WIFI") return "protocol-wifi";
         if (value === "FM") return "protocol-fm";
         if (value === "LFMF") return "protocol-lfmf";
+        if (value === "CELLULAR") return "protocol-cellular";
         return "protocol-rf";
       }
 
@@ -2489,7 +2520,9 @@
                   ? materialIcon("radio")
                   : value === "LFMF"
                     ? materialIcon("waves")
-                    : materialIcon("sensors");
+                    : value === "CELLULAR"
+                      ? materialIcon("cell_tower")
+                      : materialIcon("sensors");
         return `<span class="chip ${protocolClass(value)}">${icon}${value}</span>`;
       }
 
@@ -2723,6 +2756,7 @@
         if (row.protocol === "WIFI") return row.wifi_role === "ap" ? "WiFi Access Points" : "WiFi Stations";
         if (row.protocol === "FM") return "FM Broadcast";
         if (row.protocol === "LFMF") return "VLF/LF/MF Signals";
+        if (row.protocol === "CELLULAR") return "Cellular Awareness";
         const manufacturerName = canonicalBleVendorName(row.manufacturer?.company_name || "");
         if (manufacturerName) return manufacturerName;
         const uuidVendor = uuidVendorName(row);
@@ -2931,12 +2965,13 @@
           WIFI: "WiFi",
           FM: "FM Broadcast",
           LFMF: "VLF/LF/MF Signals",
+          CELLULAR: "Cellular Awareness",
         };
         return map[String(protocol || "").toUpperCase()] || String(protocol || "Unknown Protocol");
       }
 
       function protocolSortRank(protocol) {
-        return ["BTC", "BTLE", "ZIGBEE", "TPMS", "WIFI", "FM", "LFMF"].indexOf(String(protocol || "").toUpperCase());
+        return ["BTC", "BTLE", "ZIGBEE", "TPMS", "WIFI", "FM", "LFMF", "CELLULAR"].indexOf(String(protocol || "").toUpperCase());
       }
 
       function sortDetectionRows(rows) {
@@ -3482,7 +3517,7 @@
         function deviceRole(device) {
           const id = String(device?.id || "");
           const selectedClassic = String(status?.device_ids?.classic || status?.device_ids?.radio_a || selectedDeviceId(btcDeviceSelect) || "");
-          const separateBandsEnabled = enabledProtocols.has("zigbee") || enabledProtocols.has("tpms") || enabledProtocols.has("fm");
+          const separateBandsEnabled = enabledProtocols.has("zigbee") || enabledProtocols.has("tpms") || enabledProtocols.has("fm") || enabledProtocols.has("cellular");
           const inferredHop = separateBandsEnabled
             ? bestNonBluetoothHopDevice(devices, selectedClassic)?.id || ""
             : "";
@@ -3497,6 +3532,7 @@
           if (isHop && enabledProtocols.has("zigbee")) protocols.push("ZIGBEE");
           if (isHop && enabledProtocols.has("tpms")) protocols.push("TPMS");
           if (isHop && enabledProtocols.has("fm")) protocols.push("FM");
+          if (isHop && enabledProtocols.has("cellular")) protocols.push("CELLULAR");
           if (isWifi) protocols.push("WIFI");
           if (isLfmf) protocols.push("LFMF");
           return { isClassic, isHop, isWifi, isLfmf, protocols };
@@ -3513,6 +3549,7 @@
             if (enabledProtocols.has("zigbee")) parts.push("Zigbee-ready 2405-2480 MHz");
             if (enabledProtocols.has("tpms")) parts.push("TPMS 315/433.92 MHz");
             if (enabledProtocols.has("fm")) parts.push("FM 87.7-107.9 MHz");
+            if (enabledProtocols.has("cellular")) parts.push("Cellular 700 MHz-6 GHz");
             return parts.length ? parts.join(" · ") : "RF hopping";
           }
           if (role.isWifi) return "WiFi monitor · channels 1,6,11 · 802.11 frames";
@@ -3523,6 +3560,7 @@
           const can24 = minHz <= 2_402_000_000 && maxHz >= 2_480_000_000;
           const canFm = minHz <= 87_700_000 && maxHz >= 107_900_000;
           const canTpms = minHz <= 315_000_000 && maxHz >= 433_920_000;
+          const canCellular = minHz <= 751_000_000 && maxHz >= 751_000_000;
           const bands = [];
           if (can24) {
             const ism = [];
@@ -3540,6 +3578,7 @@
           }
           if (canTpms && enabledProtocols.has("tpms")) bands.push("TPMS 315/433.92 MHz");
           if (canFm && enabledProtocols.has("fm")) bands.push("FM 87.7-107.9 MHz");
+          if (canCellular && enabledProtocols.has("cellular")) bands.push("Cellular 700 MHz-6 GHz");
           if (isSdrplayRsp2Device(device) && enabledProtocols.has("lfmf")) bands.push("VLF/LF/MF 1 kHz-3 MHz");
           if (bands.length) return `${bands.slice(0, 2).join(" · ")}${bands.length > 2 ? " · more" : ""}`;
           if (maxMsps > 0) return `RF sweep up to ${maxMsps.toFixed(1)} Msps`;
@@ -3711,6 +3750,7 @@
           metrics.wifi.textContent = Number(protocolDetections("WIFI") || 0).toLocaleString();
           metrics.fm.textContent = Number(protocolDetections("FM") || 0).toLocaleString();
           metrics.lfmf.textContent = Number(protocolDetections("LFMF") || 0).toLocaleString();
+          metrics.cellular.textContent = Number(protocolDetections("CELLULAR") || 0).toLocaleString();
           updateBtcTargetVisibility(Boolean((btcTargetMacInput.value || "").trim() || status.test_target));
           renderIdentityTable(status.discovery_table || []);
           renderCandidates(status.classic_candidates || [], status.classic_addresses || [], status.discovery_table || []);
@@ -4127,6 +4167,7 @@
           [wifiTabBtn, "WIFI"],
           [fmTabBtn, "FM"],
           [lfmfTabBtn, "LFMF"],
+          [cellularTabBtn, "CELLULAR"],
         ].forEach(([button, value]) => button.classList.toggle("active", protocol === value));
         pollStatus();
       }
@@ -4139,6 +4180,7 @@
       wifiTabBtn.addEventListener("click", () => setDetectionTab("WIFI"));
       fmTabBtn.addEventListener("click", () => setDetectionTab("FM"));
       lfmfTabBtn.addEventListener("click", () => setDetectionTab("LFMF"));
+      cellularTabBtn.addEventListener("click", () => setDetectionTab("CELLULAR"));
       btcInput.addEventListener("change", () => {
         setChannels();
         scheduleAutoHop();
@@ -4154,6 +4196,7 @@
       wifiInput.addEventListener("change", () => applyProtocolSelection({ commit: false }));
       fmInput.addEventListener("change", () => applyProtocolSelection({ commit: false }));
       lfmfInput.addEventListener("change", () => applyProtocolSelection({ commit: false }));
+      cellularInput.addEventListener("change", () => applyProtocolSelection({ commit: false }));
       identityTableWrap.addEventListener("contextmenu", handleFollowContextMenu);
       candidatesEl.addEventListener("contextmenu", handleFollowContextMenu);
       document.addEventListener("click", handleFollowClick);

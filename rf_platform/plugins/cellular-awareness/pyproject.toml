@@ -1,0 +1,26 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "cellular-awareness"
+version = "0.1.0"
+description = "RF Sentinel passive cellular infrastructure spectrum-awareness scanner"
+requires-python = ">=3.10"
+dependencies = [
+  "numpy>=1.24",
+  "requests>=2.31",
+  "websocket-client>=1.7",
+]
+
+[project.scripts]
+cellular-awareness = "cellular_awareness.cli:main"
+cellular_awareness = "cellular_awareness.cli:main"
+cellular-scan = "cellular_awareness.cli:main"
+cellular_scan = "cellular_awareness.cli:main"
+
+[tool.setuptools]
+package-dir = {"" = "src"}
+
+[tool.setuptools.packages.find]
+where = ["src"]

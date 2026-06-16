@@ -79,7 +79,7 @@ RF_SENTINEL_ARCHIVE_DIR = RF_SENTINEL_LOG_DIR / "archives"
 RF_SENTINEL_CSV_RETENTION_DAYS = max(1, int(os.getenv("RF_SENTINEL_CSV_RETENTION_DAYS", "7")))
 RF_SENTINEL_CSV_ARCHIVE_MAX_MB = max(1, int(os.getenv("RF_SENTINEL_CSV_ARCHIVE_MAX_MB", "1000")))
 RF_SENTINEL_NO_CHANGE = object()
-RF_SENTINEL_PROTOCOLS = {"btc", "ble", "zigbee", "tpms", "wifi", "fm", "lfmf"}
+RF_SENTINEL_PROTOCOLS = {"btc", "ble", "zigbee", "tpms", "wifi", "fm", "lfmf", "cellular"}
 RF_SENTINEL_KEEP_BAD_FCS = os.getenv("RF_SENTINEL_KEEP_BAD_FCS", "0").strip().lower() in {"1", "true", "yes", "on"}
 BLE_IDENTITY_CACHE_PATH = DATA_DIR / "ble_identities.json"
 COMPANY_IDENTIFIERS_PATH = DATA_DIR / "company_identifiers.json"
@@ -1604,6 +1604,16 @@ CSV_PROTOCOL_COLUMNS = {
         "band_label",
         "active",
     ],
+    "cellular": [
+        "band",
+        "link",
+        "excess_db",
+        "noise_floor_dbfs",
+        "occupied_width_hz",
+        "target",
+        "passive_only",
+        "content_decoded",
+    ],
 }
 
 CSV_COMBINED_COLUMNS = CSV_COMMON_COLUMNS + sorted({col for cols in CSV_PROTOCOL_COLUMNS.values() for col in cols})
@@ -1615,6 +1625,7 @@ CSV_PROTOCOL_FILE_NAMES = {
     "WIFI": "wifi.csv",
     "FM": "fm.csv",
     "LFMF": "lfmf.csv",
+    "CELLULAR": "cellular.csv",
 }
 CSV_LOGGABLE_KINDS = {
     "ble_adv",
@@ -1624,6 +1635,7 @@ CSV_LOGGABLE_KINDS = {
     "wifi_frame",
     "fm_station",
     "lfmf_signal",
+    "cellular_signal",
 }
 
 BLE_APPEARANCE_LABELS = {
@@ -3208,6 +3220,7 @@ def _csv_protocol_key(event: dict[str, Any]) -> str:
         "wifi_frame": "WIFI",
         "fm_station": "FM",
         "lfmf_signal": "LFMF",
+        "cellular_signal": "CELLULAR",
     }.get(str(event.get("kind") or ""), "")
 
 
@@ -3231,6 +3244,8 @@ def _csv_loggable_event(event: dict[str, Any]) -> bool:
     if kind == "fm_station":
         return bool(event.get("frequency_hz") or event.get("center_freq_hz") or event.get("identity"))
     if kind == "lfmf_signal":
+        return bool(event.get("frequency_hz") or event.get("center_freq_hz") or event.get("identity"))
+    if kind == "cellular_signal":
         return bool(event.get("frequency_hz") or event.get("center_freq_hz") or event.get("identity"))
     return True
 
@@ -3313,6 +3328,11 @@ def _csv_event_row(event: dict[str, Any], columns: list[str]) -> dict[str, str]:
         "band": event.get("band"),
         "band_label": event.get("band_label"),
         "active": event.get("active"),
+        "link": event.get("link"),
+        "noise_floor_dbfs": event.get("noise_floor_dbfs"),
+        "occupied_width_hz": event.get("occupied_width_hz"),
+        "passive_only": event.get("passive_only"),
+        "content_decoded": event.get("content_decoded"),
     }
     return {column: _csv_cell(row_values.get(column)) for column in columns}
 
@@ -3696,6 +3716,54 @@ def _scanner_json_to_events(source: str, payload: dict[str, Any]) -> list[dict[s
             }
         ]
 
+    if protocol in {"cellular awareness", "cellular"} or source_protocol == "cellular":
+        frequency_hz = payload.get("frequency_hz") or payload.get("center_freq_hz")
+        frequency_mhz = payload.get("frequency_mhz")
+        try:
+            frequency_hz_int = int(frequency_hz)
+        except (TypeError, ValueError):
+            try:
+                frequency_hz_int = int(float(frequency_mhz) * 1_000_000)
+            except (TypeError, ValueError):
+                frequency_hz_int = 0
+        label = f"{frequency_hz_int / 1_000_000:.3f} MHz" if frequency_hz_int else "Cellular activity"
+        band = str(payload.get("band") or "Cellular spectrum").strip()
+        link = str(payload.get("link") or "unknown").strip()
+        classification = str(payload.get("classification") or "Passive cellular spectrum activity").strip()
+        detail_bits = [
+            classification,
+            band,
+            link,
+            f"excess {float(payload.get('excess_db')):.1f} dB" if payload.get("excess_db") is not None else "",
+            "target" if payload.get("target") else "",
+        ]
+        return [
+            {
+                "kind": "cellular_signal",
+                "protocol": "CELLULAR",
+                "seen_at": now,
+                "identity": f"{label} {link}".strip(),
+                "mac": str(frequency_hz_int or label),
+                "detail": " · ".join(bit for bit in detail_bits if bit),
+                "device_type": "Cellular infrastructure awareness",
+                "device_type_detail": band,
+                "center_freq_hz": payload.get("center_freq_hz") or frequency_hz_int or None,
+                "frequency_hz": frequency_hz_int or None,
+                "frequency_mhz": payload.get("frequency_mhz"),
+                "last_rssi_dbfs": payload.get("power_dbfs"),
+                "rssi_dbfs": payload.get("power_dbfs"),
+                "power_dbfs": payload.get("power_dbfs"),
+                "noise_floor_dbfs": payload.get("noise_floor_dbfs"),
+                "excess_db": payload.get("excess_db"),
+                "occupied_width_hz": payload.get("occupied_width_hz"),
+                "band": band,
+                "link": link,
+                "target": payload.get("target"),
+                "passive_only": payload.get("passive_only", True),
+                "content_decoded": payload.get("content_decoded", False),
+            }
+        ]
+
     return []
 
 
@@ -3727,6 +3795,7 @@ def _append_detections(events: list[dict[str, Any]], candidates: list[dict[str, 
                 "wifi_frame": "wifi",
                 "fm_station": "fm",
                 "lfmf_signal": "lfmf",
+                "cellular_signal": "cellular",
             }.get(str(event.get("kind") or ""))
             if mode_key:
                 rssi = _real_rssi(event.get("rssi_dbfs", event.get("last_rssi_dbfs")))
@@ -3742,7 +3811,7 @@ def _append_detections(events: list[dict[str, Any]], candidates: list[dict[str, 
                         state.noise_floor_dbfs = round((state.noise_floor_dbfs * 0.92) + (rssi * 0.08), 1)
                 except (TypeError, ValueError):
                     pass
-            if event["kind"] in {"ble_adv", "classic_lap", "zigbee_frame", "tpms_frame", "wifi_frame", "fm_station", "lfmf_signal"}:
+            if event["kind"] in {"ble_adv", "classic_lap", "zigbee_frame", "tpms_frame", "wifi_frame", "fm_station", "lfmf_signal", "cellular_signal"}:
                 _upsert_discovery_row(event)
             if event["kind"] == "classic_lap":
                 _upsert_classic_address(event)
@@ -3982,6 +4051,34 @@ def _upsert_discovery_row(event: dict[str, Any]) -> None:
             "band": event.get("band"),
             "band_label": event.get("band_label"),
             "active": event.get("active"),
+        }
+    elif event.get("kind") == "cellular_signal":
+        identity = str(event.get("identity") or "Cellular activity")
+        frequency_hz = event.get("frequency_hz") or event.get("center_freq_hz")
+        band = str(event.get("band") or "Cellular spectrum").strip()
+        row = {
+            "key": f"cellular:{frequency_hz or identity}:{event.get('link') or 'unknown'}",
+            "protocol": "CELLULAR",
+            "identity": identity,
+            "mac": str(frequency_hz or identity),
+            "detail": str(event.get("detail") or "Passive cellular spectrum awareness"),
+            "device_type": str(event.get("device_type") or "Cellular infrastructure awareness"),
+            "device_type_detail": band,
+            "detections": 1,
+            "last_seen_at": now,
+            "last_rssi_dbfs": event.get("last_rssi_dbfs") or event.get("power_dbfs") or event.get("rssi_dbfs"),
+            "center_freq_hz": event.get("center_freq_hz") or frequency_hz,
+            "frequency_hz": frequency_hz,
+            "frequency_mhz": event.get("frequency_mhz"),
+            "power_dbfs": event.get("power_dbfs"),
+            "noise_floor_dbfs": event.get("noise_floor_dbfs"),
+            "excess_db": event.get("excess_db"),
+            "occupied_width_hz": event.get("occupied_width_hz"),
+            "band": band,
+            "link": event.get("link"),
+            "target": event.get("target"),
+            "passive_only": event.get("passive_only", True),
+            "content_decoded": event.get("content_decoded", False),
         }
     else:
         return
@@ -4748,6 +4845,8 @@ def _start_rf_sentinel_engine(
         cmd.append("--no-fm")
     if "lfmf" not in protocols:
         cmd.append("--no-lfmf")
+    if "cellular" not in protocols:
+        cmd.append("--no-cellular")
     # Start in discovery mode; only the explicit right-click Follow action locks Zigbee.
     zigbee_follow_channel = None
     control = _write_rf_sentinel_control(
@@ -5341,7 +5440,7 @@ def start_scan():
         combined_device_id = _pick_ism24_bluetooth_device(devices_available, enabled_devices)
         if combined_device_id:
             btc_device_id = combined_device_id
-            other_sdr_protocols = enabled_protocols & {"zigbee", "tpms", "fm"}
+            other_sdr_protocols = enabled_protocols & {"zigbee", "tpms", "fm", "cellular"}
             alternate_hop_device_id = _pick_non_bluetooth_hop_device(devices_available, combined_device_id, enabled_devices)
             btle_device_id = alternate_hop_device_id if mode == "sentinel" and other_sdr_protocols and alternate_hop_device_id else combined_device_id
             combined_rate_mhz = max(1, min(BT_CLASSIC_BANK_SIZE, _btc_max_bandwidth_mhz_for_device(combined_device_id)))
