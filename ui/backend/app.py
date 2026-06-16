@@ -1503,7 +1503,7 @@ app.logger.setLevel(logging.INFO)
 logging.getLogger("werkzeug").setLevel(logging.WARNING)
 state = ExplorerState()
 fm_playback = FmPlaybackState()
-state_lock = threading.Lock()
+state_lock = threading.RLock()
 csv_log_lock = threading.Lock()
 identity_cache_lock = threading.Lock()
 worker_stop = threading.Event()
@@ -1515,6 +1515,17 @@ fm_worker_thread: threading.Thread | None = None
 fm_audio_q: queue.Queue[bytes] = queue.Queue(maxsize=96)
 fm_pending_thread: threading.Thread | None = None
 fm_request_serial = 0
+
+CONSOLE_DASHBOARD = os.getenv("RF_SENTINEL_CONSOLE_DASHBOARD", "1").strip().lower() not in {"0", "false", "no", "off"}
+CONSOLE_COLOR = os.getenv("RF_SENTINEL_CONSOLE_COLOR", "1").strip().lower() not in {"0", "false", "no", "off"}
+CONSOLE_REFRESH_S = 0.5
+CONSOLE_LOG_BUFFER_LINES = max(20, int(os.getenv("RF_SENTINEL_CONSOLE_LOG_BUFFER_LINES", "200")))
+CONSOLE_LOG_VIEW_LINES = max(4, int(os.getenv("RF_SENTINEL_CONSOLE_LOG_VIEW_LINES", "10")))
+console_lock = threading.Lock()
+console_log_lines: list[str] = []
+console_last_render = 0.0
+console_dashboard_stop = threading.Event()
+console_dashboard_thread: threading.Thread | None = None
 inquiry_process: subprocess.Popen[str] | None = None
 btc_engine_process: subprocess.Popen[str] | None = None
 btc_engine_thread: threading.Thread | None = None
@@ -1623,6 +1634,7 @@ CSV_PROTOCOL_COLUMNS = {
         "lte_pss_detected",
         "lte_n_id_2",
         "lte_pss_metric",
+        "lte_pss_freq_offset_hz",
         "lte_cell_id_status",
         "lte_mib_status",
         "lte_sib1_status",
@@ -2522,17 +2534,18 @@ def _btcsniffer_event_from_json(payload: dict[str, Any], center_freq_hz: int, ba
         candidates.append({**event, "uap_hex": f"{payload.get('uap0')} / {payload.get('uap1')}", "score": 0.82})
         return events, candidates
 
-    if event_type == "lap_resolved":
+    if event_type in {"lap_resolved", "lap_seen"}:
         uap = str(payload.get("uap") or "").upper()
         event = {
             **base,
             "uap": uap,
-            "status": "resolved",
+            "status": "seen" if event_type == "lap_seen" else "resolved",
             "candidate_count": 1,
             "tracking_us": int(payload.get("tracking_us") or 0),
         }
         events.append(event)
-        candidates.append({**event, "uap_hex": uap, "score": 0.99})
+        if event_type == "lap_resolved":
+            candidates.append({**event, "uap_hex": uap, "score": 0.99})
         return events, candidates
 
     if event_type == "passive_fhs_bdaddr":
@@ -3818,6 +3831,7 @@ def _scanner_json_to_events(source: str, payload: dict[str, Any]) -> list[dict[s
                 "lte_pss_detected": lte_pss_detected,
                 "lte_n_id_2": lte_n_id_2,
                 "lte_pss_metric": payload.get("lte_pss_metric"),
+                "lte_pss_freq_offset_hz": payload.get("lte_pss_freq_offset_hz"),
                 "lte_cell_id_status": payload.get("lte_cell_id_status"),
                 "lte_mib_status": payload.get("lte_mib_status"),
                 "lte_sib1_status": payload.get("lte_sib1_status"),
@@ -3884,6 +3898,7 @@ def _append_detections(events: list[dict[str, Any]], candidates: list[dict[str, 
         state.detections = (events + state.detections)[:240]
         if candidates:
             state.classic_candidates = (candidates + state.classic_candidates)[:64]
+    _console_render()
 
 
 def _classic_full_mac(nap: Any = None, uap: Any = None, lap: Any = None) -> str:
@@ -3943,8 +3958,8 @@ def _upsert_discovery_row(event: dict[str, Any]) -> None:
         lap = str(event.get("lap") or "").strip()
         if not lap:
             return
-        uap = str(event.get("uap") or "XX")
-        nap = str(event.get("nap") or "XXXX")
+        uap = str(event.get("uap") or "XX").upper()
+        nap = str(event.get("nap") or "XXXX").upper()
         full_mac = _classic_full_mac(nap, uap, lap)
         target = _classic_test_match(lap, uap)
         identity = full_mac
@@ -3953,7 +3968,7 @@ def _upsert_discovery_row(event: dict[str, Any]) -> None:
             identity = f"TEST DONGLE {identity}"
             detail = "target-match" if not detail else f"target-match · {detail}"
         row = {
-            "key": f"btc:{lap}:{uap if uap != 'XX' else 'missing'}",
+            "key": f"btc:{lap}",
             "protocol": "BTC",
             "identity": identity,
             "mac": full_mac,
@@ -4159,6 +4174,7 @@ def _upsert_discovery_row(event: dict[str, Any]) -> None:
             "lte_pss_detected": event.get("lte_pss_detected"),
             "lte_n_id_2": event.get("lte_n_id_2"),
             "lte_pss_metric": event.get("lte_pss_metric"),
+            "lte_pss_freq_offset_hz": event.get("lte_pss_freq_offset_hz"),
             "lte_cell_id_status": event.get("lte_cell_id_status"),
             "lte_mib_status": event.get("lte_mib_status"),
             "lte_sib1_status": event.get("lte_sib1_status"),
@@ -4171,9 +4187,28 @@ def _upsert_discovery_row(event: dict[str, Any]) -> None:
         return
 
     for idx, existing in enumerate(state.discovery_table):
-        if existing.get("key") != row["key"]:
+        same_classic_lap = row.get("protocol") == "BTC" and existing.get("protocol") == "BTC" and existing.get("lap") == row.get("lap")
+        if existing.get("key") != row["key"] and not same_classic_lap:
             continue
         row["detections"] = int(existing.get("detections") or 0) + 1
+        if row.get("protocol") == "BTC":
+            existing_uap = str(existing.get("uap") or "").upper()
+            row_uap = str(row.get("uap") or "").upper()
+            if existing_uap not in {"", "XX", "XXX", "NONE"} and row_uap in {"", "XX", "XXX", "NONE"}:
+                row["uap"] = existing_uap
+            existing_nap = str(existing.get("nap") or "").upper()
+            row_nap = str(row.get("nap") or "").upper()
+            if existing_nap not in {"", "XXXX", "XX:XX", "NONE"} and row_nap in {"", "XXXX", "XX:XX", "NONE"}:
+                row["nap"] = existing_nap
+            row["full_mac"] = _classic_full_mac(row.get("nap"), row.get("uap"), row.get("lap"))
+            row["mac"] = row["full_mac"]
+            row["identity"] = row["full_mac"]
+            if existing.get("target") and not row.get("target"):
+                row["target"] = True
+            if row.get("target"):
+                row["identity"] = f"TEST DONGLE {row['identity']}"
+            if not row.get("detail") and existing.get("detail"):
+                row["detail"] = existing["detail"]
         if not row.get("name") and existing.get("name"):
             row["name"] = existing["name"]
         if row.get("protocol") == "BTLE":
@@ -4627,6 +4662,22 @@ def _is_sdrplay_device(item: dict[str, Any]) -> bool:
     return "sdrplay" in text and ("rsp2" in text or str(item.get("id") or "").lower().startswith("sdrplay:"))
 
 
+def _is_rtlsdr_device(item: dict[str, Any]) -> bool:
+    text = f"{item.get('id') or ''} {item.get('label') or ''} {item.get('driver') or ''}".lower()
+    return "rtlsdr" in text or "rtl-sdr" in text or str(item.get("id") or "").lower().startswith("rtlsdr:")
+
+
+def _fm_device_from_devices(devices: list[dict[str, Any]], enabled_devices: set[str] | None = None) -> str:
+    for predicate in (_is_sdrplay_device, _is_rtlsdr_device):
+        for item in devices:
+            device_id = str(item.get("id") or "").strip()
+            if enabled_devices is not None and device_id not in enabled_devices:
+                continue
+            if predicate(item):
+                return device_id
+    return ""
+
+
 def _has_lfmf_device(devices: list[dict[str, Any]], enabled_devices: set[str] | None = None) -> bool:
     for item in devices:
         device_id = str(item.get("id") or "").strip()
@@ -4668,12 +4719,12 @@ def _append_scanner_log(line: str) -> None:
     text = str(line or "").rstrip()
     if not text:
         return
-    print(text, flush=True)
     state.scanner_log.append(text)
     state.scanner_log = state.scanner_log[-300:]
     assignment = _parse_scanner_assignment(text)
     if assignment:
         state.scanner_assignments[assignment["device_id"]] = assignment
+    _console_append_log(text)
 
 
 def _scanner_protocol_from_job_name(job_name: str) -> str:
@@ -4731,6 +4782,233 @@ def _scanner_band_from_command(command: str, protocol: str) -> str:
             return f"WiFi CH {match.group(1)}"
         return "WiFi monitor"
     return ""
+
+
+def _console_append_log(line: str) -> None:
+    text = str(line or "").strip()
+    if not text:
+        return
+    if not CONSOLE_DASHBOARD:
+        print(text, flush=True)
+        return
+    timestamp = time.strftime("%H:%M:%S")
+    with console_lock:
+        console_log_lines.append(f"{timestamp} {text}")
+        del console_log_lines[:-CONSOLE_LOG_BUFFER_LINES]
+    _console_render()
+
+
+def _console_protocol_count(protocol: str) -> int:
+    protocol = str(protocol or "").upper()
+    aliases = {
+        "BLE": {"BTLE"},
+        "BTLE": {"BTLE"},
+        "BTC": {"BTC"},
+        "ZIGBEE": {"ZIGBEE"},
+        "TPMS": {"TPMS"},
+        "WIFI": {"WIFI"},
+        "FM": {"FM"},
+        "LFMF": {"LFMF"},
+        "CELLULAR": {"CELLULAR"},
+    }.get(protocol, {protocol})
+    total = 0
+    for row in state.discovery_table:
+        if str(row.get("protocol") or "").upper() in aliases:
+            total += max(1, int(row.get("detections") or 0))
+    return total
+
+
+ANSI_RE = re.compile(r"\x1b\[[0-9;]*m")
+
+
+def _c(code: str, text: str) -> str:
+    if not CONSOLE_COLOR:
+        return str(text)
+    return f"\033[{code}m{text}\033[0m"
+
+
+def _console_protocol_color(protocol: str) -> str:
+    return {
+        "BTC": "96;1",
+        "BLE": "34;1",
+        "BTLE": "34;1",
+        "ZIGBEE": "35;1",
+        "TPMS": "33;1",
+        "WIFI": "32;1",
+        "FM": "33;1",
+        "FM-AUDIO": "33;1",
+        "LFMF": "36;1",
+        "CELLULAR": "31;1",
+    }.get(str(protocol or "").upper(), "37;1")
+
+
+def _console_log_style(line: str) -> str:
+    if re.search(r"\b(ERROR|failed|exception|traceback)\b", line, re.IGNORECASE):
+        return _c("31;1", line)
+    if re.search(r"\b(WARNING|WARN|busy|conflict)\b", line, re.IGNORECASE):
+        return _c("33;1", line)
+    if re.search(r"\b(started|running|active|restored|released)\b", line, re.IGNORECASE):
+        return _c("32", line)
+    return _c("37", line)
+
+
+def _console_assignment_rows() -> list[dict[str, Any]]:
+    rows: list[dict[str, Any]] = []
+    assignments = dict(state.scanner_assignments or {})
+    for device_id in sorted(assignments):
+        assignment = assignments[device_id]
+        protocol = str(assignment.get("protocol") or "rf").upper()
+        band = str(assignment.get("band") or "scanning")
+        detections = _console_protocol_count(protocol)
+        age = max(0, int(time.time() - float(assignment.get("seen_at") or time.time())))
+        rows.append({"device": device_id, "protocol": protocol, "count": detections, "band": f"{band} ({age}s)"})
+    if fm_playback.running or fm_playback.pending:
+        status = "pending" if fm_playback.pending else "playing"
+        device_id = fm_playback.pending_device_id or fm_playback.device_id or "fm-sdr"
+        freq = fm_playback.pending_freq_mhz or fm_playback.freq_mhz
+        rows.append({"device": device_id, "protocol": "FM-AUDIO", "count": fm_playback.produced_chunks, "band": f"{freq:.1f} MHz {status}"})
+    if not rows:
+        rows.append({"device": "No active scanner assignments yet.", "protocol": "", "count": "", "band": ""})
+    return rows
+
+
+def _console_term_width() -> int:
+    return max(72, min(180, shutil.get_terminal_size((120, 32)).columns - 1))
+
+
+def _console_fit(text: str, width: int) -> str:
+    clean = str(text or "").replace("\r", " ").replace("\n", " ").replace("\t", " ").strip()
+    visible = ANSI_RE.sub("", clean)
+    if len(visible) > width:
+        clean = visible[: max(0, width - 3)] + "..."
+        visible = clean
+    return clean + (" " * max(0, width - len(visible)))
+
+
+def _console_scrollbar(total: int, visible: int) -> list[str]:
+    visible = max(1, int(visible))
+    if total <= visible:
+        return [" "] * visible
+    thumb = max(1, min(visible, int(round((visible / max(1, total)) * visible))))
+    top = visible - thumb
+    return ["#" if top <= idx < top + thumb else "|" for idx in range(visible)]
+
+
+def _console_box(title: str, lines: list[str], width: int, height: int | None = None, scrollbar: bool = False, total_lines: int | None = None) -> list[str]:
+    width = max(40, int(width))
+    title_text = f" {title.strip()} "
+    top = _c("90", "+") + _c("36;1", title_text) + _c("90", "-" * max(0, width - len(title_text) - 2) + "+")
+    bottom = _c("90", "+" + "-" * (width - 2) + "+")
+    if height is not None:
+        body = list(lines[-height:])
+        while len(body) < height:
+            body.insert(0, "")
+    else:
+        body = list(lines)
+    bar = _console_scrollbar(int(total_lines if total_lines is not None else len(lines)), len(body)) if scrollbar else [""] * len(body)
+    content_width = width - (5 if scrollbar else 4)
+    rendered = [top]
+    for idx, line in enumerate(body):
+        scroll = _c("36;1", bar[idx]) if bar[idx] == "#" else _c("90", bar[idx])
+        if scrollbar:
+            rendered.append(f"{_c('90', '|')} {_console_fit(line, content_width)}{scroll}{_c('90', '|')}")
+        else:
+            rendered.append(f"{_c('90', '|')} {_console_fit(line, content_width)} {_c('90', '|')}")
+    rendered.append(bottom)
+    return rendered
+
+
+def _console_sdr_lines(rows: list[dict[str, Any]]) -> list[str]:
+    lines = [_c("90;1", f"{'DEVICE':<14} {'PROTO':<10} {'COUNT':>8}  BAND")]
+    for row in rows:
+        device = str(row.get("device") or "")
+        protocol = str(row.get("protocol") or "")
+        count = row.get("count")
+        band = str(row.get("band") or "")
+        if not protocol:
+            lines.append(_c("90", device))
+            continue
+        chip = _c(_console_protocol_color(protocol), f"{protocol:<10}")
+        count_text = f"{int(count):>8}" if isinstance(count, int) else f"{str(count):>8}"
+        lines.append(f"{_c('37;1', f'{device:<14}')} {chip} {_c('32;1', count_text)}  {_c('37', band)}")
+    return lines
+
+
+def _console_render(force: bool = False) -> None:
+    global console_last_render
+    if not CONSOLE_DASHBOARD:
+        return
+    now = time.time()
+    if not force and now - console_last_render < CONSOLE_REFRESH_S:
+        return
+    with console_lock:
+        console_last_render = now
+        all_logs = list(console_log_lines)
+        logs = all_logs[-CONSOLE_LOG_VIEW_LINES:]
+    with state_lock:
+        rows = _console_assignment_rows()
+        running = "running" if state.running else "idle"
+        enabled = ", ".join(str(item).upper() for item in state.decoder_stats.get("enabled_protocols", [])) or "-"
+    width = _console_term_width()
+    divider = "=" * width
+    log_lines = [_console_log_style(line) for line in (logs or ["(no backend log messages yet)"])]
+    sdr_lines = _console_sdr_lines(rows)
+    output = [
+        "\033[2J\033[H",
+        _c("36;1", "RF Sentinel backend").ljust(width),
+        f"{_c('90', 'State:')} {_c('32;1' if running == 'running' else '33;1', running)}   {_c('90', 'Enabled:')} {_c('37', enabled)}",
+        _c("90", divider),
+        *_console_box("Flask / backend log", log_lines, width, height=CONSOLE_LOG_VIEW_LINES, scrollbar=True, total_lines=len(all_logs)),
+        _c("90", divider),
+        *_console_box("SDRs / current work", sdr_lines, width),
+        "",
+    ]
+    try:
+        sys.stdout.write("\n".join(output))
+        sys.stdout.flush()
+    except Exception:
+        pass
+
+
+def _console_dashboard_loop() -> None:
+    while not console_dashboard_stop.wait(CONSOLE_REFRESH_S):
+        _console_render(force=True)
+
+
+def start_console_dashboard(host: str = "", port: int | str = "") -> None:
+    global console_dashboard_thread
+    if not CONSOLE_DASHBOARD:
+        return
+    if console_dashboard_thread and console_dashboard_thread.is_alive():
+        return
+    label = f"RF Sentinel UI starting on {host}:{port}" if host or port else "RF Sentinel UI starting"
+    _console_append_log(label)
+    console_dashboard_stop.clear()
+    console_dashboard_thread = threading.Thread(target=_console_dashboard_loop, daemon=True)
+    console_dashboard_thread.start()
+    _console_render(force=True)
+
+
+def stop_console_dashboard() -> None:
+    console_dashboard_stop.set()
+
+
+class _ConsoleDashboardLogHandler(logging.Handler):
+    def emit(self, record: logging.LogRecord) -> None:
+        try:
+            _console_append_log(self.format(record))
+        except Exception:
+            self.handleError(record)
+
+
+if CONSOLE_DASHBOARD:
+    _console_handler = _ConsoleDashboardLogHandler()
+    _console_handler.setFormatter(logging.Formatter("%(levelname)s %(name)s: %(message)s"))
+    app.logger.handlers = [_console_handler]
+    app.logger.propagate = False
+    werkzeug_logger = logging.getLogger("werkzeug")
+    werkzeug_logger.handlers = [_console_handler]
+    werkzeug_logger.propagate = False
 
 
 def _parse_scanner_assignment(line: str) -> dict[str, Any] | None:
@@ -4828,16 +5106,9 @@ def _rf_sentinel_loop(proc: subprocess.Popen[str]) -> None:
                     payload = json.loads(body)
                 except json.JSONDecodeError:
                     payload = None
-            source_protocol = str(source or "").rsplit(":", 1)[-1].lower()
-            payload_protocol = str((payload or {}).get("protocol") or "").lower()
-            payload_kind = str((payload or {}).get("kind") or "").lower()
-            noisy_packet_line = payload is not None and (
-                source_protocol in {"ble", "btc", "bluetooth", "classic", "zigbee", "wifi"}
-                or payload_protocol in {"ble", "btle", "btc", "bluetooth_classic", "ieee802154", "wifi"}
-                or payload_kind in {"ble_adv", "classic_lap", "zigbee_frame", "wifi_frame"}
-                or payload_kind.startswith(("mgmt.", "ctrl.", "data."))
-                or str((payload or {}).get("type") or "").lower() == "metrics"
-            )
+            # JSON lines are detections/metrics. Keep ingesting them, but do
+            # not print every packet into the backend console.
+            noisy_packet_line = payload is not None
             with state_lock:
                 if not noisy_packet_line:
                     _append_scanner_log(line)
@@ -4874,6 +5145,7 @@ def _start_rf_sentinel_engine(
     enabled_protocols: set[str] | None = None,
     enabled_devices: set[str] | None = None,
     sweep_both_radios: bool = False,
+    fm_device_id: str = "",
 ) -> dict[str, Any]:
     global rf_sentinel_process, rf_sentinel_thread
     rf_sentinel_stop.clear()
@@ -4918,6 +5190,35 @@ def _start_rf_sentinel_engine(
         wifi_interface = _wifi_interface_from_devices(_available_devices(), enabled_devices)
         if wifi_interface:
             cmd.extend(["--wifi-interface", wifi_interface])
+    if "fm" in protocols:
+        selected_fm_device = fm_device_id or _fm_device_from_devices(_available_devices(), enabled_devices)
+        if selected_fm_device:
+            cmd.extend(
+                [
+                    "--fm-device-id",
+                    selected_fm_device,
+                    "--fm-discovery-mode",
+                    "sweep",
+                    "--fm-sample-rate-sps",
+                    "10000000",
+                    "--fm-sweep-bin-width-hz",
+                    "100000",
+                    "--fm-discovery-dwell-s",
+                    "3.0",
+                    "--fm-decode-dwell-s",
+                    "1.0",
+                    "--fm-active-threshold-db",
+                    "6.0",
+                    "--fm-min-power-dbfs",
+                    "-115",
+                    "--fm-max-stations",
+                    "24",
+                    "--fm-lna-gain-db",
+                    "32",
+                    "--fm-vga-gain-db",
+                    "32",
+                ]
+            )
     if "btc" not in protocols:
         cmd.append("--no-btc")
     if "ble" not in protocols:
@@ -5302,6 +5603,7 @@ def shutdown() -> None:
         if shutdown_complete:
             return
         shutdown_complete = True
+    stop_console_dashboard()
     device_ids = _shutdown_gateway_device_ids()
     try:
         _append_scanner_log("[ui] shutting down; releasing gateway sessions")
@@ -5604,6 +5906,7 @@ def start_scan():
                 enabled_protocols=enabled_protocols,
                 enabled_devices=enabled_devices,
                 sweep_both_radios=sweep_both_radios,
+                fm_device_id=_fm_device_from_devices(devices_available, enabled_devices),
             )
         except RuntimeError as exc:
             return _json_error(400, "start_scan", error="scan start failed", detail=str(exc))
@@ -5923,7 +6226,8 @@ if __name__ == "__main__":
     host = os.getenv("BT_EXPLORER_HOST", "0.0.0.0")
     port = int(os.getenv("BT_EXPLORER_PORT", "5050"))
     try:
-        app.run(host=host, port=port, threaded=True)
+        start_console_dashboard(host, port)
+        app.run(host=host, port=port, threaded=True, use_reloader=False)
     except KeyboardInterrupt:
         print("\n[ui] Ctrl+C received, disconnecting from sdr-gateway...", file=sys.stderr)
     finally:

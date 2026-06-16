@@ -233,15 +233,23 @@ def _discover_candidates_sweep(args: argparse.Namespace, client: GatewayClient, 
     try:
         deadline = time.monotonic() + max(0.1, float(args.discovery_dwell_s))
         samples: list[dict] = []
+        seen_ranges: set[tuple[int, int]] = set()
         while time.monotonic() < deadline:
-            samples = client.sweep_samples(sweep_id)
-            if samples:
-                break
+            for sample in client.sweep_samples(sweep_id):
+                try:
+                    key = (int(sample.get("hz_low")), int(sample.get("hz_high")))
+                except (TypeError, ValueError):
+                    key = (len(samples), len(samples))
+                if key in seen_ranges:
+                    continue
+                seen_ranges.add(key)
+                samples.append(sample)
             time.sleep(0.2)
     finally:
         client.stop_sweep(sweep_id)
         time.sleep(0.12)
     station_bins: dict[int, list[float]] = {freq: [] for freq in grid}
+    debug_ranges: list[str] = []
     for sample in samples:
         try:
             hz_low = int(sample["hz_low"])
@@ -251,6 +259,8 @@ def _discover_candidates_sweep(args: argparse.Namespace, client: GatewayClient, 
             continue
         if not values or hz_high <= hz_low:
             continue
+        if args.debug:
+            debug_ranges.append(f"{hz_low / 1e6:.1f}-{hz_high / 1e6:.1f}")
         bin_width = float(hz_high - hz_low) / float(len(values))
         for freq in grid:
             if freq < hz_low - int(args.channel_width_hz) or freq > hz_high + int(args.channel_width_hz):
@@ -287,7 +297,7 @@ def _discover_candidates_sweep(args: argparse.Namespace, client: GatewayClient, 
         summary = ";".join(f"{freq/1e6:.1f}:{power:.1f}" for freq, power in strongest)
         active = ";".join(f"{item.freq_hz/1e6:.1f}:{item.excess_db:.1f}" for item in candidates[:8]) or "none"
         print(
-            f"fm_sweep samples={len(samples)} noise={noise:.1f} top={summary} active={active}",
+            f"fm_sweep samples={len(samples)} ranges={','.join(debug_ranges) or '-'} noise={noise:.1f} top={summary} active={active}",
             file=sys.stderr,
             flush=True,
         )

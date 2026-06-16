@@ -69,6 +69,7 @@ class Detection:
     lte_pss_detected: bool = False
     lte_n_id_2: int | None = None
     lte_pss_metric: float = 0.0
+    lte_pss_freq_offset_hz: int = 0
     lte_cell_id_status: str = "requires_sss"
     lte_mib_status: str = "requires_pbch"
     lte_sib1_status: str = "requires_mib_and_pdsch"
@@ -92,7 +93,15 @@ CELLULAR_BANDS: tuple[CellularBand, ...] = (
     CellularBand("3GPP n79 / 4.7 GHz", 4_400_000_000, 5_000_000_000, None, None, "5G NR TDD", "5G NR", "4.7 GHz 5G", "5G operator", "ambiguous"),
 )
 
-LTE_SAMPLE_RATES_SPS = (1_920_000, 3_840_000, 7_680_000, 15_360_000, 30_720_000)
+LTE_SAMPLE_RATES_SPS = (1_920_000, 3_840_000, 7_680_000, 15_360_000, 30_720_000, 61_440_000)
+LTE_FFT_SIZE_BY_SAMPLE_RATE = {
+    1_920_000: 128,
+    3_840_000: 256,
+    7_680_000: 512,
+    15_360_000: 1024,
+    30_720_000: 2048,
+    61_440_000: 4096,
+}
 LTE_PSS_ROOTS = (25, 29, 34)
 LTE_DECODE_LADDER = "PSS -> SSS/PCI -> PBCH/MIB -> PDCCH/PDSCH SIB1 -> decoded MCC/MNC"
 
@@ -429,18 +438,20 @@ def _annotate_lte_sync(args: argparse.Namespace, samples: np.ndarray, rows: list
             offset_hz=offset_hz,
             threshold=float(args.lte_pss_threshold),
             max_segments=int(args.lte_sync_max_segments),
+            frequency_search_hz=tuple(int(value) for value in getattr(args, "lte_frequency_search_hz", (0,))),
         )
         row.lte_sync_status = result["status"]
         row.lte_pss_detected = bool(result["detected"])
         row.lte_n_id_2 = result["n_id_2"]
         row.lte_pss_metric = round(float(result["metric"]), 3)
+        row.lte_pss_freq_offset_hz = int(result.get("freq_offset_hz") or 0)
         row.lte_cell_id_status = "requires_sss_for_full_pci" if row.lte_pss_detected else "requires_pss"
         row.lte_mib_status = "requires_pbch_after_pss_sss" if row.lte_pss_detected else "requires_sync"
         row.lte_sib1_status = "requires_mib_and_pdsch_for_plmn" if row.lte_pss_detected else "requires_sync"
         row.decoded_plmn_source = "not_decoded_sib1_required"
         if row.lte_pss_detected:
             row.classification = "Passive LTE synchronization signal candidate"
-            ladder = f"LTE PSS N_id_2={row.lte_n_id_2} metric={row.lte_pss_metric:.3f}; {LTE_DECODE_LADDER}"
+            ladder = f"LTE PSS N_id_2={row.lte_n_id_2} metric={row.lte_pss_metric:.3f} offset={row.lte_pss_freq_offset_hz}Hz; {LTE_DECODE_LADDER}"
             row.notes = f"{row.notes}; {ladder}" if row.notes else ladder
 
 
@@ -451,10 +462,87 @@ def _lte_pss_probe(
     offset_hz: int,
     threshold: float,
     max_segments: int,
+    frequency_search_hz: tuple[int, ...],
 ) -> dict[str, Any]:
     sample_rate = float(sample_rate_sps)
     if abs(float(offset_hz)) > sample_rate / 2.0 - 600_000.0:
-        return {"status": "outside_passband", "detected": False, "n_id_2": None, "metric": 0.0}
+        return {"status": "outside_passband", "detected": False, "n_id_2": None, "metric": 0.0, "freq_offset_hz": 0}
+    search = tuple(dict.fromkeys(int(value) for value in (frequency_search_hz or (0,))))
+    best: dict[str, Any] | None = None
+    for search_hz in search:
+        candidate_offset = int(offset_hz) + int(search_hz)
+        if abs(float(candidate_offset)) > sample_rate / 2.0 - 600_000.0:
+            continue
+        time_result = _lte_pss_time_probe(
+            samples=samples,
+            sample_rate_sps=sample_rate_sps,
+            offset_hz=candidate_offset,
+            threshold=threshold,
+            max_segments=max_segments,
+        )
+        if str(time_result["status"]) == "unsupported_sample_rate":
+            time_result = _lte_pss_frequency_probe(
+                samples=samples,
+                sample_rate_sps=sample_rate_sps,
+                offset_hz=candidate_offset,
+                threshold=threshold,
+                max_segments=max_segments,
+            )
+        time_result["freq_offset_hz"] = int(search_hz)
+        if best is None or float(time_result["metric"]) > float(best["metric"]):
+            best = time_result
+    if best is None:
+        return {"status": "outside_passband", "detected": False, "n_id_2": None, "metric": 0.0, "freq_offset_hz": 0}
+    return best
+
+
+def _lte_pss_time_probe(
+    *,
+    samples: np.ndarray,
+    sample_rate_sps: int,
+    offset_hz: int,
+    threshold: float,
+    max_segments: int,
+) -> dict[str, Any]:
+    fft_size = _lte_fft_size_for_sample_rate(sample_rate_sps)
+    if fft_size is None:
+        return {"status": "unsupported_sample_rate", "detected": False, "n_id_2": None, "metric": 0.0}
+    sample_rate = float(sample_rate_sps)
+    mixed = _frequency_shift(samples, sample_rate_sps, -float(offset_hz)) if offset_hz else samples
+    block_len = max(fft_size * 2, int(round(sample_rate * 0.00025)))
+    stride = max(1, int(round(sample_rate * 0.00025)))
+    if mixed.size < block_len:
+        return {"status": "insufficient_iq", "detected": False, "n_id_2": None, "metric": 0.0}
+
+    templates = [_lte_pss_time_symbol(n_id_2, fft_size) for n_id_2 in range(3)]
+    best_metric = 0.0
+    best_n_id_2: int | None = None
+    segments = 0
+    search_span = max(1, mixed.size - block_len + 1)
+    for start in range(0, search_span, stride):
+        block = np.asarray(mixed[start : start + block_len], dtype=np.complex64)
+        block = block - np.mean(block)
+        for n_id_2, template in enumerate(templates):
+            metric = _max_normalized_correlation(block, template)
+            if metric > best_metric:
+                best_metric = metric
+                best_n_id_2 = int(n_id_2)
+        segments += 1
+        if segments >= max(1, max_segments):
+            break
+    status = "pss_detected_time" if best_metric >= threshold else "pss_not_detected_time"
+    return {"status": status, "detected": best_metric >= threshold, "n_id_2": best_n_id_2, "metric": best_metric}
+
+
+def _lte_pss_frequency_probe(
+    *,
+    samples: np.ndarray,
+    sample_rate_sps: int,
+    offset_hz: int,
+    threshold: float,
+    max_segments: int,
+) -> dict[str, Any]:
+    sample_rate = float(sample_rate_sps)
     nfft = int(round(sample_rate / 15_000.0))
     if nfft < 128:
         return {"status": "sample_rate_too_low_for_lte_pss", "detected": False, "n_id_2": None, "metric": 0.0}
@@ -500,6 +588,56 @@ def _lte_pss_probe(
     if not _is_lte_standard_sample_rate(sample_rate_sps):
         status = f"{status}_nonstandard_sample_rate"
     return {"status": status, "detected": best_metric >= threshold, "n_id_2": best_n_id_2, "metric": best_metric}
+
+
+def _lte_fft_size_for_sample_rate(sample_rate_sps: int) -> int | None:
+    for rate, fft_size in LTE_FFT_SIZE_BY_SAMPLE_RATE.items():
+        if abs(float(sample_rate_sps) - float(rate)) / float(rate) < 0.01:
+            return fft_size
+    return None
+
+
+def _frequency_shift(samples: np.ndarray, sample_rate_sps: int, freq_hz: float) -> np.ndarray:
+    n = np.arange(samples.size, dtype=np.float32)
+    phase = np.exp(2j * np.pi * float(freq_hz) * n / float(sample_rate_sps)).astype(np.complex64)
+    return np.asarray(samples, dtype=np.complex64) * phase
+
+
+def _lte_pss_time_symbol(n_id_2: int, fft_size: int) -> np.ndarray:
+    spectrum = np.zeros(fft_size, dtype=np.complex64)
+    bins = fft_size // 2 + np.concatenate((np.arange(-31, 0), np.arange(1, 32)))
+    spectrum[bins] = _lte_pss_sequence(n_id_2)
+    symbol = np.fft.ifft(np.fft.ifftshift(spectrum)).astype(np.complex64)
+    energy = float(np.sqrt(np.vdot(symbol, symbol).real))
+    if energy <= 1e-12:
+        return symbol
+    return symbol / energy
+
+
+def _max_normalized_correlation(block: np.ndarray, template: np.ndarray) -> float:
+    if block.size < template.size:
+        return 0.0
+    if block.size * template.size > 8_000_000:
+        corr = _fft_valid_correlation(block, template)
+    else:
+        corr = np.correlate(block, template, mode="valid")
+    power = np.abs(block) ** 2
+    cumsum = np.concatenate(([0.0], np.cumsum(power, dtype=np.float64)))
+    window_power = cumsum[template.size :] - cumsum[: -template.size]
+    denom = np.sqrt(np.maximum(window_power, 1e-12))
+    if denom.size == 0:
+        return 0.0
+    return float(np.max(np.abs(corr) / denom))
+
+
+def _fft_valid_correlation(block: np.ndarray, template: np.ndarray) -> np.ndarray:
+    conv_len = int(block.size + template.size - 1)
+    fft_len = 1 << int(np.ceil(np.log2(conv_len)))
+    kernel = np.conj(template[::-1])
+    full = np.fft.ifft(np.fft.fft(block, fft_len) * np.fft.fft(kernel, fft_len))
+    start = template.size - 1
+    stop = start + block.size - template.size + 1
+    return np.asarray(full[start:stop], dtype=np.complex64)
 
 
 def _lte_pss_sequence(n_id_2: int) -> np.ndarray:
@@ -671,6 +809,13 @@ def build_parser() -> argparse.ArgumentParser:
     scan.add_argument("--no-lte-sync", dest="lte_sync", action="store_false", help="skip LTE PSS sync probing and report spectrum only")
     scan.add_argument("--lte-pss-threshold", type=float, default=0.55)
     scan.add_argument("--lte-sync-max-segments", type=int, default=96)
+    scan.add_argument(
+        "--lte-frequency-search-hz",
+        type=int,
+        nargs="*",
+        default=[0, -5000, 5000],
+        help="additional LTE sync frequency offsets to try around each candidate",
+    )
     scan.add_argument("--top", type=int, default=12)
     scan.add_argument("--jsonl", action="store_true")
     scan.add_argument("--json", action="store_true")

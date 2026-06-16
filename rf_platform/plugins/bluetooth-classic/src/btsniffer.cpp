@@ -278,6 +278,7 @@ int length (uint64_t word)
 std::unordered_map<uint32_t, lap_node> lap_map;
 std::unordered_map<uint32_t, uint32_t> solved_lap_uap_map;
 std::unordered_map<uint32_t, uint64_t> passive_bdaddr_map;
+std::unordered_map<uint32_t, long long> solved_lap_seen_log_ts_map;
 std::unordered_map<uint32_t, long long> init_fail_log_ts_map;
 std::unordered_map<uint32_t, unsigned int> init_fail_suppressed_map;
 struct header_sense_stats {
@@ -288,6 +289,7 @@ std::unordered_map<uint64_t, header_sense_stats> header_sense_map;
 const unsigned int HEADER_SENSE_MIN_OBSERVATIONS = 3;
 const int HEADER_SENSE_MIN_MARGIN = 8;
 const long long INIT_FAIL_CONSOLE_INTERVAL_US = 20000;
+const long long SOLVED_LAP_SEEN_INTERVAL_US = 500000;
 const size_t FHS_PAYLOAD_BYTES = 18;
 int fec23_codewords[32768];
 
@@ -957,6 +959,12 @@ void* proc_routine(void *routine_params)
 
                         std::unordered_map<uint32_t, uint32_t>::iterator solved_it = solved_lap_uap_map.find(_lap);
                         if (solved_it != solved_lap_uap_map.end()) {
+                            long long last_seen_log_ts = solved_lap_seen_log_ts_map[_lap];
+                            if (packet_ts_us - last_seen_log_ts >= SOLVED_LAP_SEEN_INTERVAL_US) {
+                                solved_lap_seen_log_ts_map[_lap] = packet_ts_us;
+                                emit_json_event((boost::format("{\"time_us\":%lld,\"type\":\"lap_seen\",\"lap\":\"%06X\",\"uap\":\"%02X\",\"channel\":%u,\"ts_us\":%lld,\"candidate_count\":1,\"rssi_dbfs\":%.2f}")
+                                                 % now_us() % _lap % solved_it->second % ch % packet_ts_us % packet_rssi_dbfs).str());
+                            }
                             fhs_decode_result fhs;
                             if (try_decode_fhs_at(binbuf, i, bufsize, true, _lap, solved_it->second, &fhs, &fhs_stats)) {
                                 record_passive_bdaddr(fhs, _lap, ch, packet_ts_us, packet_rssi_dbfs, fptrout);

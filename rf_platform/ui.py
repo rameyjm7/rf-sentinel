@@ -24,8 +24,11 @@ def main() -> int:
     app = module.app
     host = os.getenv("RF_SENTINEL_HOST", os.getenv("BT_EXPLORER_HOST", "0.0.0.0"))
     port = int(os.getenv("RF_SENTINEL_PORT", os.getenv("BT_EXPLORER_PORT", "5050")))
+    start_console_dashboard = getattr(module, "start_console_dashboard", None)
+    if callable(start_console_dashboard):
+        start_console_dashboard(host, port)
     try:
-        app.run(host=host, port=port, threaded=True)
+        app.run(host=host, port=port, threaded=True, use_reloader=False)
     except KeyboardInterrupt:
         print("\n[ui] Ctrl+C received, disconnecting from sdr-gateway...", file=sys.stderr)
     finally:

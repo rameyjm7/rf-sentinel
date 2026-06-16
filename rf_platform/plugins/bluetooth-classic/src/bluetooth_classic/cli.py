@@ -478,7 +478,7 @@ def _run_listen(args: argparse.Namespace) -> int:
                     f"rssi={event.get('rssi_dbfs')} access_lap={event.get('access_lap')}",
                     flush=True,
                 )
-            elif event_type in {"lap_initialized", "lap_resolved"} or event.get("lap"):
+            elif event_type in {"lap_initialized", "lap_resolved", "lap_seen"} or event.get("lap"):
                 print(
                     f"classic type={event_type} lap={event.get('lap')} uap={event.get('uap', '')} "
                     f"ch={event.get('channel', '')} rssi={event.get('rssi_dbfs', '')} "
@@ -601,7 +601,7 @@ def _print_combined_event(event: dict[str, Any], args: argparse.Namespace) -> No
                 flush=True,
             )
             return
-        if event_type in {"lap_initialized", "lap_resolved"} or event.get("lap"):
+        if event_type in {"lap_initialized", "lap_resolved", "lap_seen"} or event.get("lap"):
             print(
                 f"{btc_prefix} type={event_type} lap={event.get('lap')} uap={event.get('uap', '')} "
                 f"ch={event.get('channel', '')} rssi={event.get('rssi_dbfs', '')}",

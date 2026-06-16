@@ -2075,6 +2075,11 @@
         return text.includes("sdrplay") && (text.includes("rsp2") || String(device?.id || "").toLowerCase().startsWith("sdrplay:"));
       }
 
+      function isRtlSdrDevice(device) {
+        const text = `${device?.id || ""} ${device?.label || ""} ${device?.driver || ""}`.toLowerCase();
+        return text.includes("rtlsdr") || text.includes("rtl-sdr") || String(device?.id || "").toLowerCase().startsWith("rtlsdr:");
+      }
+
       function protocolAvailable(control) {
         return typeof control.available === "function" ? Boolean(control.available()) : true;
       }
@@ -3523,6 +3528,7 @@
             : "";
           const selectedHop = String(status?.device_ids?.hop || status?.device_ids?.radio_b || inferredHop || selectedDeviceId(btleDeviceSelect) || "");
           const isLfmf = enabledProtocols.has("lfmf") && isSdrplayRsp2Device(device);
+          const isFm = enabledProtocols.has("fm") && (isSdrplayRsp2Device(device) || isRtlSdrDevice(device));
           const isWifi = enabledProtocols.has("wifi") && isWifiDevice(device);
           const isClassic = selectedClassic && id === selectedClassic;
           const isHop = selectedHop && id === selectedHop;
@@ -3531,11 +3537,11 @@
           if (isClassic && enabledProtocols.has("ble")) protocols.push("BTLE");
           if (isHop && enabledProtocols.has("zigbee")) protocols.push("ZIGBEE");
           if (isHop && enabledProtocols.has("tpms")) protocols.push("TPMS");
-          if (isHop && enabledProtocols.has("fm")) protocols.push("FM");
           if (isHop && enabledProtocols.has("cellular")) protocols.push("CELLULAR");
+          if (isFm) protocols.push("FM");
           if (isWifi) protocols.push("WIFI");
           if (isLfmf) protocols.push("LFMF");
-          return { isClassic, isHop, isWifi, isLfmf, protocols };
+          return { isClassic, isHop, isWifi, isFm, isLfmf, protocols };
         }
         function fallbackSdrBand(device) {
           const role = deviceRole(device);
@@ -3548,12 +3554,16 @@
             const parts = [];
             if (enabledProtocols.has("zigbee")) parts.push("Zigbee-ready 2405-2480 MHz");
             if (enabledProtocols.has("tpms")) parts.push("TPMS 315/433.92 MHz");
-            if (enabledProtocols.has("fm")) parts.push("FM 87.7-107.9 MHz");
             if (enabledProtocols.has("cellular")) parts.push("Cellular 700 MHz-6 GHz");
             return parts.length ? parts.join(" · ") : "RF hopping";
           }
+          if (role.isFm || role.isLfmf) {
+            const parts = [];
+            if (role.isFm) parts.push("FM 87.7-107.9 MHz");
+            if (role.isLfmf) parts.push("VLF/LF/MF survey · 1 kHz-3 MHz");
+            return parts.join(" · ");
+          }
           if (role.isWifi) return "WiFi monitor · channels 1,6,11 · 802.11 frames";
-          if (role.isLfmf) return "VLF/LF/MF survey · SDRplay RSP2 · 1 kHz-3 MHz";
           const minHz = Number(device.freq_min_hz || 0);
           const maxHz = Number(device.freq_max_hz || 0);
           const maxMsps = Number(device.max_sample_rate_sps || 0) / 1_000_000;

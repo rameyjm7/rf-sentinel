@@ -247,6 +247,7 @@ class GatewayReceiver:
             "lna_gain_db": int(float(self.args.rfgr)),
             "vga_gain_db": int(float(self.args.ifgr)),
             "amp_enable": False,
+            "replace_existing": bool(getattr(self.args, "replace_existing", False)),
         }
 
     def _ws_url(self, stream_id: str) -> str:

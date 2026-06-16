@@ -25,7 +25,8 @@ DEFAULT_ZIGBEE_DISCOVERY_SWEEP_S = 2.0
 DEFAULT_ZIGBEE_ACTIVE_DWELL_S = 1.0
 DEFAULT_ZIGBEE_FOLLOW_SAMPLE_RATE_SPS = 8_000_000
 DEFAULT_WIFI_INTERFACE = "wlan0"
-DEFAULT_FM_SAMPLE_RATE_SPS = 20_000_000
+DEFAULT_FM_DEVICE = "sdrplay:0"
+DEFAULT_FM_SAMPLE_RATE_SPS = 10_000_000
 DEFAULT_FM_INTERVAL_S = 60.0
 DEFAULT_LFMF_INTERVAL_S = 120.0
 DEFAULT_CELLULAR_CENTER_FREQ_HZ = 751_000_000
@@ -306,9 +307,11 @@ def _build_jobs(args: argparse.Namespace) -> tuple[list[ScanJob], list[ScanJob]]
                 device_id,
                 "--json",
                 "--discovery-mode",
-                "wideband",
+                args.fm_discovery_mode,
                 "--sample-rate-sps",
                 str(args.fm_sample_rate_sps),
+                "--sweep-bin-width-hz",
+                str(args.fm_sweep_bin_width_hz),
                 "--discovery-dwell-s",
                 str(args.fm_discovery_dwell_s),
                 "--decode-dwell-s",
@@ -346,10 +349,16 @@ def _build_jobs(args: argparse.Namespace) -> tuple[list[ScanJob], list[ScanJob]]
             str(args.lfmf_top_signals),
             "--jsonl",
             "--yes",
+            "--replace-existing",
         ]
         if args.lfmf_serial:
             command.extend(["--serial", args.lfmf_serial])
         return ScanJob(name=name, protocol="lfmf", dwell_s=args.lfmf_slice_s, command=command)
+
+    if not args.no_wifi:
+        # WiFi is not SDR-backed, so start it first instead of making it wait
+        # behind long RF dwell jobs.
+        cycled.append(wifi_job("wifi"))
 
     def cellular_job(name: str, device_id: str) -> ScanJob:
         return ScanJob(
@@ -404,14 +413,16 @@ def _build_jobs(args: argparse.Namespace) -> tuple[list[ScanJob], list[ScanJob]]
                 cycled.append(zigbee_job(f"{prefix}:zigbee", device_id))
             if not args.no_tpms:
                 cycled.append(tpms_job(f"{prefix}:tpms", device_id))
-            if not args.no_fm:
-                cycled.append(fm_job(f"{prefix}:fm", device_id))
             if not args.no_lfmf and _is_sdrplay_device_id(device_id):
                 cycled.append(lfmf_job(f"{prefix}:lfmf", device_id))
             if not args.no_cellular:
                 cycled.append(cellular_job(f"{prefix}:cellular", device_id))
-        if not args.no_wifi:
-            cycled.append(wifi_job("wifi"))
+        if not args.no_fm:
+            fm_device_id = _pick_fm_device_id(args)
+            if fm_device_id:
+                cycled.append(fm_job("fm:scan", fm_device_id))
+            else:
+                print("[rf-sentinel] FM disabled; no allowed FM-capable SDR", flush=True)
         return continuous, cycled
 
     combined_bluetooth = not args.no_btc and not args.no_ble
@@ -432,7 +443,11 @@ def _build_jobs(args: argparse.Namespace) -> tuple[list[ScanJob], list[ScanJob]]
         cycled.append(tpms_job("tpms", args.hop_device_id))
 
     if not args.no_fm:
-        cycled.append(fm_job("fm", args.hop_device_id))
+        fm_device_id = _pick_fm_device_id(args)
+        if fm_device_id:
+            cycled.append(fm_job("fm", fm_device_id))
+        else:
+            print("[rf-sentinel] FM disabled; no allowed FM-capable SDR", flush=True)
 
     if not args.no_lfmf:
         lfmf_device_id = _pick_lfmf_device_id(args)
@@ -443,9 +458,6 @@ def _build_jobs(args: argparse.Namespace) -> tuple[list[ScanJob], list[ScanJob]]
 
     if not args.no_cellular:
         cycled.append(cellular_job("cellular", args.hop_device_id))
-
-    if not args.no_wifi:
-        cycled.append(wifi_job("wifi"))
 
     return continuous, cycled
 
@@ -474,6 +486,36 @@ def _configured_protocols(args: argparse.Namespace) -> set[str]:
 def _is_sdrplay_device_id(device_id: str) -> bool:
     text = str(device_id or "").strip().lower()
     return text.startswith("sdrplay:")
+
+
+def _is_rtlsdr_device_id(device_id: str) -> bool:
+    text = str(device_id or "").strip().lower()
+    return text.startswith("rtlsdr:")
+
+
+def _pick_fm_device_id(args: argparse.Namespace) -> str:
+    preferred = str(getattr(args, "fm_device_id", "") or "").strip()
+    allowed = [str(item).strip() for item in getattr(args, "allowed_device_id", []) if str(item).strip()]
+    if allowed:
+        if preferred and preferred in allowed:
+            return preferred
+        for device_id in allowed:
+            if _is_sdrplay_device_id(device_id):
+                return device_id
+        for device_id in allowed:
+            if _is_rtlsdr_device_id(device_id):
+                return device_id
+        return ""
+    for device_id in (
+        preferred,
+        getattr(args, "lfmf_device_id", ""),
+        getattr(args, "hop_device_id", ""),
+        getattr(args, "radio_b_device_id", ""),
+        getattr(args, "btc_device_id", ""),
+    ):
+        if str(device_id or "").strip():
+            return str(device_id).strip()
+    return ""
 
 
 def _pick_lfmf_device_id(args: argparse.Namespace) -> str:
@@ -822,12 +864,15 @@ def build_parser() -> argparse.ArgumentParser:
 
     parser.add_argument("--fm-slice-s", type=float, default=DEFAULT_JOB_DWELL_S)
     parser.add_argument("--fm-interval-s", type=float, default=DEFAULT_FM_INTERVAL_S)
+    parser.add_argument("--fm-device-id", default=DEFAULT_FM_DEVICE, help="Preferred SDR for FM broadcast discovery")
+    parser.add_argument("--fm-discovery-mode", choices=("auto", "wideband", "sweep", "iq"), default="sweep")
     parser.add_argument("--fm-sample-rate-sps", type=int, default=DEFAULT_FM_SAMPLE_RATE_SPS)
-    parser.add_argument("--fm-discovery-dwell-s", type=float, default=0.18)
-    parser.add_argument("--fm-decode-dwell-s", type=float, default=0.35)
-    parser.add_argument("--fm-active-threshold-db", type=float, default=8.0)
-    parser.add_argument("--fm-min-power-dbfs", type=float, default=-55.0)
-    parser.add_argument("--fm-max-stations", type=int, default=12)
+    parser.add_argument("--fm-sweep-bin-width-hz", type=int, default=100_000)
+    parser.add_argument("--fm-discovery-dwell-s", type=float, default=3.0)
+    parser.add_argument("--fm-decode-dwell-s", type=float, default=1.0)
+    parser.add_argument("--fm-active-threshold-db", type=float, default=6.0)
+    parser.add_argument("--fm-min-power-dbfs", type=float, default=-115.0)
+    parser.add_argument("--fm-max-stations", type=int, default=24)
     parser.add_argument("--fm-lna-gain-db", type=int, default=32)
     parser.add_argument("--fm-vga-gain-db", type=int, default=32)
 
