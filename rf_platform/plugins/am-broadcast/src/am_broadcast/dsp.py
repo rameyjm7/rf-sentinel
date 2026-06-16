@@ -43,6 +43,15 @@ def cs16_to_complex(samples: np.ndarray) -> np.ndarray:
     return (interleaved[0::2] + 1j * interleaved[1::2]).astype(np.complex64, copy=False)
 
 
+def i8_to_complex(samples: bytes | np.ndarray) -> np.ndarray:
+    values = np.frombuffer(samples, dtype=np.int8) if isinstance(samples, (bytes, bytearray, memoryview)) else np.asarray(samples, dtype=np.int8)
+    if values.size < 2:
+        return np.empty(0, dtype=np.complex64)
+    usable = values.size - (values.size % 2)
+    interleaved = values[:usable].astype(np.float32, copy=False) * 256.0
+    return (interleaved[0::2] + 1j * interleaved[1::2]).astype(np.complex64, copy=False)
+
+
 def measure_am_channel(
     iq: np.ndarray,
     sample_rate_sps: int,

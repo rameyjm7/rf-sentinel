@@ -9,6 +9,8 @@ description = "RF Sentinel VLF/LF/MF scanner plugin for SDRplay receivers"
 requires-python = ">=3.10"
 dependencies = [
   "numpy>=1.24",
+  "requests>=2.31",
+  "websocket-client>=1.7",
 ]
 
 [project.scripts]
