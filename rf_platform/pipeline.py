@@ -115,6 +115,96 @@ class BLEWidebandDemodulator:
         return results
 
 
+class ZigbeeWidebandDemodulator:
+    protocol = "zigbee"
+
+    def __init__(self) -> None:
+        self._runtimes: dict[tuple[int, int], list[Any]] = {}
+
+    def process(self, chunk: IQChunk) -> list[DemodResult]:
+        try:
+            from zigbee_802154.decoder import IEEE802154Decoder, channel_to_center_freq
+            from zigbee_802154.wideband import (
+                WidebandChannelPlan,
+                WidebandChannelRuntime,
+                WidebandDetectorConfig,
+            )
+        except Exception:
+            return []
+
+        key = (int(chunk.window.center_freq_hz), int(chunk.window.sample_rate_sps))
+        runtimes = self._runtimes.get(key)
+        if runtimes is None:
+            runtimes = []
+            detector_config = WidebandDetectorConfig(
+                pre_roll_ms=0.2,
+                open_factor=6.0,
+                close_factor=3.0,
+                min_burst_ms=0.05,
+                max_burst_ms=5.0,
+            )
+            channel_rate_sps = 4_000_000
+            decimation = max(1, int(round(float(chunk.window.sample_rate_sps) / float(channel_rate_sps))))
+            output_rate = max(1, int(round(float(chunk.window.sample_rate_sps) / float(decimation))))
+            for channel in range(11, 27):
+                freq_hz = channel_to_center_freq(channel)
+                if not chunk.window.contains(freq_hz, guard_hz=1_200_000):
+                    continue
+                plan = WidebandChannelPlan(
+                    channel=channel,
+                    center_freq_hz=freq_hz,
+                    freq_offset_hz=float(freq_hz - chunk.window.center_freq_hz),
+                    output_sample_rate_sps=output_rate,
+                    decimation=decimation,
+                )
+                runtimes.append(
+                    WidebandChannelRuntime(
+                        plan,
+                        detector_config=detector_config,
+                        decoder=IEEE802154Decoder(
+                            frequency_search_hz=(0, -25_000, 25_000),
+                            waveform_pattern_corr_min=0.18,
+                            require_fcs=True,
+                        ),
+                    )
+                )
+            self._runtimes[key] = runtimes
+        if not runtimes:
+            return []
+
+        try:
+            from zigbee_802154.wideband import detect_wideband_bursts
+        except Exception:
+            return []
+
+        results: list[DemodResult] = []
+        for runtime, burst in detect_wideband_bursts(
+            raw_chunk=chunk.raw_i8,
+            input_sample_rate_sps=chunk.window.sample_rate_sps,
+            runtimes=runtimes,
+        ):
+            duration_ms = float(burst.duration_seconds * 1000.0)
+            peak_dbfs = _dbfs(burst.peak)
+            if duration_ms < 0.8 or peak_dbfs < -27.0:
+                continue
+            frame = runtime.decoder.decode(burst)
+            if frame is None or not bool(getattr(frame, "fcs_ok", False)):
+                continue
+            event = json.loads(frame.to_json())
+            event["kind"] = "zigbee_frame"
+            event["rssi_dbfs"] = round(peak_dbfs, 1)
+            event["source_window"] = chunk.window.name
+            event["source_device_id"] = chunk.device_id
+            results.append(DemodResult(protocol=self.protocol, event=event))
+        return results
+
+
+def _dbfs(value: float) -> float:
+    import math
+
+    return 20.0 * math.log10(max(float(value), 1e-12))
+
+
 class PlaceholderDemodulator:
     def __init__(self, protocol: str) -> None:
         self.protocol = protocol
@@ -139,7 +229,7 @@ class DemodWorker(threading.Thread):
         self.decision_engine = decision_engine or ProtocolDecisionEngine()
         self.demodulators = demodulators or {
             "ble": BLEWidebandDemodulator(),
-            "zigbee": PlaceholderDemodulator("zigbee"),
+            "zigbee": ZigbeeWidebandDemodulator(),
             "tpms": PlaceholderDemodulator("tpms"),
             "bluetooth_classic": PlaceholderDemodulator("bluetooth_classic"),
         }
@@ -315,6 +405,31 @@ def default_windows() -> list[ScanWindow]:
     ]
 
 
+def shared_ism24_window(args: argparse.Namespace) -> list[ScanWindow]:
+    sample_rate_sps = int(args.ism_sample_rate_sps)
+    bandwidth_hz = int(args.ism_bandwidth_hz or sample_rate_sps)
+    return [
+        ScanWindow(
+            "shared-ism24",
+            int(args.ism_center_freq_hz),
+            sample_rate_sps,
+            float(args.ism_dwell_s),
+            lna_gain_db=int(args.lna_gain_db),
+            vga_gain_db=int(args.vga_gain_db),
+            baseband_filter_hz=bandwidth_hz,
+        )
+    ]
+
+
+def choose_windows(args: argparse.Namespace) -> list[ScanWindow]:
+    use_shared = args.shared_ism24
+    if use_shared is None:
+        use_shared = str(args.device_id or "").lower().startswith(("bladerf", "sidekiq"))
+    if use_shared:
+        return shared_ism24_window(args)
+    return default_windows()
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(prog="rf_sentinel_pipeline", description="Threaded receive/decision/demod RF pipeline")
     parser.add_argument("--base-url", default=os.getenv("SDR_GATEWAY_BASE_URL", "http://127.0.0.1:8080"))
@@ -323,6 +438,18 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--queue-size", type=int, default=64)
     parser.add_argument("--max-events", type=int, default=0)
     parser.add_argument("--duration-s", type=float, default=0.0)
+    parser.add_argument(
+        "--shared-ism24",
+        action=argparse.BooleanOptionalAction,
+        default=None,
+        help="use one parked wide 2.4 GHz ISM stream for all overlapping demods; defaults on for bladeRF/Sidekiq",
+    )
+    parser.add_argument("--ism-center-freq-hz", type=int, default=2_441_000_000)
+    parser.add_argument("--ism-sample-rate-sps", type=int, default=60_000_000)
+    parser.add_argument("--ism-bandwidth-hz", type=int, default=60_000_000)
+    parser.add_argument("--ism-dwell-s", type=float, default=3600.0)
+    parser.add_argument("--lna-gain-db", type=int, default=40)
+    parser.add_argument("--vga-gain-db", type=int, default=40)
     return parser
 
 
@@ -342,7 +469,7 @@ def main(argv: list[str] | None = None) -> int:
         base_url=args.base_url,
         token=args.token,
         device_id=args.device_id,
-        windows=default_windows(),
+        windows=choose_windows(args),
         iq_queue=iq_queue,
         stop_event=stop_event,
     )

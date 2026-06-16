@@ -186,6 +186,18 @@ def build_parser() -> argparse.ArgumentParser:
         help="after an FCS-good frame is decoded, park active demod on that channel until the lock expires",
     )
     wideband.add_argument(
+        "--retune-on-frame",
+        action=argparse.BooleanOptionalAction,
+        default=False,
+        help="after an FCS-good frame is decoded, keep full bandwidth but retune so that channel is centered",
+    )
+    wideband.add_argument(
+        "--retune-sample-rate-sps",
+        type=int,
+        default=0,
+        help="deprecated; --retune-on-frame now keeps the full wideband sample rate",
+    )
+    wideband.add_argument(
         "--frame-lock-ttl-s",
         type=float,
         default=60.0,
@@ -907,6 +919,7 @@ def _run_wideband_listen(args: argparse.Namespace) -> int:
     stream = None
     adaptive_scan = bool(args.adaptive_scan) and not bool(args.scan_all_windows)
     discovery_mode = adaptive_scan
+    narrow_follow_channel: int | None = None
     discovery_cursor = 0
     if adaptive_scan:
         # Discovery should sweep every window from the bottom of the band before
@@ -1217,7 +1230,7 @@ def _run_wideband_listen(args: argparse.Namespace) -> int:
         return channel, burst, frame, task_decoder.last_diagnostics, time.perf_counter() - started
 
     def drain_completed() -> bool:
-        nonlocal emitted
+        nonlocal emitted, narrow_follow_channel
         completed = [future for future in pending if future.done()]
         for future in completed:
             pending.discard(future)
@@ -1244,6 +1257,8 @@ def _run_wideband_listen(args: argparse.Namespace) -> int:
             record_activity(channel, burst, decoded_frame=True)
             if bool(getattr(frame, "fcs_ok", False)):
                 set_frame_lock(channel)
+                if bool(args.retune_on_frame):
+                    narrow_follow_channel = int(channel)
             _emit_frame(frame, json_mode=bool(args.json))
             if args.max_frames and emitted >= args.max_frames:
                 return True
@@ -1301,6 +1316,75 @@ def _run_wideband_listen(args: argparse.Namespace) -> int:
         while True:
             if drain_completed():
                 return 0
+            if narrow_follow_channel is not None:
+                channel = int(narrow_follow_channel)
+                if current_frame_lock() is None:
+                    narrow_follow_channel = None
+                    discovery_mode = True
+                    discovery_cursor = 0
+                    window_index = 0
+                    active_channels.clear()
+                    continue
+                follow_base_window = windows[window_for_channel(channel)]
+                follow_window = WidebandWindowPlan(
+                    index=follow_base_window.index,
+                    center_freq_hz=channel_to_center_freq(channel),
+                    sample_rate_sps=sample_rate_sps,
+                    channels=follow_base_window.channels,
+                )
+                narrow_config = _stream_config_for_device(
+                    device=device,
+                    center_freq_hz=follow_window.center_freq_hz,
+                    sample_rate_sps=sample_rate_sps,
+                    lna_gain_db=args.lna_gain_db,
+                    vga_gain_db=args.vga_gain_db,
+                    amp_enable=args.amp_enable,
+                    baseband_filter_hz=baseband_filter_hz,
+                )
+                if args.debug_bursts:
+                    print(
+                        f"wideband_retune_on_frame ch={channel} center={narrow_config.center_freq_hz} "
+                        f"sr={narrow_config.sample_rate_sps} bb_filter={narrow_config.baseband_filter_hz}",
+                        file=sys.stderr,
+                        flush=True,
+                    )
+                follow_runtimes = create_runtimes(
+                    follow_window,
+                    channel_rate_sps=int(args.channel_rate_sps),
+                    detector_config=detector_config,
+                )
+                if stream is None:
+                    stream = client.start_stream(narrow_config)
+                else:
+                    stream = client.retune_stream(stream.stream_id, narrow_config)
+                for chunk in client.iter_iq_chunks(stream.stream_id):
+                    if drain_completed():
+                        return 0
+                    if current_frame_lock() is None:
+                        narrow_follow_channel = None
+                        discovery_mode = True
+                        discovery_cursor = 0
+                        window_index = 0
+                        active_channels.clear()
+                        break
+                    for runtime, burst in detect_wideband_bursts(
+                        raw_chunk=chunk,
+                        input_sample_rate_sps=sample_rate_sps,
+                        runtimes=follow_runtimes,
+                    ):
+                        record_activity(runtime.plan.channel, burst)
+                        if int(runtime.plan.channel) != channel:
+                            continue
+                        if enqueue_burst(runtime.plan.channel, burst):
+                            return 0
+                print(
+                    f"stream closed; reconnecting in {reconnect_delay:.1f}s",
+                    file=sys.stderr,
+                    flush=True,
+                )
+                stream = None
+                time.sleep(reconnect_delay)
+                continue
             current_window = windows[window_index]
             if adaptive_scan:
                 if discovery_mode:
