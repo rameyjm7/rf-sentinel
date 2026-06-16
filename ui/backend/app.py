@@ -1607,6 +1607,17 @@ CSV_PROTOCOL_COLUMNS = {
     "cellular": [
         "band",
         "link",
+        "cellular_type",
+        "technology",
+        "likely_operator",
+        "operator_confidence",
+        "likely_mcc",
+        "likely_mnc",
+        "likely_plmn",
+        "plmn_source",
+        "decoded_mcc",
+        "decoded_mnc",
+        "decoded_plmn",
         "excess_db",
         "noise_floor_dbfs",
         "occupied_width_hz",
@@ -3329,6 +3340,17 @@ def _csv_event_row(event: dict[str, Any], columns: list[str]) -> dict[str, str]:
         "band_label": event.get("band_label"),
         "active": event.get("active"),
         "link": event.get("link"),
+        "cellular_type": event.get("cellular_type"),
+        "technology": event.get("technology"),
+        "likely_operator": event.get("likely_operator"),
+        "operator_confidence": event.get("operator_confidence"),
+        "likely_mcc": event.get("likely_mcc"),
+        "likely_mnc": event.get("likely_mnc"),
+        "likely_plmn": event.get("likely_plmn"),
+        "plmn_source": event.get("plmn_source"),
+        "decoded_mcc": event.get("decoded_mcc"),
+        "decoded_mnc": event.get("decoded_mnc"),
+        "decoded_plmn": event.get("decoded_plmn"),
         "noise_floor_dbfs": event.get("noise_floor_dbfs"),
         "occupied_width_hz": event.get("occupied_width_hz"),
         "passive_only": event.get("passive_only"),
@@ -3729,9 +3751,19 @@ def _scanner_json_to_events(source: str, payload: dict[str, Any]) -> list[dict[s
         label = f"{frequency_hz_int / 1_000_000:.3f} MHz" if frequency_hz_int else "Cellular activity"
         band = str(payload.get("band") or "Cellular spectrum").strip()
         link = str(payload.get("link") or "unknown").strip()
+        cellular_type = str(payload.get("cellular_type") or payload.get("technology") or "Cellular").strip()
+        technology = str(payload.get("technology") or cellular_type).strip()
+        likely_operator = str(payload.get("likely_operator") or "").strip()
+        operator_confidence = str(payload.get("operator_confidence") or "").strip()
+        likely_plmn = str(payload.get("likely_plmn") or "").strip()
+        plmn_source = str(payload.get("plmn_source") or "").strip()
+        decoded_plmn = str(payload.get("decoded_plmn") or "").strip()
         classification = str(payload.get("classification") or "Passive cellular spectrum activity").strip()
         detail_bits = [
-            classification,
+            technology,
+            cellular_type if cellular_type != technology else "",
+            likely_operator if likely_operator else "",
+            f"PLMN {decoded_plmn}" if decoded_plmn else (f"likely PLMN {likely_plmn}" if likely_plmn else ""),
             band,
             link,
             f"excess {float(payload.get('excess_db')):.1f} dB" if payload.get("excess_db") is not None else "",
@@ -3745,8 +3777,8 @@ def _scanner_json_to_events(source: str, payload: dict[str, Any]) -> list[dict[s
                 "identity": f"{label} {link}".strip(),
                 "mac": str(frequency_hz_int or label),
                 "detail": " · ".join(bit for bit in detail_bits if bit),
-                "device_type": "Cellular infrastructure awareness",
-                "device_type_detail": band,
+                "device_type": "Cellular",
+                "device_type_detail": cellular_type,
                 "center_freq_hz": payload.get("center_freq_hz") or frequency_hz_int or None,
                 "frequency_hz": frequency_hz_int or None,
                 "frequency_mhz": payload.get("frequency_mhz"),
@@ -3758,6 +3790,18 @@ def _scanner_json_to_events(source: str, payload: dict[str, Any]) -> list[dict[s
                 "occupied_width_hz": payload.get("occupied_width_hz"),
                 "band": band,
                 "link": link,
+                "cellular_type": cellular_type,
+                "technology": technology,
+                "likely_operator": likely_operator,
+                "operator_confidence": operator_confidence,
+                "likely_mcc": payload.get("likely_mcc"),
+                "likely_mnc": payload.get("likely_mnc"),
+                "likely_plmn": likely_plmn,
+                "plmn_source": plmn_source,
+                "decoded_mcc": payload.get("decoded_mcc"),
+                "decoded_mnc": payload.get("decoded_mnc"),
+                "decoded_plmn": decoded_plmn,
+                "classification": classification,
                 "target": payload.get("target"),
                 "passive_only": payload.get("passive_only", True),
                 "content_decoded": payload.get("content_decoded", False),
@@ -4056,14 +4100,17 @@ def _upsert_discovery_row(event: dict[str, Any]) -> None:
         identity = str(event.get("identity") or "Cellular activity")
         frequency_hz = event.get("frequency_hz") or event.get("center_freq_hz")
         band = str(event.get("band") or "Cellular spectrum").strip()
+        cellular_type = str(event.get("cellular_type") or event.get("technology") or "Cellular").strip()
+        operator = str(event.get("likely_operator") or "").strip()
         row = {
             "key": f"cellular:{frequency_hz or identity}:{event.get('link') or 'unknown'}",
             "protocol": "CELLULAR",
             "identity": identity,
             "mac": str(frequency_hz or identity),
             "detail": str(event.get("detail") or "Passive cellular spectrum awareness"),
-            "device_type": str(event.get("device_type") or "Cellular infrastructure awareness"),
-            "device_type_detail": band,
+            "device_type": str(event.get("device_type") or "Cellular"),
+            "device_type_detail": cellular_type,
+            "manufacturer": {"name": operator, "company_name": operator} if operator else None,
             "detections": 1,
             "last_seen_at": now,
             "last_rssi_dbfs": event.get("last_rssi_dbfs") or event.get("power_dbfs") or event.get("rssi_dbfs"),
@@ -4076,6 +4123,18 @@ def _upsert_discovery_row(event: dict[str, Any]) -> None:
             "occupied_width_hz": event.get("occupied_width_hz"),
             "band": band,
             "link": event.get("link"),
+            "cellular_type": cellular_type,
+            "technology": event.get("technology"),
+            "likely_operator": operator,
+            "operator_confidence": event.get("operator_confidence"),
+            "likely_mcc": event.get("likely_mcc"),
+            "likely_mnc": event.get("likely_mnc"),
+            "likely_plmn": event.get("likely_plmn"),
+            "plmn_source": event.get("plmn_source"),
+            "decoded_mcc": event.get("decoded_mcc"),
+            "decoded_mnc": event.get("decoded_mnc"),
+            "decoded_plmn": event.get("decoded_plmn"),
+            "classification": event.get("classification"),
             "target": event.get("target"),
             "passive_only": event.get("passive_only", True),
             "content_decoded": event.get("content_decoded", False),

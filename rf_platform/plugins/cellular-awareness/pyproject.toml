@@ -14,6 +14,8 @@ dependencies = [
 ]
 
 [project.scripts]
+cellular_scanner = "cellular_awareness.cli:main"
+cellular-scanner = "cellular_awareness.cli:main"
 cellular-awareness = "cellular_awareness.cli:main"
 cellular_awareness = "cellular_awareness.cli:main"
 cellular-scan = "cellular_awareness.cli:main"

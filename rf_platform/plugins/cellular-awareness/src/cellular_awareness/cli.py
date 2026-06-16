@@ -29,6 +29,13 @@ class CellularBand:
     uplink_start_hz: int | None = None
     uplink_stop_hz: int | None = None
     notes: str = ""
+    technology: str = "Cellular"
+    cellular_type: str = "Cellular"
+    likely_operator: str = ""
+    operator_confidence: str = ""
+    likely_mcc: str = ""
+    likely_mnc: str = ""
+    likely_plmn: str = ""
 
 
 @dataclass
@@ -45,25 +52,36 @@ class Detection:
     occupied_width_hz: int
     band: str
     link: str
+    cellular_type: str
+    technology: str
+    likely_operator: str
+    operator_confidence: str
+    likely_mcc: str
+    likely_mnc: str
+    likely_plmn: str
+    plmn_source: str
+    decoded_mcc: str
+    decoded_mnc: str
+    decoded_plmn: str
     classification: str
     notes: str
     target: bool = False
 
 
 CELLULAR_BANDS: tuple[CellularBand, ...] = (
-    CellularBand("3GPP Band 71 / 600 MHz", 617_000_000, 652_000_000, 663_000_000, 698_000_000, "LTE/5G low-band"),
-    CellularBand("3GPP Band 12 / 700 MHz Lower", 729_000_000, 746_000_000, 699_000_000, 716_000_000, "LTE low-band"),
-    CellularBand("3GPP Band 13 / 700 MHz Upper C", 746_000_000, 756_000_000, 777_000_000, 787_000_000, "LTE low-band; 751 MHz sits here"),
-    CellularBand("3GPP Band 14 / FirstNet", 758_000_000, 768_000_000, 788_000_000, 798_000_000, "Public-safety LTE"),
-    CellularBand("3GPP Band 5 / 850 MHz Cellular", 869_000_000, 894_000_000, 824_000_000, 849_000_000, "Cellular 850"),
-    CellularBand("3GPP Band 2 / PCS 1900", 1_930_000_000, 1_990_000_000, 1_850_000_000, 1_910_000_000, "PCS LTE/NR"),
-    CellularBand("3GPP Band 4 / AWS-1", 2_110_000_000, 2_155_000_000, 1_710_000_000, 1_755_000_000, "AWS LTE/NR"),
-    CellularBand("3GPP Band 66 / AWS-3", 2_110_000_000, 2_200_000_000, 1_710_000_000, 1_780_000_000, "AWS LTE/NR"),
-    CellularBand("3GPP Band 7 / 2600 MHz", 2_620_000_000, 2_690_000_000, 2_500_000_000, 2_570_000_000, "LTE/NR"),
-    CellularBand("3GPP Band 41 / 2.5 GHz TDD", 2_496_000_000, 2_690_000_000, None, None, "TDD LTE/NR"),
-    CellularBand("3GPP n77 / C-band", 3_300_000_000, 4_200_000_000, None, None, "5G NR TDD"),
-    CellularBand("3GPP n78 / C-band", 3_300_000_000, 3_800_000_000, None, None, "5G NR TDD"),
-    CellularBand("3GPP n79 / 4.7 GHz", 4_400_000_000, 5_000_000_000, None, None, "5G NR TDD"),
+    CellularBand("3GPP Band 71 / 600 MHz", 617_000_000, 652_000_000, 663_000_000, 698_000_000, "LTE/5G low-band", "LTE/NR", "Low-band cellular", "T-Mobile US", "likely in US", "310", "260", "310-260"),
+    CellularBand("3GPP Band 12 / 700 MHz Lower", 729_000_000, 746_000_000, 699_000_000, 716_000_000, "LTE low-band", "LTE", "Low-band cellular", "AT&T / regional 700 MHz licensees", "possible in US", "310", "410", "310-410"),
+    CellularBand("3GPP Band 13 / 700 MHz Upper C", 746_000_000, 756_000_000, 777_000_000, 787_000_000, "LTE low-band; 751 MHz sits here", "LTE", "Low-band cellular", "Verizon Wireless", "likely in US", "311", "480", "311-480"),
+    CellularBand("3GPP Band 14 / FirstNet", 758_000_000, 768_000_000, 788_000_000, 798_000_000, "Public-safety LTE", "LTE", "Public-safety broadband", "FirstNet / AT&T", "likely in US", "313", "100", "313-100"),
+    CellularBand("3GPP Band 5 / 850 MHz Cellular", 869_000_000, 894_000_000, 824_000_000, 849_000_000, "Cellular 850", "LTE/NR", "Cellular 850", "AT&T / Verizon / regional cellular licensees", "possible in US", "", "", ""),
+    CellularBand("3GPP Band 2 / PCS 1900", 1_930_000_000, 1_990_000_000, 1_850_000_000, 1_910_000_000, "PCS LTE/NR", "LTE/NR", "PCS cellular", "US mobile operator", "ambiguous", "", "", ""),
+    CellularBand("3GPP Band 4 / AWS-1", 2_110_000_000, 2_155_000_000, 1_710_000_000, 1_755_000_000, "AWS LTE/NR", "LTE/NR", "AWS cellular", "US mobile operator", "ambiguous", "", "", ""),
+    CellularBand("3GPP Band 66 / AWS-3", 2_110_000_000, 2_200_000_000, 1_710_000_000, 1_780_000_000, "AWS LTE/NR", "LTE/NR", "AWS cellular", "US mobile operator", "ambiguous", "", "", ""),
+    CellularBand("3GPP Band 7 / 2600 MHz", 2_620_000_000, 2_690_000_000, 2_500_000_000, 2_570_000_000, "LTE/NR", "LTE/NR", "Mid-band cellular", "mobile operator", "ambiguous"),
+    CellularBand("3GPP Band 41 / 2.5 GHz TDD", 2_496_000_000, 2_690_000_000, None, None, "TDD LTE/NR", "LTE/NR TDD", "2.5 GHz TDD cellular", "T-Mobile US / 2.5 GHz licensee", "likely in US"),
+    CellularBand("3GPP n77 / C-band", 3_300_000_000, 4_200_000_000, None, None, "5G NR TDD", "5G NR", "C-band 5G", "5G C-band operator", "ambiguous"),
+    CellularBand("3GPP n78 / C-band", 3_300_000_000, 3_800_000_000, None, None, "5G NR TDD", "5G NR", "C-band 5G", "5G C-band operator", "ambiguous"),
+    CellularBand("3GPP n79 / 4.7 GHz", 4_400_000_000, 5_000_000_000, None, None, "5G NR TDD", "5G NR", "4.7 GHz 5G", "5G operator", "ambiguous"),
 )
 
 
@@ -220,7 +238,7 @@ def _analyze_iq(args: argparse.Namespace, iq: np.ndarray) -> list[Detection]:
         if occupied_width < int(args.min_occupied_width_hz):
             continue
         peak_power = float(region_power[peak_idx])
-        band, link, notes = _label_cellular_band(frequency_hz)
+        band = _label_cellular_band(frequency_hz)
         detections.append(
             Detection(
                 seen_at=time.time(),
@@ -233,10 +251,21 @@ def _analyze_iq(args: argparse.Namespace, iq: np.ndarray) -> list[Detection]:
                 noise_floor_dbfs=round(noise_floor, 1),
                 excess_db=round(peak_power - noise_floor, 1),
                 occupied_width_hz=max(0, occupied_width),
-                band=band,
-                link=link,
+                band=band.name,
+                link=band.link,
+                cellular_type=band.cellular_type,
+                technology=band.technology,
+                likely_operator=band.likely_operator,
+                operator_confidence=band.operator_confidence,
+                likely_mcc=band.likely_mcc,
+                likely_mnc=band.likely_mnc,
+                likely_plmn=band.likely_plmn,
+                plmn_source="spectrum_allocation_hint" if band.likely_plmn else "",
+                decoded_mcc="",
+                decoded_mnc="",
+                decoded_plmn="",
                 classification="Passive cellular spectrum activity",
-                notes=notes,
+                notes=band.notes,
             )
         )
     detections.sort(key=lambda row: row.excess_db, reverse=True)
@@ -271,7 +300,7 @@ def _top_spectral_candidates(args: argparse.Namespace, freqs: np.ndarray, power_
         if excess < float(args.candidate_threshold_db):
             break
         frequency_hz = int(args.center_freq_hz) + offset_hz
-        band, link, notes = _label_cellular_band(frequency_hz)
+        band = _label_cellular_band(frequency_hz)
         used_offsets.append(offset_hz)
         rows.append(
             Detection(
@@ -285,10 +314,21 @@ def _top_spectral_candidates(args: argparse.Namespace, freqs: np.ndarray, power_
                 noise_floor_dbfs=round(noise_floor, 1),
                 excess_db=round(excess, 1),
                 occupied_width_hz=int(round(max(bin_width_hz, float(args.min_occupied_width_hz)))),
-                band=band,
-                link=link,
+                band=band.name,
+                link=band.link,
+                cellular_type=band.cellular_type,
+                technology=band.technology,
+                likely_operator=band.likely_operator,
+                operator_confidence=band.operator_confidence,
+                likely_mcc=band.likely_mcc,
+                likely_mnc=band.likely_mnc,
+                likely_plmn=band.likely_plmn,
+                plmn_source="spectrum_allocation_hint" if band.likely_plmn else "",
+                decoded_mcc="",
+                decoded_mnc="",
+                decoded_plmn="",
                 classification="Passive cellular spectrum candidate",
-                notes=notes,
+                notes=band.notes,
             )
         )
         if len(rows) >= int(args.top):
@@ -318,7 +358,8 @@ def _target_frequency_detection(args: argparse.Namespace, freqs: np.ndarray, pow
     excess = peak_power - noise_floor
     if excess < float(args.target_threshold_db):
         return None
-    band, link, notes = _label_cellular_band(target_freq_hz)
+    band = _label_cellular_band(target_freq_hz)
+    notes = band.notes
     if notes:
         notes = f"{notes}; target={target_freq_hz / 1_000_000.0:.3f} MHz"
     else:
@@ -334,8 +375,19 @@ def _target_frequency_detection(args: argparse.Namespace, freqs: np.ndarray, pow
         noise_floor_dbfs=round(noise_floor, 1),
         excess_db=round(excess, 1),
         occupied_width_hz=int(args.target_width_hz),
-        band=band,
-        link=link,
+        band=band.name,
+        link=band.link,
+        cellular_type=band.cellular_type,
+        technology=band.technology,
+        likely_operator=band.likely_operator,
+        operator_confidence=band.operator_confidence,
+        likely_mcc=band.likely_mcc,
+        likely_mnc=band.likely_mnc,
+        likely_plmn=band.likely_plmn,
+        plmn_source="spectrum_allocation_hint" if band.likely_plmn else "",
+        decoded_mcc="",
+        decoded_mnc="",
+        decoded_plmn="",
         classification="Passive cellular target-frequency activity",
         notes=notes,
         target=True,
@@ -356,13 +408,60 @@ def _mask_regions(mask: np.ndarray) -> list[tuple[int, int]]:
     return regions
 
 
-def _label_cellular_band(freq_hz: int) -> tuple[str, str, str]:
+@dataclass(frozen=True)
+class CellularBandLabel:
+    name: str
+    link: str
+    notes: str
+    technology: str
+    cellular_type: str
+    likely_operator: str
+    operator_confidence: str
+    likely_mcc: str
+    likely_mnc: str
+    likely_plmn: str
+
+
+def _label_cellular_band(freq_hz: int) -> CellularBandLabel:
     for band in CELLULAR_BANDS:
         if band.downlink_start_hz <= freq_hz <= band.downlink_stop_hz:
-            return band.name, "downlink", band.notes
+            return CellularBandLabel(
+                band.name,
+                "downlink",
+                band.notes,
+                band.technology,
+                band.cellular_type,
+                band.likely_operator,
+                band.operator_confidence,
+                band.likely_mcc,
+                band.likely_mnc,
+                band.likely_plmn,
+            )
         if band.uplink_start_hz is not None and band.uplink_stop_hz is not None and band.uplink_start_hz <= freq_hz <= band.uplink_stop_hz:
-            return band.name, "uplink", band.notes
-    return "Cellular-adjacent / unknown licensed band", "unknown", "Outside built-in band table; treat as spectrum awareness only."
+            return CellularBandLabel(
+                band.name,
+                "uplink",
+                band.notes,
+                band.technology,
+                band.cellular_type,
+                band.likely_operator,
+                band.operator_confidence,
+                band.likely_mcc,
+                band.likely_mnc,
+                band.likely_plmn,
+            )
+    return CellularBandLabel(
+        "Cellular-adjacent / unknown licensed band",
+        "unknown",
+        "Outside built-in band table; treat as spectrum awareness only.",
+        "Unknown cellular",
+        "Unknown licensed-band signal",
+        "",
+        "",
+        "",
+        "",
+        "",
+    )
 
 
 def _run_scan(args: argparse.Namespace) -> int:
@@ -383,7 +482,7 @@ def _print_detections(args: argparse.Namespace, rows: list[Detection]) -> None:
             payload = asdict(row)
             payload.update(
                 {
-                    "protocol": "Cellular Awareness",
+                    "protocol": "Cellular",
                     "kind": "cellular_spectrum_activity",
                     "passive_only": True,
                     "content_decoded": False,
@@ -402,11 +501,13 @@ def _print_detections(args: argparse.Namespace, rows: list[Detection]) -> None:
             writer.writerow(asdict(row))
         return
     print("Passive cellular spectrum awareness only. No subscriber traffic/content is decoded.")
-    print("freq_mhz  link      excess  power   width_khz  band")
+    print("freq_mhz  link      tech      excess  power   operator / PLMN hint         band")
     for row in rows:
+        operator = row.likely_operator or "-"
+        plmn = row.likely_plmn or "-"
         print(
-            f"{row.frequency_mhz:8.3f}  {row.link:8s}  {row.excess_db:6.1f}  "
-            f"{row.power_dbfs:6.1f}  {row.occupied_width_hz/1000.0:9.1f}  {row.band}"
+            f"{row.frequency_mhz:8.3f}  {row.link:8s}  {row.technology[:8]:8s}  {row.excess_db:6.1f}  "
+            f"{row.power_dbfs:6.1f}  {operator[:18]:18s} {plmn:8s}  {row.band}"
         )
 
 

@@ -357,7 +357,7 @@ def _build_jobs(args: argparse.Namespace) -> tuple[list[ScanJob], list[ScanJob]]
             protocol="cellular",
             dwell_s=args.cellular_slice_s,
             command=[
-                _bin("cellular_awareness"),
+                _bin("cellular_scanner"),
                 "scan",
                 "--device-id",
                 device_id,

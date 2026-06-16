@@ -2756,7 +2756,7 @@
         if (row.protocol === "WIFI") return row.wifi_role === "ap" ? "WiFi Access Points" : "WiFi Stations";
         if (row.protocol === "FM") return "FM Broadcast";
         if (row.protocol === "LFMF") return "VLF/LF/MF Signals";
-        if (row.protocol === "CELLULAR") return "Cellular Awareness";
+        if (row.protocol === "CELLULAR") return "Cellular";
         const manufacturerName = canonicalBleVendorName(row.manufacturer?.company_name || "");
         if (manufacturerName) return manufacturerName;
         const uuidVendor = uuidVendorName(row);
@@ -2965,7 +2965,7 @@
           WIFI: "WiFi",
           FM: "FM Broadcast",
           LFMF: "VLF/LF/MF Signals",
-          CELLULAR: "Cellular Awareness",
+          CELLULAR: "Cellular",
         };
         return map[String(protocol || "").toUpperCase()] || String(protocol || "Unknown Protocol");
       }
