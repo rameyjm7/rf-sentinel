@@ -924,8 +924,9 @@
       }
 
       .section-tools {
-        display: flex;
-        align-items: center;
+        display: grid;
+        grid-template-columns: minmax(0, 1fr) auto;
+        align-items: start;
         justify-content: space-between;
         gap: 8px;
         padding: 0 10px 6px;
@@ -935,8 +936,14 @@
         padding: 0;
       }
 
+      .detection-select-stack {
+        display: grid;
+        gap: 6px;
+        align-self: start;
+      }
+
       .view-select {
-        min-width: 116px;
+        min-width: 126px;
         width: auto;
       }
 
@@ -2039,19 +2046,21 @@
                 <button class="tab-btn" id="lfmfTabBtn" type="button">VLF/LF/MF</button>
                 <button class="tab-btn" id="cellularTabBtn" type="button">Cellular</button>
               </div>
-              <select class="view-select" id="detectionViewSelect">
-                <option value="cards">Cards</option>
-                <option value="table">Table</option>
-                <option value="wifi-map">WiFi Map</option>
-              </select>
-              <select class="view-select" id="lastSeenFilterSelect" title="Filter detections by last seen time">
-                <option value="all">Last seen: All</option>
-                <option value="60">Last seen: 1 min</option>
-                <option value="300">Last seen: 5 min</option>
-                <option value="900">Last seen: 15 min</option>
-                <option value="3600">Last seen: 1 hour</option>
-                <option value="86400">Last seen: 24 hours</option>
-              </select>
+              <div class="detection-select-stack">
+                <select class="view-select" id="lastSeenFilterSelect" title="Filter detections by last seen time">
+                  <option value="all">Last seen: All</option>
+                  <option value="60">Last seen: 60s</option>
+                  <option value="300">Last seen: 300s</option>
+                  <option value="900">Last seen: 900s</option>
+                  <option value="3600">Last seen: 3600s</option>
+                  <option value="86400">Last seen: 86400s</option>
+                </select>
+                <select class="view-select" id="detectionViewSelect">
+                  <option value="cards">Cards</option>
+                  <option value="table">Table</option>
+                  <option value="wifi-map">WiFi Map</option>
+                </select>
+              </div>
             </div>
             <div class="identity-table-wrap" id="identityTableWrap"></div>
           </section>
