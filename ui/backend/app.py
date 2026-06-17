@@ -3954,8 +3954,14 @@ def _scanner_json_to_events(source: str, payload: dict[str, Any]) -> list[dict[s
     kind = str(payload.get("kind") or "").lower()
     source_protocol = str(source or "").rsplit(":", 1)[-1].lower()
 
-    if kind == "ble_adv" or protocol in {"ble", "btle"}:
-        payload.setdefault("kind", "ble_adv")
+    if protocol in {"ble", "btle"}:
+        event_type = str(payload.get("type") or "").strip().lower()
+        if event_type in {"status", "config", "raw", "metrics"}:
+            return []
+        if kind in {"ble_burst", "burst"}:
+            payload["kind"] = "ble_burst"
+        else:
+            payload.setdefault("kind", "ble_adv")
         payload.setdefault("seen_at", now)
         return [payload]
 
@@ -4310,10 +4316,11 @@ def _append_detections(events: list[dict[str, Any]], candidates: list[dict[str, 
     with state_lock:
         for event in events:
             state.bursts_seen += 1 if event["kind"].endswith("burst") else 0
-            state.ble_packets_seen += 1 if event["kind"] == "ble_adv" else 0
+            state.ble_packets_seen += 1 if event["kind"] in {"ble_adv", "ble_burst"} else 0
             state.classic_bursts_seen += 1 if event["kind"] in {"classic_burst", "classic_lap"} else 0
             mode_key = {
                 "ble_adv": "ble",
+                "ble_burst": "ble",
                 "classic_burst": "classic",
                 "classic_lap": "classic",
                 "zigbee_frame": "zigbee",
@@ -4338,13 +4345,14 @@ def _append_detections(events: list[dict[str, Any]], candidates: list[dict[str, 
                         state.noise_floor_dbfs = round((state.noise_floor_dbfs * 0.92) + (rssi * 0.08), 1)
                 except (TypeError, ValueError):
                     pass
-            if event["kind"] in {"ble_adv", "classic_lap", "zigbee_frame", "tpms_frame", "walkie_signal", "wifi_frame", "fm_station", "lfmf_signal", "cellular_signal"}:
+            if event["kind"] in {"ble_adv", "ble_burst", "classic_lap", "zigbee_frame", "tpms_frame", "walkie_signal", "wifi_frame", "fm_station", "lfmf_signal", "cellular_signal"}:
                 _upsert_discovery_row(event)
             if event["kind"] == "classic_lap":
                 _upsert_classic_address(event)
             if event["kind"] in {"classic_burst", "classic_lap"}:
                 _upsert_channel_activity(event)
-        state.detections = (events + state.detections)[:240]
+        visible_events = [event for event in events if event.get("kind") != "ble_burst"]
+        state.detections = (visible_events + state.detections)[:240]
         if candidates:
             state.classic_candidates = (candidates + state.classic_candidates)[:64]
     _console_render()
@@ -4362,7 +4370,23 @@ def _classic_full_mac(nap: Any = None, uap: Any = None, lap: Any = None) -> str:
 
 def _upsert_discovery_row(event: dict[str, Any]) -> None:
     now = float(event.get("seen_at", time.time()))
-    if event.get("kind") == "ble_adv":
+    if event.get("kind") == "ble_burst":
+        row = {
+            "key": "ble:activity",
+            "protocol": "BTLE",
+            "identity": "Bluetooth Low Energy",
+            "mac": "",
+            "detail": "wideband BLE RF activity",
+            "device_type": "BLE activity",
+            "device_type_detail": "burst activity",
+            "identity_source": "Observed BLE RF bursts; decoded advertisements appear as individual devices.",
+            "detections": 1,
+            "last_seen_at": now,
+            "last_rssi_dbfs": event.get("rssi_dbfs") or event.get("last_rssi_dbfs"),
+            "channel": event.get("channel"),
+            "center_freq_hz": event.get("center_freq_hz"),
+        }
+    elif event.get("kind") == "ble_adv":
         mac = str(event.get("address") or "unknown").strip()
         if not mac or mac == "unknown":
             return
@@ -4691,7 +4715,7 @@ def _upsert_discovery_row(event: dict[str, Any]) -> None:
                 row["detail"] = existing["detail"]
         if not row.get("name") and existing.get("name"):
             row["name"] = existing["name"]
-        if row.get("protocol") == "BTLE":
+        if row.get("protocol") == "BTLE" and row.get("key") != "ble:activity":
             row["uuid16"] = list(dict.fromkeys([*(existing.get("uuid16") or []), *(row.get("uuid16") or [])]))
             row["uuid16_names"] = _uuid16_names(row["uuid16"])
             if not row.get("manufacturer") and existing.get("manufacturer"):
@@ -4716,7 +4740,9 @@ def _upsert_discovery_row(event: dict[str, Any]) -> None:
                 row.get("manufacturer") if isinstance(row.get("manufacturer"), dict) else None,
                 row.get("appearance") if isinstance(row.get("appearance"), dict) else None,
             )
-        if row.get("protocol") == "BTLE" and row.get("name"):
+        if row.get("key") == "ble:activity":
+            row["identity"] = "Bluetooth Low Energy"
+        elif row.get("protocol") == "BTLE" and row.get("name"):
             row["identity"] = row["name"]
         elif row.get("protocol") == "BTLE":
             row["identity"] = _ble_identity_label(
@@ -7216,6 +7242,7 @@ def start_scan():
         enabled_devices = _enabled_devices_from_disabled(_available_devices(), disabled_devices)
     sweep_both_radios = bool(payload.get("sweep_both_radios", mode == "sentinel"))
     single_radio_bluetooth_requested = bool(payload.get("single_radio_bluetooth") or payload.get("bluetooth_single_radio"))
+    sentinel_hop_device_id = btle_device_id
 
     if mode not in {"ble", "classic", "both", "sentinel"}:
         return _json_error(400, "start_scan", error="mode must be ble, classic, both, or sentinel")
@@ -7243,7 +7270,12 @@ def start_scan():
             btc_device_id = combined_device_id
             other_sdr_protocols = enabled_protocols & {"zigbee", "tpms", "fm", "cellular"}
             alternate_hop_device_id = _pick_non_bluetooth_hop_device(devices_available, combined_device_id, enabled_devices)
-            btle_device_id = alternate_hop_device_id if mode == "sentinel" and other_sdr_protocols and alternate_hop_device_id else combined_device_id
+            btle_device_id = combined_device_id
+            sentinel_hop_device_id = alternate_hop_device_id or combined_device_id
+            # Keep BTC+BLE on the known-good continuous bluetooth_scanner path.
+            # The old sweep-both mode cycles separate BTC/BLE jobs and starves
+            # the UI of steady Bluetooth updates.
+            sweep_both_radios = False
             combined_rate_mhz = max(1, min(BT_CLASSIC_BANK_SIZE, _btc_max_bandwidth_mhz_for_device(combined_device_id)))
             device_meta = next((dev for dev in devices_available if str(dev.get("id") or "") == combined_device_id), None)
             if device_meta is not None:
@@ -7254,7 +7286,7 @@ def start_scan():
                 f"[ui] 2.4GHz ISM Bluetooth uses {combined_device_id} at {combined_rate_mhz} MHz "
                 f"({'wideband' if combined_rate_mhz >= 60 else 'best available'})"
             )
-            if alternate_hop_device_id and btle_device_id == alternate_hop_device_id:
+            if alternate_hop_device_id and mode == "sentinel" and other_sdr_protocols:
                 _append_scanner_log(f"[ui] non-Bluetooth SDR hopping uses {alternate_hop_device_id}")
             elif mode == "sentinel" and other_sdr_protocols:
                 disabled = sorted(other_sdr_protocols)
@@ -7266,6 +7298,8 @@ def start_scan():
         btc_device_id = _pick_device(devices_available, "bladerf")
     if mode in {"ble", "both", "sentinel"} and not btle_device_id:
         btle_device_id = _pick_device(devices_available, "hackrf", device_id or "sidekiq")
+    if mode == "sentinel" and not sentinel_hop_device_id:
+        sentinel_hop_device_id = btle_device_id
     if mode == "both" and btc_engine == "python" and btc_device_id and (single_radio_bluetooth_requested or not explicit_btle_device):
         btle_device_id = btc_device_id
     if mode == "classic" and not btc_device_id:
@@ -7309,8 +7343,8 @@ def start_scan():
     _start_csv_run()
     if btc_device_id:
         _stop_duplicate_gateway_streams(btc_device_id)
-    if btle_device_id and btle_device_id != btc_device_id:
-        _stop_duplicate_gateway_streams(btle_device_id)
+    if sentinel_hop_device_id and sentinel_hop_device_id != btc_device_id:
+        _stop_duplicate_gateway_streams(sentinel_hop_device_id)
 
     btc_test_target: dict[str, Any] | None = None
     btc_test_error = ""
@@ -7326,7 +7360,7 @@ def start_scan():
         try:
             scanner_body = _start_rf_sentinel_engine(
                 btc_device_id=btc_device_id,
-                hop_device_id=btle_device_id,
+                hop_device_id=sentinel_hop_device_id,
                 btc_center_mhz=btc_center_mhz,
                 btc_bandwidth_mhz=btc_bandwidth_mhz,
                 btc_lna_gain_db=btc_lna_gain_db,
@@ -7336,7 +7370,7 @@ def start_scan():
                 enabled_protocols=enabled_protocols,
                 enabled_devices=enabled_devices,
                 sweep_both_radios=sweep_both_radios,
-                fm_device_id=_fm_device_for_sentinel(devices_available, enabled_devices, btle_device_id),
+                fm_device_id=_fm_device_for_sentinel(devices_available, enabled_devices, sentinel_hop_device_id),
             )
         except RuntimeError as exc:
             return _json_error(400, "start_scan", error="scan start failed", detail=str(exc))
@@ -7350,7 +7384,7 @@ def start_scan():
             state.stream_id = None
             state.stream_ids = {}
             state.device_id = btc_device_id
-            state.device_ids = {"classic": btc_device_id, "hop": btle_device_id, "radio_a": btc_device_id, "radio_b": btle_device_id}
+            state.device_ids = {"classic": btc_device_id, "btle": btle_device_id, "hop": sentinel_hop_device_id, "radio_a": btc_device_id, "radio_b": sentinel_hop_device_id}
             state.scanner_assignments = {}
             state.center_freq_hz = btc_center_freq_hz
             state.sample_rate_sps = btc_bandwidth_mhz * 1_000_000
@@ -7379,7 +7413,7 @@ def start_scan():
                 "ok": True,
                 "mode": "sentinel",
                 "scanner": scanner_body,
-                "devices": {"classic": btc_device_id, "hop": btle_device_id, "radio_a": btc_device_id, "radio_b": btle_device_id},
+                "devices": {"classic": btc_device_id, "btle": btle_device_id, "hop": sentinel_hop_device_id, "radio_a": btc_device_id, "radio_b": sentinel_hop_device_id},
                 "test_target": btc_test_target,
                 "test_target_error": btc_test_error,
             }

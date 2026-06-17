@@ -194,7 +194,7 @@ def _build_jobs(args: argparse.Namespace) -> tuple[list[ScanJob], list[ScanJob]]
     def bluetooth_combined_job(name: str, device_id: str, bandwidth_mhz: int) -> ScanJob:
         return ScanJob(
             name=name,
-            protocol="btc",
+            protocol="btle+btc",
             continuous=True,
             dwell_s=0.0,
             command=[

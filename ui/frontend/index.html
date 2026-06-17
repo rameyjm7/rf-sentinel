@@ -4074,10 +4074,10 @@
           const rssiValues = Object.values(status.rssi_by_mode || {}).map((value) => Number(value)).filter((value) => Number.isFinite(value));
           const bestRssi = rssiValues.length ? Math.max(...rssiValues) : Number(status.last_rssi_dbfs ?? -120);
           metrics.btcRssi.textContent = fmtDb(bestRssi);
-          metrics.btleRssi.textContent = fmtDb(status.noise_floor_dbfs);
+          metrics.btleRssi.textContent = fmtDb(Number(status.rssi_by_mode?.ble ?? status.noise_floor_dbfs ?? -120));
           metrics.detections.textContent = Number(detectionTotal || 0).toLocaleString();
           metrics.bursts.textContent = Number(status.bursts_seen || 0).toLocaleString();
-          metrics.ble.textContent = Number(rows.filter((row) => row.protocol === "BTLE").length || 0).toLocaleString();
+          metrics.ble.textContent = Number(status.ble_packets_seen || protocolDetections("BTLE") || rows.filter((row) => row.protocol === "BTLE").length || 0).toLocaleString();
           metrics.classic.textContent = Number(protocolDetections("BTC") || status.classic_bursts_seen || 0).toLocaleString();
           metrics.zigbee.textContent = Number(protocolDetections("ZIGBEE") || 0).toLocaleString();
           metrics.tpms.textContent = Number((protocolDetections("TPMS") || 0) + (protocolDetections("WALKIE") || 0)).toLocaleString();
