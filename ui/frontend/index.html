@@ -1932,6 +1932,13 @@
                 <div class="config-note">BTC and BLE share one 2.4 GHz ISM SDR stream when a wideband radio is available. VLF/LF/MF is SDRplay RSP2-only and scans the low-frequency spectrum separately.</div>
               </div>
               <div class="config-section">
+                <div class="config-title">Bluetooth Classic</div>
+                <div class="protocol-toggles">
+                  <label class="protocol-row enabled"><input id="btcLogPassiveFhsInput" type="checkbox" /><span class="protocol-row-main"><strong>Log Passive FHS BDAddr</strong><span>Show passively decoded FHS address events when available</span></span></label>
+                  <label class="protocol-row enabled"><input id="btcPeriodicPageScanInput" type="checkbox" /><span class="protocol-row-main"><strong>Initiate Page Scanning Periodically</strong><span>Run short BR/EDR inquiry bursts to surface page/FHS evidence</span></span></label>
+                </div>
+              </div>
+              <div class="config-section">
                 <div class="config-title">SDRs</div>
                 <div class="sdr-config-list" id="sdrConfigList"></div>
               </div>
@@ -2090,6 +2097,10 @@
       const disabledSdrIds = new Set();
       let wifiChannelSelection = [1, 6, 11];
       let protocolDeviceOverrides = {};
+      let bluetoothClassicConfig = {
+        log_passive_fhs_bdaddr: false,
+        periodic_page_scan: false,
+      };
       let configLoaded = false;
       let protocolConfigDirty = false;
       let activeDetectionTab = "ALL";
@@ -2462,6 +2473,28 @@
         }
       }
 
+      function applyBluetoothClassicConfig(config) {
+        const value = config && typeof config === "object" ? config : {};
+        bluetoothClassicConfig = {
+          log_passive_fhs_bdaddr: Boolean(value.log_passive_fhs_bdaddr),
+          periodic_page_scan: Boolean(value.periodic_page_scan),
+        };
+        if (typeof btcLogPassiveFhsInput !== "undefined" && btcLogPassiveFhsInput) {
+          btcLogPassiveFhsInput.checked = bluetoothClassicConfig.log_passive_fhs_bdaddr;
+        }
+        if (typeof btcPeriodicPageScanInput !== "undefined" && btcPeriodicPageScanInput) {
+          btcPeriodicPageScanInput.checked = bluetoothClassicConfig.periodic_page_scan;
+        }
+      }
+
+      function bluetoothClassicConfigPayload() {
+        bluetoothClassicConfig = {
+          log_passive_fhs_bdaddr: Boolean(btcLogPassiveFhsInput?.checked),
+          periodic_page_scan: Boolean(btcPeriodicPageScanInput?.checked),
+        };
+        return { ...bluetoothClassicConfig };
+      }
+
       async function loadConfig() {
         try {
           const resp = await fetch("/api/config");
@@ -2472,6 +2505,7 @@
           applyDisabledSdrList(config.disabled_devices);
           applyWifiChannels(config.wifi_channels);
           applyProtocolDevices(config.protocol_devices);
+          applyBluetoothClassicConfig(config.bluetooth_classic);
           renderProtocolControls();
         } catch {
           // Defaults remain usable if the config file is missing or unreadable.
@@ -2486,10 +2520,11 @@
         const disabled_devices = disabledSdrPayload();
         const wifi_channels = cleanWifiChannels(wifiChannelSelection);
         const protocol_devices = protocolDevicePayload();
+        const bluetooth_classic = bluetoothClassicConfigPayload();
         const resp = await fetch("/api/config", {
           method: "POST",
           headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ protocols, disabled_devices, wifi_channels, protocol_devices }),
+          body: JSON.stringify({ protocols, disabled_devices, wifi_channels, protocol_devices, bluetooth_classic }),
         });
         const data = await resp.json().catch(() => ({}));
         if (!resp.ok) throw new Error(data.error || data.detail || "Config save failed");
@@ -4160,6 +4195,7 @@
               devices: selectedSdrPayload(),
               wifi_channels: cleanWifiChannels(wifiChannelSelection),
               protocol_devices: protocolDevicePayload(),
+              bluetooth_classic: bluetoothClassicConfigPayload(),
             }),
           });
           const data = await resp.json().catch(() => ({}));
@@ -4633,6 +4669,7 @@
             devices: selectedSdrPayload(),
             wifi_channels: cleanWifiChannels(wifiChannelSelection),
             protocol_devices: protocolDevicePayload(),
+            bluetooth_classic: bluetoothClassicConfigPayload(),
             sweep_both_radios: false,
           }),
         });
@@ -4693,6 +4730,12 @@
       sampleRateInput.addEventListener("input", refreshPlannedStatusLabel);
       detectionViewSelect.addEventListener("change", pollStatus);
       hopDwellInput.addEventListener("change", scheduleAutoHop);
+      btcLogPassiveFhsInput?.addEventListener("change", () => {
+        applyProtocolSelection({ commit: true }).catch((err) => showToast(err.message || "Bluetooth Classic config save failed"));
+      });
+      btcPeriodicPageScanInput?.addEventListener("change", () => {
+        applyProtocolSelection({ commit: true }).catch((err) => showToast(err.message || "Bluetooth Classic config save failed"));
+      });
       document.addEventListener("click", (event) => {
         if (event.target.closest("#followMenu")) return;
         if (!configMenu.open || configMenu.contains(event.target)) return;

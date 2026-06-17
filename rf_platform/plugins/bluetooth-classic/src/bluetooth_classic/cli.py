@@ -671,6 +671,8 @@ def _run_listen(args: argparse.Namespace) -> int:
             event_type = str(event.get("type") or "")
             if event_type == "page_access_seen" and not _page_detection_enabled(args):
                 continue
+            if event_type == "passive_fhs_bdaddr" and not getattr(args, "log_passive_fhs_bdaddr", False):
+                continue
             if event_type == "metrics" and not args.metrics:
                 continue
             if args.json:
@@ -794,6 +796,8 @@ def _combined_btc_stdout_worker(proc: subprocess.Popen[str], args: argparse.Name
                     event = _normalize_native_json_event(event, args)
                     if str(event.get("type") or "") == "page_access_seen" and not _page_detection_enabled(args):
                         continue
+                    if str(event.get("type") or "") == "passive_fhs_bdaddr" and not getattr(args, "log_passive_fhs_bdaddr", False):
+                        continue
                     events.put(event)
                     continue
                 except json.JSONDecodeError:
@@ -889,6 +893,16 @@ def _run_combined(args: argparse.Namespace) -> int:
     ]
     if args.show_init_failed:
         cmd.append("--show-init-failed")
+    if getattr(args, "debug_target_lap", ""):
+        cmd.extend(["--debug-target-lap", _clean_hex(args.debug_target_lap, 6, "--debug-target-lap")])
+    if getattr(args, "expected_bdaddr", ""):
+        cmd.extend(["--expected-bdaddr", _clean_bdaddr(args.expected_bdaddr)])
+    if getattr(args, "debug_fhs_rejects", False):
+        cmd.append("--debug-fhs-rejects")
+    if getattr(args, "fhs_max_fec_errors", 0):
+        cmd.extend(["--fhs-max-fec-errors", str(int(args.fhs_max_fec_errors))])
+    if getattr(args, "debug_energy_bin", -1) is not None and int(getattr(args, "debug_energy_bin", -1)) >= 0:
+        cmd.extend(["--debug-energy-bin", str(int(args.debug_energy_bin))])
 
     print(
         f"using source=gateway-combined mode={mode} stream_id={stream_id or '-'} device={args.device_id} driver={driver} "
@@ -1275,6 +1289,7 @@ def _add_common_gateway_capture_args(parser: argparse.ArgumentParser) -> None:
     parser.add_argument("--show-init-failed", action="store_true")
     parser.add_argument("--debug-target-lap", default="", help="emit page_access_seen when this LAP access code is observed")
     parser.add_argument("--no-page-detection", action="store_true", help="suppress page/inquiry access-code events for legacy BTC+BLE behavior")
+    parser.add_argument("--log-passive-fhs-bdaddr", action="store_true", help="forward passive FHS BD_ADDR events from native decoder")
     parser.add_argument("--expected-bdaddr", default="", help="full Bluetooth address used to mark FHS events as match/mismatch")
     parser.add_argument("--debug-fhs-rejects", action="store_true", help="emit limited diagnostics for FHS-shaped packets rejected by validation")
     parser.add_argument("--fhs-max-fec-errors", type=int, default=0, help="allow this many uncorrectable FHS payload FEC blocks before rejecting")

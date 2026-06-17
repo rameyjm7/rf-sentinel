@@ -5385,6 +5385,7 @@ def _write_rf_sentinel_control(
     enabled_devices: set[str] | None = None,
     protocol_devices: dict[str, str] | None = None,
     wifi_channels: list[int] | None = None,
+    bluetooth_classic: dict[str, Any] | None = None,
     zigbee_follow_channel: int | None | object = RF_SENTINEL_NO_CHANGE,
     zigbee_follow_device_id: str | None | object = RF_SENTINEL_NO_CHANGE,
 ) -> dict[str, Any]:
@@ -5408,6 +5409,8 @@ def _write_rf_sentinel_control(
             for channel in wifi_channels
             if int(channel) in WIFI_SUPPORTED_CHANNELS
         ] or [1, 6, 11]
+    if bluetooth_classic is not None:
+        payload["bluetooth_classic"] = _clean_bluetooth_classic_config(bluetooth_classic)
     if zigbee_follow_channel is not RF_SENTINEL_NO_CHANGE:
         follow = payload.get("follow")
         if not isinstance(follow, dict):
@@ -5438,6 +5441,14 @@ def _write_rf_sentinel_control(
     tmp_path.write_text(json.dumps(payload, separators=(",", ":")), encoding="utf-8")
     tmp_path.replace(RF_SENTINEL_CONTROL_PATH)
     return payload
+
+
+def _clean_bluetooth_classic_config(raw: Any) -> dict[str, bool]:
+    value = raw if isinstance(raw, dict) else {}
+    return {
+        "log_passive_fhs_bdaddr": bool(value.get("log_passive_fhs_bdaddr")),
+        "periodic_page_scan": bool(value.get("periodic_page_scan")),
+    }
 
 
 def _follow_state_for_protocols(control: dict[str, Any], protocols: set[str]) -> dict[str, Any]:
@@ -5480,11 +5491,13 @@ def _read_ui_config() -> dict[str, Any]:
             device_text = str(device_id).strip()
             if protocol_key in PROTOCOL_DEVICE_OVERRIDES and device_text:
                 protocol_devices[protocol_key] = device_text
+    bluetooth_classic = _clean_bluetooth_classic_config(payload.get("bluetooth_classic"))
     return {
         "protocols": sorted({str(item).strip().lower() for item in protocols} & RF_SENTINEL_PROTOCOLS),
         "disabled_devices": sorted({str(item).strip() for item in disabled if str(item).strip()}),
         "wifi_channels": wifi_channels or [1, 6, 11],
         "protocol_devices": protocol_devices,
+        "bluetooth_classic": bluetooth_classic,
     }
 
 
@@ -5506,6 +5519,7 @@ def _write_ui_config(
     *,
     wifi_channels: list[int] | None = None,
     protocol_devices: dict[str, str] | None = None,
+    bluetooth_classic: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     RF_SENTINEL_UI_CONFIG_PATH.parent.mkdir(parents=True, exist_ok=True)
     existing = _read_ui_config()
@@ -5517,11 +5531,13 @@ def _write_ui_config(
         for protocol, device_id in dict(selected_protocol_devices or {}).items()
         if str(protocol).strip().lower() in PROTOCOL_DEVICE_OVERRIDES and str(device_id).strip()
     }
+    selected_bluetooth_classic = bluetooth_classic if bluetooth_classic is not None else existing.get("bluetooth_classic", {})
     payload = {
         "protocols": sorted(protocols & RF_SENTINEL_PROTOCOLS),
         "disabled_devices": sorted(str(item).strip() for item in disabled_devices if str(item).strip()),
         "wifi_channels": clean_wifi_channels,
         "protocol_devices": clean_protocol_devices,
+        "bluetooth_classic": _clean_bluetooth_classic_config(selected_bluetooth_classic),
         "updated_at": time.time(),
     }
     tmp_path = RF_SENTINEL_UI_CONFIG_PATH.with_suffix(".json.tmp")
@@ -6871,6 +6887,7 @@ def _start_rf_sentinel_engine(
     protocols = enabled_protocols or set(RF_SENTINEL_PROTOCOLS)
     devices = enabled_devices or set()
     ui_config = _read_ui_config()
+    bluetooth_classic = _clean_bluetooth_classic_config(ui_config.get("bluetooth_classic"))
     protocol_devices = _clean_protocol_devices(
         ui_config.get("protocol_devices"),
         devices,
@@ -6932,6 +6949,11 @@ def _start_rf_sentinel_engine(
     if "cellular" not in protocols:
         cmd.append("--no-cellular")
     page_detection_enabled = str(os.getenv("RF_SENTINEL_ENABLE_PAGE_DETECTION", "")).strip().lower() in {"1", "true", "yes", "on"}
+    if bluetooth_classic.get("periodic_page_scan"):
+        page_detection_enabled = True
+        cmd.append("--btc-periodic-page-scan")
+    if bluetooth_classic.get("log_passive_fhs_bdaddr"):
+        cmd.append("--btc-log-passive-fhs-bdaddr")
     if not page_detection_enabled:
         cmd.append("--no-page-detection")
     # Start in discovery mode; only the explicit right-click Follow action locks Zigbee.
@@ -6941,6 +6963,7 @@ def _start_rf_sentinel_engine(
         enabled_devices=devices,
         protocol_devices=protocol_devices,
         wifi_channels=wifi_channels,
+        bluetooth_classic=bluetooth_classic,
         zigbee_follow_channel=zigbee_follow_channel,
     )
     cmd.extend(["--control-file", str(RF_SENTINEL_CONTROL_PATH)])
@@ -7003,6 +7026,7 @@ def update_scan_protocols():
     if "lfmf" in enabled_protocols and not _has_lfmf_device(devices_available, enabled_devices):
         enabled_protocols.discard("lfmf")
     existing_config = _read_ui_config()
+    bluetooth_classic = _clean_bluetooth_classic_config(payload.get("bluetooth_classic", existing_config.get("bluetooth_classic")))
     protocol_devices = _clean_protocol_devices(
         payload.get("protocol_devices", existing_config.get("protocol_devices")),
         enabled_devices or known_devices,
@@ -7014,12 +7038,14 @@ def update_scan_protocols():
         disabled_devices,
         wifi_channels=wifi_channels,
         protocol_devices=protocol_devices,
+        bluetooth_classic=bluetooth_classic,
     )
     control = _write_rf_sentinel_control(
         enabled_protocols,
         enabled_devices=enabled_devices,
         protocol_devices=protocol_devices,
         wifi_channels=wifi_channels,
+        bluetooth_classic=bluetooth_classic,
         zigbee_follow_channel=RF_SENTINEL_NO_CHANGE if "zigbee" in enabled_protocols else None,
     )
     follow_state = _follow_state_for_protocols(control, enabled_protocols)
@@ -7027,7 +7053,7 @@ def update_scan_protocols():
         state.decoder_stats["enabled_protocols"] = sorted(enabled_protocols)
         state.decoder_stats["follow"] = follow_state
         _append_scanner_log(f"[ui] enabled protocols updated: {', '.join(sorted(enabled_protocols)) or 'none'}")
-    return jsonify({"ok": True, "protocols": sorted(enabled_protocols), "wifi_channels": wifi_channels, "protocol_devices": protocol_devices})
+    return jsonify({"ok": True, "protocols": sorted(enabled_protocols), "wifi_channels": wifi_channels, "protocol_devices": protocol_devices, "bluetooth_classic": bluetooth_classic})
 
 
 @app.post("/api/scan/follow")
@@ -7542,6 +7568,7 @@ def update_config():
         reserved_devices={str(state.device_ids.get("radio_a") or state.device_ids.get("classic") or "").strip()},
     )
     wifi_channels = _clean_wifi_channels(payload.get("wifi_channels"))
+    bluetooth_classic = _clean_bluetooth_classic_config(payload.get("bluetooth_classic"))
     if "wifi" in protocols and not _has_wifi_device(devices_available, enabled_devices):
         protocols.discard("wifi")
     if "lfmf" in protocols and not _has_lfmf_device(devices_available, enabled_devices):
@@ -7551,12 +7578,14 @@ def update_config():
         disabled_devices,
         wifi_channels=wifi_channels,
         protocol_devices=protocol_devices,
+        bluetooth_classic=bluetooth_classic,
     )
     control = _write_rf_sentinel_control(
         protocols,
         enabled_devices=enabled_devices,
         protocol_devices=protocol_devices,
         wifi_channels=wifi_channels,
+        bluetooth_classic=bluetooth_classic,
         zigbee_follow_channel=RF_SENTINEL_NO_CHANGE if "zigbee" in protocols else None,
     )
     follow_state = _follow_state_for_protocols(control, protocols)

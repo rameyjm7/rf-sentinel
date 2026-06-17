@@ -36,6 +36,8 @@ DEFAULT_WALKIE_CENTER_FREQ_HZ = 462_500_000
 DEFAULT_WALKIE_SAMPLE_RATE_SPS = 1_000_000
 DEFAULT_IQ_DIR = Path(os.getenv("RF_SENTINEL_IQ_DIR", "/var/log/rf_sentinel/iq"))
 DEFAULT_BLUETOOTH_IQ_CAPTURE = DEFAULT_IQ_DIR / "bluetooth_combined.cs8"
+DEFAULT_BTC_PAGE_SCAN_INTERVAL_S = 60.0
+DEFAULT_BTC_PAGE_SCAN_ACTIVE_S = 12.0
 
 
 @dataclass(frozen=True)
@@ -219,6 +221,10 @@ def _build_jobs(args: argparse.Namespace) -> tuple[list[ScanJob], list[ScanJob]]
             command.extend(["--iq-playback-path", args.iq_playback_path])
         if args.iq_capture_max_bytes:
             command.extend(["--iq-capture-max-bytes", str(args.iq_capture_max_bytes)])
+        if args.btc_log_passive_fhs_bdaddr:
+            command.append("--log-passive-fhs-bdaddr")
+        if args.btc_expected_bdaddr:
+            command.extend(["--expected-bdaddr", args.btc_expected_bdaddr])
         if args.no_page_detection:
             command.append("--no-page-detection")
         return ScanJob(
@@ -872,6 +878,11 @@ def _run(args: argparse.Namespace) -> int:
         print("No protocols enabled.", file=sys.stderr)
         return 2
 
+    page_scan_thread: threading.Thread | None = None
+    if args.btc_periodic_page_scan or args.control_file:
+        page_scan_thread = threading.Thread(target=_periodic_btc_page_scan_loop, args=(args, supervisor.stop_requested), daemon=True)
+        page_scan_thread.start()
+
     for job in continuous:
         print(f"[rf-sentinel] starting continuous {job.name}: {_format_command(job.command)}", flush=True)
         supervisor.start(job)
@@ -1048,6 +1059,65 @@ def _format_command(command: Iterable[str]) -> str:
     return " ".join(command)
 
 
+def _control_bluetooth_classic(args: argparse.Namespace) -> dict[str, bool]:
+    payload = _control_payload(args)
+    value = payload.get("bluetooth_classic")
+    value = value if isinstance(value, dict) else {}
+    return {
+        "log_passive_fhs_bdaddr": bool(value.get("log_passive_fhs_bdaddr", args.btc_log_passive_fhs_bdaddr)),
+        "periodic_page_scan": bool(value.get("periodic_page_scan", args.btc_periodic_page_scan)),
+    }
+
+
+def _start_btc_page_scan_process() -> subprocess.Popen[str] | None:
+    if shutil.which("bluetoothctl") is None:
+        print("[rf-sentinel] btc periodic page scan unavailable; bluetoothctl not found", flush=True)
+        return None
+    commands = "\n".join(["power on", "scan bredr on"]) + "\n"
+    try:
+        proc = subprocess.Popen(
+            ["bluetoothctl"],
+            stdin=subprocess.PIPE,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            text=True,
+            start_new_session=True,
+        )
+        if proc.stdin:
+            proc.stdin.write(commands)
+            proc.stdin.flush()
+        return proc
+    except OSError as exc:
+        print(f"[rf-sentinel] btc periodic page scan failed: {exc}", flush=True)
+        return None
+
+
+def _stop_btc_page_scan_process(proc: subprocess.Popen[str] | None) -> None:
+    if proc is None:
+        return
+    try:
+        if proc.stdin and proc.poll() is None:
+            proc.stdin.write("scan off\nexit\n")
+            proc.stdin.flush()
+    except (BrokenPipeError, OSError):
+        pass
+    _terminate_process_group(proc, timeout_s=2.0)
+
+
+def _periodic_btc_page_scan_loop(args: argparse.Namespace, stop: threading.Event) -> None:
+    active_s = max(1.0, float(args.btc_page_scan_active_s))
+    interval_s = max(active_s, float(args.btc_page_scan_interval_s))
+    while not stop.is_set():
+        if not _control_bluetooth_classic(args).get("periodic_page_scan"):
+            stop.wait(0.5)
+            continue
+        print(f"[rf-sentinel] btc periodic page scan active_s={active_s:.1f}", flush=True)
+        proc = _start_btc_page_scan_process()
+        stop.wait(active_s)
+        _stop_btc_page_scan_process(proc)
+        stop.wait(max(0.5, interval_s - active_s))
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="rf_sentinel_scan",
@@ -1068,6 +1138,11 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--btc-vga-gain-db", type=float, default=40.0)
     parser.add_argument("--btc-amp-gain-db", type=float, default=0.0)
     parser.add_argument("--no-page-detection", action="store_true", help="legacy Bluetooth mode: suppress page/inquiry access-code events")
+    parser.add_argument("--btc-log-passive-fhs-bdaddr", action="store_true", help="forward passive FHS BD_ADDR events from the Bluetooth Classic decoder")
+    parser.add_argument("--btc-periodic-page-scan", action="store_true", help="periodically run a local BR/EDR inquiry scan while BTC/BLE decoding")
+    parser.add_argument("--btc-page-scan-interval-s", type=float, default=DEFAULT_BTC_PAGE_SCAN_INTERVAL_S)
+    parser.add_argument("--btc-page-scan-active-s", type=float, default=DEFAULT_BTC_PAGE_SCAN_ACTIVE_S)
+    parser.add_argument("--btc-expected-bdaddr", default=os.getenv("BTC_TARGET_MAC", ""), help="optional BD_ADDR used by the BTC decoder to verify passive FHS events")
     parser.add_argument(
         "--rf-input-mode",
         choices=("live", "capture", "playback"),
