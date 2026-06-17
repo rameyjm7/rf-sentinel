@@ -2825,6 +2825,51 @@ def _gateway_stream_for_device(device_id: str | None) -> dict[str, Any] | None:
     return None
 
 
+def _gateway_iq_sweeps() -> list[dict[str, Any]]:
+    body = _gateway_get_json("/iq-sweeps")
+    return body if isinstance(body, list) else []
+
+
+def _gateway_live_centers_by_device() -> dict[str, int]:
+    centers: dict[str, int] = {}
+    try:
+        for stream in _gateway_streams():
+            if str(stream.get("status") or "").lower() not in {"running", "retuning"}:
+                continue
+            cfg = stream.get("config", {}) or {}
+            device_id = str(cfg.get("device_id") or "").strip()
+            center_hz = int(cfg.get("center_freq_hz") or 0)
+            if device_id and center_hz > 0:
+                centers[device_id] = center_hz
+    except Exception:
+        pass
+    try:
+        for sweep in _gateway_iq_sweeps():
+            if str(sweep.get("status") or "").lower() not in {"running", "retuning"}:
+                continue
+            cfg = sweep.get("config", {}) or {}
+            device_id = str(cfg.get("device_id") or "").strip()
+            center_hz = int(sweep.get("current_center_freq_hz") or cfg.get("center_freq_hz") or 0)
+            if device_id and center_hz > 0:
+                centers[device_id] = center_hz
+    except Exception:
+        pass
+    return centers
+
+
+def _sync_scanner_assignment_centers_from_gateway() -> dict[str, int]:
+    centers_by_device = _gateway_live_centers_by_device()
+    if not centers_by_device:
+        return {}
+    with state_lock:
+        for assignment in state.scanner_assignments.values():
+            device_id = str(assignment.get("device_id") or "").strip()
+            center_hz = centers_by_device.get(device_id)
+            if center_hz and center_hz > 0:
+                assignment["last_center_freq_hz"] = center_hz
+    return centers_by_device
+
+
 def _stop_gateway_stream(stream_id: str | None) -> None:
     if not stream_id:
         return
@@ -5678,6 +5723,7 @@ def _append_scanner_log(line: str) -> None:
     assignment = _parse_scanner_assignment(text)
     if assignment:
         state.scanner_assignments[assignment["device_id"]] = assignment
+    _update_scanner_assignment_from_log(text)
     _console_append_log(text)
 
 
@@ -5706,6 +5752,25 @@ def _touch_scanner_assignment(source: str, payload: dict[str, Any], events: list
                 assignment["last_center_freq_hz"] = payload.get("center_freq_hz")
             if payload.get("frequency_hz") is not None:
                 assignment["last_frequency_hz"] = payload.get("frequency_hz")
+            return
+
+
+def _update_scanner_assignment_from_log(line: str) -> None:
+    source, body = _parse_rf_sentinel_line(line)
+    center_match = re.search(r"\bretuned\s+center=(?P<mhz>[0-9.]+)MHz\b", body, re.IGNORECASE)
+    if not center_match:
+        return
+    try:
+        center_hz = int(round(float(center_match.group("mhz")) * 1_000_000.0))
+    except (TypeError, ValueError):
+        return
+    now = time.time()
+    with state_lock:
+        for assignment in state.scanner_assignments.values():
+            if str(assignment.get("job_name") or "").strip() != source:
+                continue
+            assignment["seen_at"] = now
+            assignment["last_center_freq_hz"] = center_hz
             return
 
 
@@ -8001,6 +8066,7 @@ def stop_scan():
 
 @app.get("/api/status")
 def status():
+    gateway_live_centers = _sync_scanner_assignment_centers_from_gateway()
     devices = _available_devices()
     ui_config = _read_ui_config()
     with state_lock:
@@ -8047,6 +8113,7 @@ def status():
                 "btc_engine_log": state.btc_engine_log,
                 "scanner_log": state.scanner_log[-160:],
                 "scanner_assignments": state.scanner_assignments,
+                "gateway_live_centers": gateway_live_centers,
                 "csv_run_id": state.csv_run_id,
                 "csv_log_dir": state.csv_log_dir,
                 "ui_config": ui_config,

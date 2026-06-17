@@ -4041,6 +4041,12 @@
           }
           return "";
         }
+        function deviceLiveCenter(status, device) {
+          const centers = status?.gateway_live_centers || {};
+          const liveHz = Number(centers?.[device?.id] || device?.last_center_freq_hz || 0);
+          if (Number.isFinite(liveHz) && liveHz > 0) return `${(liveHz / 1_000_000).toFixed(3).replace(/\.?0+$/, "")} MHz`;
+          return "";
+        }
         function sdrProtocolChips(assignment) {
           if (!assignment) return "";
           const protocol = String(assignment.protocol || "").toUpperCase();
@@ -4093,10 +4099,10 @@
               : inferredChips
                 ? `<span class="sdr-assignment-chips">${inferredChips}<span class="legend-pill">${scanLabel}</span></span>`
                 : `<span class="legend-pill">${scanLabel}</span>`;
-            const center = active ? assignmentCenter(assignment) : "";
+            const center = active ? (assignmentCenter(assignment) || deviceLiveCenter(status, device)) : deviceLiveCenter(status, device);
             const band = active
               ? `${assignment.band || "Scanning"}${center ? ` · center ${center}` : ""}`
-              : fallbackSdrBand(device);
+              : `${fallbackSdrBand(device)}${center ? ` · center ${center}` : ""}`;
             const when = active && assignment.seen_at ? `${Math.max(0, Math.round(Date.now() / 1000 - Number(assignment.seen_at)))}s ago` : "";
             cards.push(`
               <div class="sdr-assignment">
