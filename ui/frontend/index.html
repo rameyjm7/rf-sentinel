@@ -1981,6 +1981,7 @@
         <input id="btcLogPassiveFhsInput" type="checkbox" hidden />
         <input id="btcPeriodicPageScanInput" type="checkbox" hidden />
         <input id="btcBandHopInput" type="checkbox" hidden />
+        <input id="btcRemoteNameLookupInput" type="checkbox" hidden />
         <div class="toolbar-actions">
           <details class="config-menu" id="configMenu">
             <summary><span class="material-symbols-rounded">tune</span>Config</summary>
@@ -2173,6 +2174,7 @@
         log_passive_fhs_bdaddr: false,
         periodic_page_scan: false,
         band_hop: false,
+        remote_name_lookup: false,
       };
       let configLoaded = false;
       let protocolConfigDirty = false;
@@ -2552,6 +2554,7 @@
           log_passive_fhs_bdaddr: Boolean(value.log_passive_fhs_bdaddr),
           periodic_page_scan: Boolean(value.periodic_page_scan),
           band_hop: Boolean(value.band_hop),
+          remote_name_lookup: Boolean(value.remote_name_lookup),
         };
         if (typeof btcLogPassiveFhsInput !== "undefined" && btcLogPassiveFhsInput) {
           btcLogPassiveFhsInput.checked = bluetoothClassicConfig.log_passive_fhs_bdaddr;
@@ -2562,6 +2565,9 @@
         if (typeof btcBandHopInput !== "undefined" && btcBandHopInput) {
           btcBandHopInput.checked = bluetoothClassicConfig.band_hop;
         }
+        if (typeof btcRemoteNameLookupInput !== "undefined" && btcRemoteNameLookupInput) {
+          btcRemoteNameLookupInput.checked = bluetoothClassicConfig.remote_name_lookup;
+        }
       }
 
       function bluetoothClassicConfigPayload() {
@@ -2569,6 +2575,7 @@
           log_passive_fhs_bdaddr: Boolean(btcLogPassiveFhsInput?.checked),
           periodic_page_scan: Boolean(btcPeriodicPageScanInput?.checked),
           band_hop: Boolean(btcBandHopInput?.checked),
+          remote_name_lookup: Boolean(btcRemoteNameLookupInput?.checked),
         };
         return { ...bluetoothClassicConfig };
       }
@@ -3209,7 +3216,7 @@
           base.center_freq_hz = latest.center_freq_hz ?? base.center_freq_hz;
           base.detail = details.join(" · ");
           if (resolvedRows.length) {
-            base.identity = base.mac || base.identity;
+            base.identity = base.name || base.identity || base.mac;
             base.inferred_merge = unresolvedCount > 0;
             base.inferred_merge_count = unresolvedCount;
             base.identity_source = unresolvedCount
@@ -4657,6 +4664,11 @@
               label: "Enable 2.4 GHz Band Hopping",
               detail: "Retune the shared BTC/BLE radio across lower, middle, and upper 60 MHz windows every 10 seconds.",
             },
+            {
+              key: "remote_name_lookup",
+              label: "Resolve Remote Name",
+              detail: "Ask sdr-gateway to run hcitool name for solved UAP/LAP devices and label the card when a name is returned.",
+            },
           ];
           btcOptions.forEach((option) => {
             const active = Boolean(bluetoothClassicConfig[option.key]);
@@ -4860,6 +4872,12 @@
         applyProtocolSelection({ commit: true }).catch((err) => showToast(err.message || "Bluetooth Classic config save failed"));
       });
       btcPeriodicPageScanInput?.addEventListener("change", () => {
+        applyProtocolSelection({ commit: true }).catch((err) => showToast(err.message || "Bluetooth Classic config save failed"));
+      });
+      btcBandHopInput?.addEventListener("change", () => {
+        applyProtocolSelection({ commit: true }).catch((err) => showToast(err.message || "Bluetooth Classic config save failed"));
+      });
+      btcRemoteNameLookupInput?.addEventListener("change", () => {
         applyProtocolSelection({ commit: true }).catch((err) => showToast(err.message || "Bluetooth Classic config save failed"));
       });
       document.addEventListener("click", (event) => {

@@ -94,6 +94,7 @@ RF_SENTINEL_ARCHIVE_DIR = RF_SENTINEL_LOG_DIR / "archives"
 RF_SENTINEL_CSV_RETENTION_DAYS = max(1, int(os.getenv("RF_SENTINEL_CSV_RETENTION_DAYS", "7")))
 RF_SENTINEL_CSV_ARCHIVE_MAX_MB = max(1, int(os.getenv("RF_SENTINEL_CSV_ARCHIVE_MAX_MB", "1000")))
 RF_SENTINEL_DISCOVERY_TABLE_MAX_ROWS = max(500, int(os.getenv("RF_SENTINEL_DISCOVERY_TABLE_MAX_ROWS", "5000")))
+RF_SENTINEL_BTC_NAME_LOOKUP = os.getenv("RF_SENTINEL_BTC_NAME_LOOKUP", "0").strip().lower() in {"1", "true", "yes", "on"}
 RF_SENTINEL_NO_CHANGE = object()
 RF_SENTINEL_PROTOCOLS = {"btc", "ble", "zigbee", "tpms", "walkie", "wifi", "fm", "lfmf", "cellular"}
 WIFI_SUPPORTED_CHANNELS = {
@@ -1596,6 +1597,8 @@ devices_cache_updated_at = 0.0
 shutdown_lock = threading.Lock()
 shutdown_complete = False
 ble_identity_cache: dict[str, dict[str, Any]] = {}
+btc_name_cache_lock = threading.Lock()
+btc_name_cache: dict[str, dict[str, Any]] = {}
 company_identifier_lut: dict[str, str] = {}
 uuid16_identifier_lut: dict[str, str] = {}
 UUID16_VENDOR_OVERRIDES = {
@@ -4496,6 +4499,77 @@ def _classic_full_mac(nap: Any = None, uap: Any = None, lap: Any = None) -> str:
     return f"{nap_hex[0:2]}:{nap_hex[2:4]}:{uap_hex}:{lap_hex[0:2]}:{lap_hex[2:4]}:{lap_hex[4:6]}"
 
 
+def _classic_probe_mac(uap: Any = None, lap: Any = None) -> str:
+    uap_clean = re.sub(r"[^0-9A-Fa-f]", "", str(uap or "")).upper()
+    lap_clean = re.sub(r"[^0-9A-Fa-f]", "", str(lap or "")).upper()
+    if len(uap_clean) < 2 or len(lap_clean) < 6:
+        return ""
+    return f"00:00:{uap_clean[:2]}:{lap_clean[0:2]}:{lap_clean[2:4]}:{lap_clean[4:6]}"
+
+
+def _apply_btc_name_to_rows(lap: str, name: str, source_address: str) -> None:
+    clean_lap = re.sub(r"[^0-9A-Fa-f]", "", str(lap or "")).upper()
+    clean_name = str(name or "").strip()
+    if len(clean_lap) != 6 or not clean_name:
+        return
+    with state_lock:
+        for row in state.discovery_table:
+            if row.get("protocol") != "BTC" or str(row.get("lap") or "").upper() != clean_lap:
+                continue
+            row["name"] = clean_name
+            row["identity"] = clean_name
+            row["identity_source"] = f"Bluetooth remote name via hcitool name {source_address}"
+            row.setdefault("device_type", "Bluetooth Classic")
+
+
+def _btc_name_lookup_worker(address: str, lap: str) -> None:
+    name = ""
+    ok = False
+    try:
+        resp = requests.post(
+            f"{_gateway_base()}/bluetooth/name",
+            headers=_gateway_headers(),
+            json={"controller": "hci0", "address": address, "timeout_seconds": 6.0},
+            timeout=8,
+        )
+        if resp.status_code < 400:
+            payload = resp.json()
+            name = str(payload.get("name") or "").strip()
+            ok = bool(payload.get("ok")) and bool(name)
+    except requests.RequestException:
+        ok = False
+    with btc_name_cache_lock:
+        btc_name_cache[address] = {"name": name, "checked_at": time.time(), "pending": False, "ok": ok}
+    if ok:
+        _apply_btc_name_to_rows(lap, name, address)
+
+
+def _maybe_schedule_btc_name_lookup(row: dict[str, Any]) -> None:
+    bluetooth_classic = _clean_bluetooth_classic_config(_read_ui_config().get("bluetooth_classic"))
+    if not (RF_SENTINEL_BTC_NAME_LOOKUP or bluetooth_classic.get("remote_name_lookup")):
+        return
+    if row.get("protocol") != "BTC" or row.get("name"):
+        return
+    address = _classic_probe_mac(row.get("uap"), row.get("lap"))
+    if not address:
+        return
+    now = time.time()
+    with btc_name_cache_lock:
+        cached = btc_name_cache.get(address)
+        if cached:
+            if cached.get("name"):
+                name = str(cached.get("name") or "").strip()
+                row["name"] = name
+                row["identity"] = name
+                row["identity_source"] = f"Bluetooth remote name via hcitool name {address}"
+                row.setdefault("device_type", "Bluetooth Classic")
+                return
+            if cached.get("pending") or now - float(cached.get("checked_at") or 0.0) < 300.0:
+                return
+        btc_name_cache[address] = {"name": "", "checked_at": now, "pending": True, "ok": False}
+    threading.Thread(target=_btc_name_lookup_worker, args=(address, str(row.get("lap") or "")), daemon=True).start()
+
+
 def _utc_date_key(timestamp_s: Any) -> str:
     try:
         value = float(timestamp_s)
@@ -5076,6 +5150,9 @@ def _upsert_discovery_row(event: dict[str, Any]) -> None:
                 row["detail"] = existing["detail"]
         if not row.get("name") and existing.get("name"):
             row["name"] = existing["name"]
+        if row.get("protocol") == "BTC" and row.get("name"):
+            row["identity"] = str(row.get("name") or "")
+            row.setdefault("device_type", "Bluetooth Classic")
         if row.get("protocol") == "BTLE" and row.get("key") != "ble:activity":
             row["uuid16"] = list(dict.fromkeys([*(existing.get("uuid16") or []), *(row.get("uuid16") or [])]))
             row["uuid16_names"] = _uuid16_names(row["uuid16"])
@@ -5112,9 +5189,11 @@ def _upsert_discovery_row(event: dict[str, Any]) -> None:
                 row.get("manufacturer") if isinstance(row.get("manufacturer"), dict) else None,
                 str(row.get("mac") or ""),
             )
+        _maybe_schedule_btc_name_lookup(row)
         state.discovery_table[idx] = row
         break
     else:
+        _maybe_schedule_btc_name_lookup(row)
         state.discovery_table.insert(0, row)
     state.discovery_table.sort(key=lambda item: float(item.get("last_seen_at") or 0), reverse=True)
     state.discovery_table = state.discovery_table[:RF_SENTINEL_DISCOVERY_TABLE_MAX_ROWS]
@@ -5495,6 +5574,7 @@ def _clean_bluetooth_classic_config(raw: Any) -> dict[str, bool]:
         "log_passive_fhs_bdaddr": bool(value.get("log_passive_fhs_bdaddr")),
         "periodic_page_scan": bool(value.get("periodic_page_scan")),
         "band_hop": bool(value.get("band_hop")),
+        "remote_name_lookup": bool(value.get("remote_name_lookup")),
     }
 
 
