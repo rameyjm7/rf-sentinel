@@ -1551,8 +1551,8 @@ fm_playback = FmPlaybackState()
 walkie_playback = WalkiePlaybackState()
 state_lock = threading.RLock()
 csv_log_lock = threading.Lock()
-btc_seen_history_lock = threading.Lock()
-btc_seen_history_cache: dict[str, Any] = {"loaded_at": 0.0, "dates_by_lap": {}, "dates_by_mac": {}}
+seen_history_lock = threading.Lock()
+seen_history_cache: dict[str, Any] = {"loaded_at": 0.0, "dates": {}}
 identity_cache_lock = threading.Lock()
 worker_stop = threading.Event()
 worker_thread: threading.Thread | None = None
@@ -4491,7 +4491,7 @@ def _classic_mac_key(value: Any) -> str:
     return clean if len(clean) == 12 else ""
 
 
-def _btc_history_date_from_row(row: dict[str, str]) -> str:
+def _history_date_from_row(row: dict[str, str]) -> str:
     observed = str(row.get("observed_at_epoch") or "").strip()
     if observed:
         return _utc_date_key(observed)
@@ -4505,73 +4505,171 @@ def _btc_history_date_from_row(row: dict[str, str]) -> str:
     return ""
 
 
-def _record_btc_history_row(row: dict[str, str], dates_by_lap: dict[str, set[str]], dates_by_mac: dict[str, set[str]]) -> None:
-    date_key = _btc_history_date_from_row(row)
-    if not date_key:
-        return
-    lap = _classic_lap_key(row.get("lap"))
-    mac = _classic_mac_key(row.get("full_mac") or row.get("mac") or row.get("address"))
+def _clean_mac_key(value: Any) -> str:
+    text = str(value or "").strip().upper()
+    return text if re.fullmatch(r"[0-9A-F]{2}(?::[0-9A-F]{2}){5}", text) else ""
+
+
+def _frequency_key(value: Any) -> str:
+    try:
+        numeric = float(value)
+    except (TypeError, ValueError):
+        return ""
+    return str(int(round(numeric))) if numeric > 0 else ""
+
+
+def _identity_key(value: Any) -> str:
+    return re.sub(r"\s+", " ", str(value or "").strip().lower())
+
+
+def _history_keys_for_protocol(protocol: str, row: dict[str, str]) -> list[str]:
+    protocol_key = str(protocol or "").strip().upper()
     raw_json = str(row.get("raw_json") or "").strip()
-    if raw_json.startswith("{") and (not lap or not mac):
+    payload: dict[str, Any] = {}
+    if raw_json.startswith("{"):
         try:
             payload = json.loads(raw_json)
         except (TypeError, ValueError, json.JSONDecodeError):
             payload = {}
-        if not lap:
-            lap = _classic_lap_key(payload.get("lap") or payload.get("full_mac") or payload.get("mac"))
-        if not mac:
-            mac = _classic_mac_key(payload.get("full_mac") or payload.get("mac") or payload.get("address"))
-    if lap:
-        dates_by_lap.setdefault(lap, set()).add(date_key)
-    if mac:
-        dates_by_mac.setdefault(mac, set()).add(date_key)
+    keys: list[str] = []
+    if protocol_key == "BTC":
+        lap = _classic_lap_key(row.get("lap") or payload.get("lap") or payload.get("full_mac") or payload.get("mac"))
+        mac = _classic_mac_key(row.get("full_mac") or row.get("mac") or row.get("address") or payload.get("full_mac") or payload.get("mac") or payload.get("address"))
+        if lap:
+            keys.append(f"BTC:lap:{lap}")
+        if mac:
+            keys.append(f"BTC:mac:{mac}")
+    elif protocol_key == "BTLE":
+        mac = _clean_mac_key(row.get("address") or row.get("mac") or payload.get("address") or payload.get("mac"))
+        name = _identity_key(row.get("name") or payload.get("name"))
+        if mac:
+            keys.append(f"BTLE:mac:{mac}")
+        if name:
+            keys.append(f"BTLE:name:{name}")
+    elif protocol_key == "ZIGBEE":
+        channel = str(row.get("channel") or payload.get("channel") or "").strip()
+        if channel:
+            keys.append(f"ZIGBEE:channel:{channel}")
+    elif protocol_key == "FM":
+        freq = _frequency_key(row.get("frequency_hz") or row.get("center_freq_hz") or payload.get("frequency_hz") or payload.get("center_freq_hz"))
+        if freq:
+            keys.append(f"FM:freq:{freq}")
+    elif protocol_key == "CELLULAR":
+        identity = _identity_key(row.get("identity") or payload.get("identity"))
+        freq = _frequency_key(row.get("frequency_hz") or payload.get("frequency_hz"))
+        if identity:
+            keys.append(f"CELLULAR:identity:{identity}")
+        if freq:
+            keys.append(f"CELLULAR:freq:{freq}")
+    return list(dict.fromkeys(keys))
 
 
-def _load_btc_seen_history() -> dict[str, Any]:
-    dates_by_lap: dict[str, set[str]] = {}
-    dates_by_mac: dict[str, set[str]] = {}
-    for csv_path in sorted(RF_SENTINEL_RUNS_DIR.glob("*/btc.csv")):
-        try:
-            with csv_path.open(newline="", encoding="utf-8") as handle:
-                for row in csv.DictReader(handle):
-                    _record_btc_history_row(row, dates_by_lap, dates_by_mac)
-        except (OSError, csv.Error):
-            continue
+def _record_history_row(protocol: str, row: dict[str, str], dates_by_key: dict[str, set[str]]) -> None:
+    date_key = _history_date_from_row(row)
+    if not date_key:
+        return
+    for key in _history_keys_for_protocol(protocol, row):
+        dates_by_key.setdefault(key, set()).add(date_key)
+
+
+def _load_seen_history() -> dict[str, Any]:
+    dates_by_key: dict[str, set[str]] = {}
+    protocols = {
+        "BTC": "btc.csv",
+        "BTLE": "btle.csv",
+        "ZIGBEE": "zigbee.csv",
+        "FM": "fm.csv",
+        "CELLULAR": "cellular.csv",
+    }
+    for protocol, file_name in protocols.items():
+        for csv_path in sorted(RF_SENTINEL_RUNS_DIR.glob(f"*/{file_name}")):
+            try:
+                with csv_path.open(newline="", encoding="utf-8") as handle:
+                    for row in csv.DictReader(handle):
+                        _record_history_row(protocol, row, dates_by_key)
+            except (OSError, csv.Error):
+                continue
     for archive_path in sorted(RF_SENTINEL_ARCHIVE_DIR.glob("*.zip")):
         try:
             with zipfile.ZipFile(archive_path) as archive:
                 for name in archive.namelist():
-                    if not name.endswith("/btc.csv") and name != "btc.csv":
+                    file_name = Path(name).name
+                    protocol = next((proto for proto, expected in protocols.items() if file_name == expected), "")
+                    if not protocol:
                         continue
                     with archive.open(name) as raw_handle:
                         text_handle = io.TextIOWrapper(raw_handle, encoding="utf-8", newline="")
                         for row in csv.DictReader(text_handle):
-                            _record_btc_history_row(row, dates_by_lap, dates_by_mac)
+                            _record_history_row(protocol, row, dates_by_key)
         except (OSError, zipfile.BadZipFile, csv.Error):
             continue
-    return {
-        "loaded_at": time.time(),
-        "dates_by_lap": dates_by_lap,
-        "dates_by_mac": dates_by_mac,
-    }
+    return {"loaded_at": time.time(), "dates": dates_by_key}
+
+
+def _history_dates_for_keys(keys: list[str]) -> list[str]:
+    clean_keys = [key for key in keys if key]
+    if not clean_keys:
+        return []
+    with seen_history_lock:
+        loaded_at = float(seen_history_cache.get("loaded_at") or 0.0)
+        if time.time() - loaded_at > 60.0:
+            seen_history_cache.clear()
+            seen_history_cache.update(_load_seen_history())
+        dates: set[str] = set()
+        dates_by_key = seen_history_cache.get("dates", {})
+        for key in clean_keys:
+            dates.update(dates_by_key.get(key, set()))
+        return sorted(dates)
+
+
+def _row_history_keys(row: dict[str, Any]) -> list[str]:
+    protocol = str(row.get("protocol") or "").strip().upper()
+    keys: list[str] = []
+    if protocol == "BTC":
+        lap = _classic_lap_key(row.get("lap") or row.get("full_mac") or row.get("mac"))
+        mac = _classic_mac_key(row.get("full_mac") or row.get("mac"))
+        if lap:
+            keys.append(f"BTC:lap:{lap}")
+        if mac:
+            keys.append(f"BTC:mac:{mac}")
+    elif protocol == "BTLE":
+        mac = _clean_mac_key(row.get("mac") or row.get("address"))
+        name = _identity_key(row.get("name"))
+        if mac:
+            keys.append(f"BTLE:mac:{mac}")
+        if name:
+            keys.append(f"BTLE:name:{name}")
+    elif protocol == "ZIGBEE":
+        channel = str(row.get("channel") or "").strip()
+        if channel:
+            keys.append(f"ZIGBEE:channel:{channel}")
+    elif protocol == "FM":
+        freq = _frequency_key(row.get("frequency_hz") or row.get("center_freq_hz") or row.get("mac"))
+        if freq:
+            keys.append(f"FM:freq:{freq}")
+    elif protocol == "CELLULAR":
+        identity = _identity_key(row.get("identity"))
+        freq = _frequency_key(row.get("frequency_hz") or row.get("mac"))
+        if identity:
+            keys.append(f"CELLULAR:identity:{identity}")
+        if freq:
+            keys.append(f"CELLULAR:freq:{freq}")
+    return list(dict.fromkeys(keys))
+
+
+def _seen_history_dates_for_row(row: dict[str, Any]) -> list[str]:
+    return _history_dates_for_keys(_row_history_keys(row))
 
 
 def _btc_seen_history_dates(lap: Any, full_mac: Any = None) -> list[str]:
+    keys: list[str] = []
     lap_key = _classic_lap_key(lap)
     mac_key = _classic_mac_key(full_mac)
-    if not lap_key and not mac_key:
-        return []
-    with btc_seen_history_lock:
-        loaded_at = float(btc_seen_history_cache.get("loaded_at") or 0.0)
-        if time.time() - loaded_at > 60.0:
-            btc_seen_history_cache.clear()
-            btc_seen_history_cache.update(_load_btc_seen_history())
-        dates: set[str] = set()
-        if lap_key:
-            dates.update(btc_seen_history_cache.get("dates_by_lap", {}).get(lap_key, set()))
-        if mac_key:
-            dates.update(btc_seen_history_cache.get("dates_by_mac", {}).get(mac_key, set()))
-        return sorted(dates)
+    if lap_key:
+        keys.append(f"BTC:lap:{lap_key}")
+    if mac_key:
+        keys.append(f"BTC:mac:{mac_key}")
+    return _history_dates_for_keys(keys)
 
 
 def _upsert_discovery_row(event: dict[str, Any]) -> None:
@@ -4898,11 +4996,7 @@ def _upsert_discovery_row(event: dict[str, Any]) -> None:
         return
 
     row.setdefault("first_seen_at", now)
-    historical_dates = (
-        _btc_seen_history_dates(row.get("lap"), row.get("full_mac") or row.get("mac"))
-        if row.get("protocol") == "BTC"
-        else []
-    )
+    historical_dates = _seen_history_dates_for_row(row)
     row.update(_seen_day_stats([*historical_dates, seen_date]))
     for idx, existing in enumerate(state.discovery_table):
         same_classic_lap = row.get("protocol") == "BTC" and existing.get("protocol") == "BTC" and existing.get("lap") == row.get("lap")
@@ -4913,8 +5007,7 @@ def _upsert_discovery_row(event: dict[str, Any]) -> None:
         prior_dates = list(existing.get("seen_dates") or [])
         if not prior_dates and existing.get("last_seen_at"):
             prior_dates.append(_utc_date_key(existing.get("last_seen_at")))
-        if row.get("protocol") == "BTC":
-            prior_dates.extend(_btc_seen_history_dates(row.get("lap"), row.get("full_mac") or existing.get("full_mac") or row.get("mac")))
+        prior_dates.extend(_seen_history_dates_for_row({**existing, **row}))
         prior_dates.append(seen_date)
         row.update(_seen_day_stats(prior_dates))
         if row.get("protocol") == "BTC":
