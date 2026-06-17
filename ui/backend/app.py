@@ -2,6 +2,7 @@ import os
 import calendar
 import contextlib
 import csv
+import io
 import json
 import logging
 import platform
@@ -1550,6 +1551,8 @@ fm_playback = FmPlaybackState()
 walkie_playback = WalkiePlaybackState()
 state_lock = threading.RLock()
 csv_log_lock = threading.Lock()
+btc_seen_history_lock = threading.Lock()
+btc_seen_history_cache: dict[str, Any] = {"loaded_at": 0.0, "dates_by_lap": {}, "dates_by_mac": {}}
 identity_cache_lock = threading.Lock()
 worker_stop = threading.Event()
 worker_thread: threading.Thread | None = None
@@ -4478,6 +4481,99 @@ def _seen_day_stats(dates: list[str]) -> dict[str, Any]:
     }
 
 
+def _classic_lap_key(value: Any) -> str:
+    clean = re.sub(r"[^0-9A-Fa-f]", "", str(value or "")).upper()
+    return clean[-6:] if len(clean) >= 6 else ""
+
+
+def _classic_mac_key(value: Any) -> str:
+    clean = re.sub(r"[^0-9A-Fa-f]", "", str(value or "")).upper()
+    return clean if len(clean) == 12 else ""
+
+
+def _btc_history_date_from_row(row: dict[str, str]) -> str:
+    observed = str(row.get("observed_at_epoch") or "").strip()
+    if observed:
+        return _utc_date_key(observed)
+    raw_json = str(row.get("raw_json") or "").strip()
+    if raw_json.startswith("{"):
+        try:
+            payload = json.loads(raw_json)
+            return _utc_date_key(payload.get("seen_at") or payload.get("timestamp"))
+        except (TypeError, ValueError, json.JSONDecodeError):
+            pass
+    return ""
+
+
+def _record_btc_history_row(row: dict[str, str], dates_by_lap: dict[str, set[str]], dates_by_mac: dict[str, set[str]]) -> None:
+    date_key = _btc_history_date_from_row(row)
+    if not date_key:
+        return
+    lap = _classic_lap_key(row.get("lap"))
+    mac = _classic_mac_key(row.get("full_mac") or row.get("mac") or row.get("address"))
+    raw_json = str(row.get("raw_json") or "").strip()
+    if raw_json.startswith("{") and (not lap or not mac):
+        try:
+            payload = json.loads(raw_json)
+        except (TypeError, ValueError, json.JSONDecodeError):
+            payload = {}
+        if not lap:
+            lap = _classic_lap_key(payload.get("lap") or payload.get("full_mac") or payload.get("mac"))
+        if not mac:
+            mac = _classic_mac_key(payload.get("full_mac") or payload.get("mac") or payload.get("address"))
+    if lap:
+        dates_by_lap.setdefault(lap, set()).add(date_key)
+    if mac:
+        dates_by_mac.setdefault(mac, set()).add(date_key)
+
+
+def _load_btc_seen_history() -> dict[str, Any]:
+    dates_by_lap: dict[str, set[str]] = {}
+    dates_by_mac: dict[str, set[str]] = {}
+    for csv_path in sorted(RF_SENTINEL_RUNS_DIR.glob("*/btc.csv")):
+        try:
+            with csv_path.open(newline="", encoding="utf-8") as handle:
+                for row in csv.DictReader(handle):
+                    _record_btc_history_row(row, dates_by_lap, dates_by_mac)
+        except (OSError, csv.Error):
+            continue
+    for archive_path in sorted(RF_SENTINEL_ARCHIVE_DIR.glob("*.zip")):
+        try:
+            with zipfile.ZipFile(archive_path) as archive:
+                for name in archive.namelist():
+                    if not name.endswith("/btc.csv") and name != "btc.csv":
+                        continue
+                    with archive.open(name) as raw_handle:
+                        text_handle = io.TextIOWrapper(raw_handle, encoding="utf-8", newline="")
+                        for row in csv.DictReader(text_handle):
+                            _record_btc_history_row(row, dates_by_lap, dates_by_mac)
+        except (OSError, zipfile.BadZipFile, csv.Error):
+            continue
+    return {
+        "loaded_at": time.time(),
+        "dates_by_lap": dates_by_lap,
+        "dates_by_mac": dates_by_mac,
+    }
+
+
+def _btc_seen_history_dates(lap: Any, full_mac: Any = None) -> list[str]:
+    lap_key = _classic_lap_key(lap)
+    mac_key = _classic_mac_key(full_mac)
+    if not lap_key and not mac_key:
+        return []
+    with btc_seen_history_lock:
+        loaded_at = float(btc_seen_history_cache.get("loaded_at") or 0.0)
+        if time.time() - loaded_at > 60.0:
+            btc_seen_history_cache.clear()
+            btc_seen_history_cache.update(_load_btc_seen_history())
+        dates: set[str] = set()
+        if lap_key:
+            dates.update(btc_seen_history_cache.get("dates_by_lap", {}).get(lap_key, set()))
+        if mac_key:
+            dates.update(btc_seen_history_cache.get("dates_by_mac", {}).get(mac_key, set()))
+        return sorted(dates)
+
+
 def _upsert_discovery_row(event: dict[str, Any]) -> None:
     now = float(event.get("seen_at", time.time()))
     seen_date = _utc_date_key(now)
@@ -4802,7 +4898,12 @@ def _upsert_discovery_row(event: dict[str, Any]) -> None:
         return
 
     row.setdefault("first_seen_at", now)
-    row.update(_seen_day_stats([seen_date]))
+    historical_dates = (
+        _btc_seen_history_dates(row.get("lap"), row.get("full_mac") or row.get("mac"))
+        if row.get("protocol") == "BTC"
+        else []
+    )
+    row.update(_seen_day_stats([*historical_dates, seen_date]))
     for idx, existing in enumerate(state.discovery_table):
         same_classic_lap = row.get("protocol") == "BTC" and existing.get("protocol") == "BTC" and existing.get("lap") == row.get("lap")
         if existing.get("key") != row["key"] and not same_classic_lap:
@@ -4812,6 +4913,8 @@ def _upsert_discovery_row(event: dict[str, Any]) -> None:
         prior_dates = list(existing.get("seen_dates") or [])
         if not prior_dates and existing.get("last_seen_at"):
             prior_dates.append(_utc_date_key(existing.get("last_seen_at")))
+        if row.get("protocol") == "BTC":
+            prior_dates.extend(_btc_seen_history_dates(row.get("lap"), row.get("full_mac") or existing.get("full_mac") or row.get("mac")))
         prior_dates.append(seen_date)
         row.update(_seen_day_stats(prior_dates))
         if row.get("protocol") == "BTC":
