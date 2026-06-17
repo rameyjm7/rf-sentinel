@@ -1913,6 +1913,8 @@
         <input id="hopDwellInput" type="number" min="0.25" max="30" step="0.05" value="0.25" hidden />
         <select id="channelSelect" hidden></select>
         <input id="btcSweepInput" type="checkbox" checked hidden />
+        <input id="btcLogPassiveFhsInput" type="checkbox" hidden />
+        <input id="btcPeriodicPageScanInput" type="checkbox" hidden />
         <div class="toolbar-actions">
           <details class="config-menu" id="configMenu">
             <summary><span class="material-symbols-rounded">tune</span>Config</summary>
@@ -1930,13 +1932,6 @@
                   <label class="protocol-row" data-protocol-row="cellular"><input id="cellularInput" type="checkbox" checked /></label>
                 </div>
                 <div class="config-note">BTC and BLE share one 2.4 GHz ISM SDR stream when a wideband radio is available. VLF/LF/MF is SDRplay RSP2-only and scans the low-frequency spectrum separately.</div>
-              </div>
-              <div class="config-section">
-                <div class="config-title">Bluetooth Classic</div>
-                <div class="protocol-toggles">
-                  <label class="protocol-row enabled"><input id="btcLogPassiveFhsInput" type="checkbox" /><span class="protocol-row-main"><strong>Log Passive FHS BDAddr</strong><span>Show passively decoded FHS address events when available</span></span></label>
-                  <label class="protocol-row enabled"><input id="btcPeriodicPageScanInput" type="checkbox" /><span class="protocol-row-main"><strong>Initiate Page Scanning Periodically</strong><span>Run short BR/EDR inquiry bursts to surface page/FHS evidence</span></span></label>
-                </div>
               </div>
               <div class="config-section">
                 <div class="config-title">SDRs</div>
@@ -4532,7 +4527,9 @@
         protocolConfigTitle.textContent = `Configure ${control.label}`;
         protocolConfigSubtitle.textContent = key === "wifi"
           ? "Choose the WiFi monitor channel set RF Sentinel should hop."
-          : "Choose which non-BTC/BLE radio should scan this protocol, or leave it on auto assignment.";
+          : key === "btc"
+            ? "Choose optional Bluetooth Classic evidence collection behavior."
+            : "Choose which non-BTC/BLE radio should scan this protocol, or leave it on auto assignment.";
         if (key === "wifi") {
           WIFI_CHANNEL_GROUPS.forEach((group) => {
             const active = group.channels.join(",") === wifiChannelSelection.join(",");
@@ -4543,6 +4540,31 @@
                   <span>Channels ${group.channels.join(", ")}</span>
                 </div>
                 ${materialIcon(active ? "radio_button_checked" : "radio_button_unchecked")}
+              </button>
+            `);
+          });
+        } else if (key === "btc") {
+          const btcOptions = [
+            {
+              key: "log_passive_fhs_bdaddr",
+              label: "Log Passive FHS BDAddr",
+              detail: "Forward passively decoded FHS address events when available.",
+            },
+            {
+              key: "periodic_page_scan",
+              label: "Initiate Page Scanning Periodically",
+              detail: "Run short BR/EDR inquiry bursts to surface page/FHS evidence.",
+            },
+          ];
+          btcOptions.forEach((option) => {
+            const active = Boolean(bluetoothClassicConfig[option.key]);
+            options.push(`
+              <button type="button" class="config-option ${active ? "active" : ""}" data-btc-classic-key="${option.key}">
+                <div>
+                  <strong>${option.label}</strong>
+                  <span>${option.detail}</span>
+                </div>
+                ${materialIcon(active ? "check_box" : "check_box_outline_blank")}
               </button>
             `);
           });
@@ -4578,6 +4600,7 @@
           return;
         }
         protocolConfigDraft = { key };
+        if (key === "btc") protocolConfigDraft.bluetooth_classic = { ...bluetoothClassicConfig };
         protocolConfigOptions.innerHTML = options.join("");
         protocolConfigOverlay.hidden = false;
       }
@@ -4760,21 +4783,32 @@
       protocolConfigOptions.addEventListener("click", (event) => {
         const wifiButton = event.target.closest("[data-wifi-channel-group]");
         const deviceButton = event.target.closest("[data-protocol-device-key]");
-        if (!wifiButton && !deviceButton) return;
+        const btcButton = event.target.closest("[data-btc-classic-key]");
+        if (!wifiButton && !deviceButton && !btcButton) return;
         event.preventDefault();
         if (wifiButton) {
           protocolConfigDraft = {
             key: "wifi",
             wifi_channels: cleanWifiChannels(String(wifiButton.dataset.wifiChannelGroup || "").split(",")),
           };
+          protocolConfigOptions.querySelectorAll(".config-option").forEach((item) => item.classList.remove("active"));
+          event.target.closest(".config-option")?.classList.add("active");
+        } else if (btcButton) {
+          const optionKey = String(btcButton.dataset.btcClassicKey || "");
+          const draft = protocolConfigDraft?.bluetooth_classic || { ...bluetoothClassicConfig };
+          draft[optionKey] = !Boolean(draft[optionKey]);
+          protocolConfigDraft = { key: "btc", bluetooth_classic: draft };
+          btcButton.classList.toggle("active", Boolean(draft[optionKey]));
+          const icon = btcButton.querySelector(".material-symbols-rounded");
+          if (icon) icon.textContent = draft[optionKey] ? "check_box" : "check_box_outline_blank";
         } else {
           protocolConfigDraft = {
             key: String(deviceButton.dataset.protocolDeviceKey || "").toLowerCase(),
             device_id: String(deviceButton.dataset.protocolDeviceId || "").trim(),
           };
+          protocolConfigOptions.querySelectorAll(".config-option").forEach((item) => item.classList.remove("active"));
+          event.target.closest(".config-option")?.classList.add("active");
         }
-        protocolConfigOptions.querySelectorAll(".config-option").forEach((item) => item.classList.remove("active"));
-        event.target.closest(".config-option")?.classList.add("active");
       });
       async function applyProtocolConfigOverlay() {
         if (!protocolConfigDraft?.key) {
@@ -4783,6 +4817,8 @@
         }
         if (protocolConfigDraft.key === "wifi" && protocolConfigDraft.wifi_channels) {
           wifiChannelSelection = cleanWifiChannels(protocolConfigDraft.wifi_channels);
+        } else if (protocolConfigDraft.key === "btc" && protocolConfigDraft.bluetooth_classic) {
+          applyBluetoothClassicConfig(protocolConfigDraft.bluetooth_classic);
         } else if (DEVICE_SELECT_PROTOCOLS.has(protocolConfigDraft.key)) {
           if (protocolConfigDraft.device_id) protocolDeviceOverrides[protocolConfigDraft.key] = protocolConfigDraft.device_id;
           else delete protocolDeviceOverrides[protocolConfigDraft.key];
