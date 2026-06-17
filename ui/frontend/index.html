@@ -1488,6 +1488,23 @@
         background: rgba(8, 123, 131, 0.18);
       }
 
+      .config-option.toggle-option {
+        border-color: rgba(42, 195, 201, 0.18);
+        background: linear-gradient(180deg, rgba(71, 53, 17, 0.32), rgba(43, 30, 8, 0.42));
+        padding: 14px 16px;
+      }
+
+      .config-option.toggle-option:hover {
+        border-color: rgba(42, 195, 201, 0.45);
+        background: linear-gradient(180deg, rgba(79, 60, 20, 0.42), rgba(50, 35, 10, 0.52));
+      }
+
+      .config-option.toggle-option.active {
+        border-color: rgba(42, 195, 201, 0.88);
+        background: linear-gradient(180deg, rgba(48, 66, 35, 0.78), rgba(40, 57, 28, 0.66));
+        box-shadow: inset 0 0 0 1px rgba(42, 195, 201, 0.16);
+      }
+
       .config-option strong {
         display: block;
       }
@@ -1500,36 +1517,43 @@
       }
 
       .config-switch {
-        width: 50px;
-        min-width: 50px;
-        height: 28px;
+        width: 58px;
+        min-width: 58px;
+        height: 34px;
         border-radius: 999px;
-        background: rgba(255, 255, 255, 0.16);
-        border: 1px solid rgba(255, 255, 255, 0.22);
-        padding: 3px;
+        background: linear-gradient(180deg, rgba(53, 39, 10, 0.88), rgba(43, 31, 8, 0.9));
+        border: 1px solid rgba(255, 255, 255, 0.08);
+        padding: 4px;
         display: inline-flex;
         align-items: center;
+        justify-content: flex-start;
+        position: relative;
+        box-shadow: inset 0 1px 1px rgba(255, 255, 255, 0.04), inset 0 -1px 2px rgba(0, 0, 0, 0.25);
         transition: background 0.18s ease, border-color 0.18s ease, box-shadow 0.18s ease;
       }
 
       .config-switch::before {
         content: "";
-        width: 20px;
-        height: 20px;
+        display: block;
+        width: 26px;
+        height: 26px;
         border-radius: 50%;
-        background: #fffdf8;
-        box-shadow: 0 2px 8px rgba(0, 0, 0, 0.38);
+        background: linear-gradient(180deg, #ffffff, #ece8df);
+        border: 1px solid rgba(95, 82, 48, 0.18);
+        box-shadow: 0 2px 8px rgba(0, 0, 0, 0.38), inset 0 1px 1px rgba(255, 255, 255, 0.7);
         transform: translateX(0);
         transition: transform 0.18s ease;
       }
 
       .config-switch.on {
-        background: linear-gradient(135deg, var(--teal), #25d0bd);
-        border-color: rgba(37, 208, 189, 0.85);
-        box-shadow: 0 0 0 3px rgba(37, 208, 189, 0.16);
+        background: linear-gradient(180deg, #18b9ba, #13a4a8);
+        border-color: rgba(56, 222, 214, 0.72);
+        box-shadow: inset 0 0 0 1px rgba(255, 255, 255, 0.06), 0 0 0 3px rgba(37, 208, 189, 0.14);
       }
 
       .config-switch.on::before {
+        border-color: rgba(18, 128, 123, 0.28);
+        box-shadow: 0 2px 10px rgba(0, 0, 0, 0.34), inset 0 1px 1px rgba(255, 255, 255, 0.78), 0 0 0 1px rgba(255, 255, 255, 0.18);
         transform: translateX(22px);
       }
 
@@ -1949,6 +1973,7 @@
         <input id="btcSweepInput" type="checkbox" checked hidden />
         <input id="btcLogPassiveFhsInput" type="checkbox" hidden />
         <input id="btcPeriodicPageScanInput" type="checkbox" hidden />
+        <input id="btcBandHopInput" type="checkbox" hidden />
         <div class="toolbar-actions">
           <details class="config-menu" id="configMenu">
             <summary><span class="material-symbols-rounded">tune</span>Config</summary>
@@ -2129,6 +2154,7 @@
       let bluetoothClassicConfig = {
         log_passive_fhs_bdaddr: false,
         periodic_page_scan: false,
+        band_hop: false,
       };
       let configLoaded = false;
       let protocolConfigDirty = false;
@@ -2507,6 +2533,7 @@
         bluetoothClassicConfig = {
           log_passive_fhs_bdaddr: Boolean(value.log_passive_fhs_bdaddr),
           periodic_page_scan: Boolean(value.periodic_page_scan),
+          band_hop: Boolean(value.band_hop),
         };
         if (typeof btcLogPassiveFhsInput !== "undefined" && btcLogPassiveFhsInput) {
           btcLogPassiveFhsInput.checked = bluetoothClassicConfig.log_passive_fhs_bdaddr;
@@ -2514,12 +2541,16 @@
         if (typeof btcPeriodicPageScanInput !== "undefined" && btcPeriodicPageScanInput) {
           btcPeriodicPageScanInput.checked = bluetoothClassicConfig.periodic_page_scan;
         }
+        if (typeof btcBandHopInput !== "undefined" && btcBandHopInput) {
+          btcBandHopInput.checked = bluetoothClassicConfig.band_hop;
+        }
       }
 
       function bluetoothClassicConfigPayload() {
         bluetoothClassicConfig = {
           log_passive_fhs_bdaddr: Boolean(btcLogPassiveFhsInput?.checked),
           periodic_page_scan: Boolean(btcPeriodicPageScanInput?.checked),
+          band_hop: Boolean(btcBandHopInput?.checked),
         };
         return { ...bluetoothClassicConfig };
       }
@@ -4589,11 +4620,16 @@
               label: "Initiate Page Scanning Periodically",
               detail: "Run short BR/EDR inquiry bursts to surface page/FHS evidence.",
             },
+            {
+              key: "band_hop",
+              label: "Enable 2.4 GHz Band Hopping",
+              detail: "Retune the shared BTC/BLE radio across lower, middle, and upper 60 MHz windows every 10 seconds.",
+            },
           ];
           btcOptions.forEach((option) => {
             const active = Boolean(bluetoothClassicConfig[option.key]);
             options.push(`
-              <button type="button" class="config-option ${active ? "active" : ""}" data-btc-classic-key="${option.key}">
+              <button type="button" class="config-option toggle-option ${active ? "active" : ""}" data-btc-classic-key="${option.key}">
                 <div>
                   <strong>${option.label}</strong>
                   <span>${option.detail}</span>

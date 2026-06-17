@@ -223,6 +223,8 @@ def _build_jobs(args: argparse.Namespace) -> tuple[list[ScanJob], list[ScanJob]]
             command.extend(["--iq-capture-max-bytes", str(args.iq_capture_max_bytes)])
         if args.btc_log_passive_fhs_bdaddr:
             command.append("--log-passive-fhs-bdaddr")
+        if args.btc_band_hop:
+            command.extend(["--band-hop", "--band-hop-dwell-s", str(args.btc_band_hop_dwell_s)])
         if args.btc_expected_bdaddr:
             command.extend(["--expected-bdaddr", args.btc_expected_bdaddr])
         if args.no_page_detection:
@@ -1142,6 +1144,8 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--btc-periodic-page-scan", action="store_true", help="periodically run a local BR/EDR inquiry scan while BTC/BLE decoding")
     parser.add_argument("--btc-page-scan-interval-s", type=float, default=DEFAULT_BTC_PAGE_SCAN_INTERVAL_S)
     parser.add_argument("--btc-page-scan-active-s", type=float, default=DEFAULT_BTC_PAGE_SCAN_ACTIVE_S)
+    parser.add_argument("--btc-band-hop", action="store_true", help="retune the shared BTC/BLE SDR stream across overlapping 2.4 GHz windows")
+    parser.add_argument("--btc-band-hop-dwell-s", type=float, default=10.0)
     parser.add_argument("--btc-expected-bdaddr", default=os.getenv("BTC_TARGET_MAC", ""), help="optional BD_ADDR used by the BTC decoder to verify passive FHS events")
     parser.add_argument(
         "--rf-input-mode",

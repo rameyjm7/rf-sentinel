@@ -5448,6 +5448,7 @@ def _clean_bluetooth_classic_config(raw: Any) -> dict[str, bool]:
     return {
         "log_passive_fhs_bdaddr": bool(value.get("log_passive_fhs_bdaddr")),
         "periodic_page_scan": bool(value.get("periodic_page_scan")),
+        "band_hop": bool(value.get("band_hop")),
     }
 
 
@@ -6954,6 +6955,8 @@ def _start_rf_sentinel_engine(
         cmd.append("--btc-periodic-page-scan")
     if bluetooth_classic.get("log_passive_fhs_bdaddr"):
         cmd.append("--btc-log-passive-fhs-bdaddr")
+    if bluetooth_classic.get("band_hop"):
+        cmd.append("--btc-band-hop")
     if not page_detection_enabled:
         cmd.append("--no-page-detection")
     # Start in discovery mode; only the explicit right-click Follow action locks Zigbee.

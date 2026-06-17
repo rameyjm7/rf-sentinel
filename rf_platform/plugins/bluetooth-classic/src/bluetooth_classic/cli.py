@@ -278,18 +278,7 @@ def _ws_url_for_stream(
 
 
 def _start_gateway_stream(args: argparse.Namespace) -> str:
-    sample_rate_sps = int(args.bandwidth_mhz) * 1_000_000
-    payload = {
-        "device_id": args.device_id,
-        "center_freq_hz": int(round(float(args.center_mhz) * 1_000_000.0)),
-        "sample_rate_sps": sample_rate_sps,
-        "lna_gain_db": int(args.lna_gain_db),
-        "vga_gain_db": int(args.vga_gain_db),
-        "amp_enable": bool(args.amp_gain_db and float(args.amp_gain_db) > 0.0),
-        "baseband_filter_hz": sample_rate_sps,
-        "duration_seconds": None,
-        "num_samples": None,
-    }
+    payload = _gateway_stream_payload(args)
     resp = requests.post(
         f"{_gateway_base(args.gateway_base_url)}/streams/start",
         headers=_gateway_headers(args.gateway_token),
@@ -310,6 +299,58 @@ def _start_gateway_stream(args: argparse.Namespace) -> str:
             message += f": {detail}"
         raise RuntimeError(message) from exc
     return str(resp.json()["stream_id"])
+
+
+def _gateway_stream_payload(args: argparse.Namespace, *, center_mhz: float | None = None) -> dict[str, Any]:
+    sample_rate_sps = int(args.bandwidth_mhz) * 1_000_000
+    return {
+        "device_id": args.device_id,
+        "center_freq_hz": int(round(float(center_mhz if center_mhz is not None else args.center_mhz) * 1_000_000.0)),
+        "sample_rate_sps": sample_rate_sps,
+        "lna_gain_db": int(args.lna_gain_db),
+        "vga_gain_db": int(args.vga_gain_db),
+        "amp_enable": bool(args.amp_gain_db and float(args.amp_gain_db) > 0.0),
+        "baseband_filter_hz": sample_rate_sps,
+        "duration_seconds": None,
+        "num_samples": None,
+    }
+
+
+def _retune_gateway_stream(args: argparse.Namespace, stream_id: str, *, center_mhz: float) -> None:
+    payload = _gateway_stream_payload(args, center_mhz=center_mhz)
+    resp = requests.post(
+        f"{_gateway_base(args.gateway_base_url)}/streams/{stream_id}/retune",
+        headers=_gateway_headers(args.gateway_token),
+        json=payload,
+        timeout=12,
+    )
+    try:
+        resp.raise_for_status()
+    except requests.HTTPError as exc:
+        detail = ""
+        try:
+            body = resp.json()
+            detail = str(body.get("detail") or body.get("error") or "")
+        except (ValueError, AttributeError):
+            detail = resp.text.strip()
+        message = f"sdr-gateway stream retune failed: HTTP {resp.status_code}"
+        if detail:
+            message += f": {detail}"
+        raise RuntimeError(message) from exc
+
+
+def _band_hop_centers_mhz(center_mhz: float, bandwidth_mhz: int) -> list[float]:
+    span = max(1.0, float(bandwidth_mhz))
+    half_span = span / 2.0
+    low_center = max(2402.0 + half_span, 2432.0 if span >= 60.0 else 2402.0 + half_span)
+    middle_center = float(center_mhz)
+    high_center = min(2480.0 - half_span, 2450.0 if span >= 60.0 else 2480.0 - half_span)
+    centers: list[float] = []
+    for value in (low_center, middle_center, high_center):
+        rounded = round(float(value), 3)
+        if all(abs(existing - rounded) > 0.001 for existing in centers):
+            centers.append(rounded)
+    return centers
 
 
 def _stop_gateway_stream(base_url: str | None, token: str | None, stream_id: str) -> None:
@@ -442,6 +483,9 @@ def _combined_iq_source_worker(
     capture_handle = None
     capture_path: Path | None = None
     ws = None
+    hop_centers = _band_hop_centers_mhz(float(args.center_mhz), int(args.bandwidth_mhz)) if getattr(args, "band_hop", False) else []
+    hop_index = 0
+    next_retune_at = time.monotonic() + max(1.0, float(getattr(args, "band_hop_dwell_s", 10.0))) if len(hop_centers) > 1 else None
 
     def forward(chunk: bytes) -> None:
         nonlocal chunks, byte_count, last_report
@@ -485,7 +529,29 @@ def _combined_iq_source_worker(
         ws.settimeout(1.0)
         if raw:
             print(f"combined iq {mode} stream_id={stream_id}", file=sys.stderr, flush=True)
+        if len(hop_centers) > 1:
+            events.put(
+                {
+                    "protocol": "iq",
+                    "type": "status",
+                    "message": "band_hop="
+                    + ",".join(f"{center:.1f}MHz" for center in hop_centers)
+                    + f" dwell={float(getattr(args, 'band_hop_dwell_s', 10.0)):.1f}s",
+                }
+            )
         while not stop.is_set():
+            if next_retune_at is not None and time.monotonic() >= next_retune_at:
+                hop_index = (hop_index + 1) % len(hop_centers)
+                center_mhz = hop_centers[hop_index]
+                _retune_gateway_stream(args, stream_id, center_mhz=center_mhz)
+                events.put(
+                    {
+                        "protocol": "iq",
+                        "type": "status",
+                        "message": f"retuned center={center_mhz:.1f}MHz",
+                    }
+                )
+                next_retune_at = time.monotonic() + max(1.0, float(getattr(args, "band_hop_dwell_s", 10.0)))
             try:
                 chunk = ws.recv()
             except websocket.WebSocketTimeoutException:
@@ -1338,6 +1404,8 @@ def _build_parser() -> argparse.ArgumentParser:
     combined.add_argument("--ble-channel-rate-sps", type=int, default=2_000_000)
     combined.add_argument("--debug-bursts", action="store_true")
     combined.add_argument("--max-events", type=int, default=0)
+    combined.add_argument("--band-hop", action="store_true", help="retune the shared BTC/BLE gateway stream across overlapping 2.4 GHz windows")
+    combined.add_argument("--band-hop-dwell-s", type=float, default=10.0, help="seconds to stay on each shared 2.4 GHz window before retuning")
 
     page = subparsers.add_parser("page-stimulus", help="lab-only active page stimulus and passive FHS/NAP recovery")
     _add_common_gateway_capture_args(page)
