@@ -5581,7 +5581,25 @@ def _console_assignment_rows() -> list[dict[str, Any]]:
         freq = walkie_playback.pending_freq_mhz or walkie_playback.freq_mhz
         rows_by_device[f"{device_id}:walkie-audio"] = {"device": device_id, "protocol": "WALKIE-AUDIO", "center": f"{freq:.3f} MHz", "count": walkie_playback.produced_chunks, "band": status, "active": True}
     enabled = {str(item).lower() for item in state.decoder_stats.get("enabled_protocols", [])}
+    protocol_devices = _read_ui_config().get("protocol_devices", {})
+    if not isinstance(protocol_devices, dict):
+        protocol_devices = {}
+    configured_subghz_device = str(protocol_devices.get("tpms") or protocol_devices.get("walkie") or "").strip()
+    configured_fm_device = str(protocol_devices.get("fm") or "").strip()
     devices, _ = _cached_gateway_devices()
+    auto_fm_device = configured_fm_device
+    if not auto_fm_device and "fm" in enabled:
+        for candidate in devices:
+            candidate_id = str(candidate.get("id") or "").strip()
+            if candidate_id and candidate_id != configured_subghz_device and _is_sdrplay_device(candidate):
+                auto_fm_device = candidate_id
+                break
+        if not auto_fm_device:
+            for candidate in devices:
+                candidate_id = str(candidate.get("id") or "").strip()
+                if candidate_id and candidate_id != configured_subghz_device and _is_rtlsdr_device(candidate):
+                    auto_fm_device = candidate_id
+                    break
     for device in devices:
         device_id = str(device.get("id") or "").strip()
         if not device_id or device_id in rows_by_device:
@@ -5631,7 +5649,14 @@ def _console_assignment_rows() -> list[dict[str, Any]]:
                 rows_by_device[device_id] = {"device": device_id, "protocol": protocol, "center": center, "count": _console_protocol_count(protocol), "band": "Zigbee / TPMS / walkie / cellular hop stack (ready)", "active": False}
             continue
         if "rtlsdr" in driver_text or "rtl-sdr" in driver_text:
-            protocol = _console_first_enabled(enabled, ("tpms", "walkie", "fm"))
+            if configured_subghz_device and device_id == configured_subghz_device and {"tpms", "walkie"} & enabled:
+                protocol = _console_first_enabled(enabled, ("tpms", "walkie"))
+            elif auto_fm_device and device_id == auto_fm_device and "fm" in enabled:
+                protocol = "FM"
+            elif configured_subghz_device or configured_fm_device:
+                protocol = ""
+            else:
+                protocol = _console_first_enabled(enabled, ("tpms", "walkie", "fm"))
             if protocol:
                 center = "315/433.92 MHz" if protocol == "TPMS" else ("462.500 MHz" if protocol == "WALKIE" else "87.7-107.9 MHz")
                 rows_by_device[device_id] = {"device": device_id, "protocol": protocol, "center": center, "count": _console_protocol_count(protocol), "band": "TPMS / walkie / FM capable (ready)", "active": False}

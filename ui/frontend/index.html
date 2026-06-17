@@ -3797,6 +3797,25 @@
         const enabledProtocols = new Set(
           (status?.decoder_stats?.enabled_protocols || selectedProtocols()).map((item) => String(item).toLowerCase())
         );
+        const statusProtocolDevices = status?.ui_config?.protocol_devices && typeof status.ui_config.protocol_devices === "object"
+          ? status.ui_config.protocol_devices
+          : {};
+        const protocolDeviceId = (protocol) => String(protocolDeviceOverrides[protocol] || statusProtocolDevices[protocol] || "").trim();
+        const availableRoleDevices = devices.filter((device) => {
+          const id = String(device?.id || "").trim();
+          return id && !disabledSdrIds.has(id) && !isWifiDevice(device);
+        });
+        const preferredFmDevice = () => {
+          const configured = protocolDeviceId("fm");
+          if (configured) return configured;
+          const subghz = protocolDeviceId("tpms") || protocolDeviceId("walkie");
+          const sdrplay = availableRoleDevices.find((device) => isSdrplayRsp2Device(device) && String(device?.id || "") !== subghz);
+          if (sdrplay) return String(sdrplay.id || "");
+          const rtl = availableRoleDevices.find((device) => isRtlSdrDevice(device) && String(device?.id || "") !== subghz);
+          if (rtl) return String(rtl.id || "");
+          const fallback = availableRoleDevices.find((device) => isSdrplayRsp2Device(device) || isRtlSdrDevice(device));
+          return String(fallback?.id || "");
+        };
         function deviceRole(device) {
           const id = String(device?.id || "");
           const selectedClassic = String(status?.device_ids?.classic || status?.device_ids?.radio_a || selectedDeviceId(btcDeviceSelect) || "");
@@ -3805,22 +3824,29 @@
             ? bestNonBluetoothHopDevice(devices, selectedClassic)?.id || ""
             : "";
           const selectedHop = String(status?.device_ids?.hop || status?.device_ids?.radio_b || inferredHop || selectedDeviceId(btleDeviceSelect) || "");
+          const zigbeeDevice = protocolDeviceId("zigbee") || selectedHop;
+          const subghzDevice = protocolDeviceId("tpms") || protocolDeviceId("walkie") || selectedHop;
+          const cellularDevice = protocolDeviceId("cellular") || selectedHop;
+          const fmDevice = preferredFmDevice();
           const isLfmf = enabledProtocols.has("lfmf") && isSdrplayRsp2Device(device);
-          const isFm = enabledProtocols.has("fm") && (isSdrplayRsp2Device(device) || isRtlSdrDevice(device));
+          const isFm = enabledProtocols.has("fm") && Boolean(fmDevice) && id === fmDevice;
           const isWifi = enabledProtocols.has("wifi") && isWifiDevice(device);
           const isClassic = selectedClassic && id === selectedClassic;
-          const isHop = selectedHop && id === selectedHop;
+          const isZigbee = enabledProtocols.has("zigbee") && Boolean(zigbeeDevice) && id === zigbeeDevice;
+          const isSubghz = (enabledProtocols.has("tpms") || enabledProtocols.has("walkie")) && Boolean(subghzDevice) && id === subghzDevice;
+          const isCellular = enabledProtocols.has("cellular") && Boolean(cellularDevice) && id === cellularDevice;
+          const isHop = isZigbee || isSubghz || isCellular || (selectedHop && id === selectedHop);
           const protocols = [];
           if (isClassic && enabledProtocols.has("btc")) protocols.push("BTC");
           if (isClassic && enabledProtocols.has("ble")) protocols.push("BTLE");
-          if (isHop && enabledProtocols.has("zigbee")) protocols.push("ZIGBEE");
-          if (isHop && enabledProtocols.has("tpms")) protocols.push("TPMS");
-          if (isHop && enabledProtocols.has("walkie")) protocols.push("WALKIE");
-          if (isHop && enabledProtocols.has("cellular")) protocols.push("CELLULAR");
+          if (isZigbee) protocols.push("ZIGBEE");
+          if (isSubghz && enabledProtocols.has("tpms")) protocols.push("TPMS");
+          if (isSubghz && enabledProtocols.has("walkie")) protocols.push("WALKIE");
+          if (isCellular) protocols.push("CELLULAR");
           if (isFm) protocols.push("FM");
           if (isWifi) protocols.push("WIFI");
           if (isLfmf) protocols.push("LFMF");
-          return { isClassic, isHop, isWifi, isFm, isLfmf, protocols };
+          return { isClassic, isHop, isZigbee, isSubghz, isCellular, isWifi, isFm, isLfmf, protocols };
         }
         function fallbackSdrBand(device) {
           const role = deviceRole(device);
@@ -3866,9 +3892,9 @@
               bands.push(label);
             }
           }
-          if (canTpms && enabledProtocols.has("tpms")) bands.push("TPMS 315/433.92 MHz");
-          if (canFm && enabledProtocols.has("fm")) bands.push("FM 87.7-107.9 MHz");
-          if (canCellular && enabledProtocols.has("cellular")) bands.push("Cellular 700 MHz-6 GHz");
+          if (canTpms && role.isSubghz) bands.push("TPMS / walkie Sub-GHz");
+          if (canFm && role.isFm) bands.push("FM 87.7-107.9 MHz");
+          if (canCellular && role.isCellular) bands.push("Cellular 700 MHz-6 GHz");
           if (isSdrplayRsp2Device(device) && enabledProtocols.has("lfmf")) bands.push("VLF/LF/MF 1 kHz-3 MHz");
           if (bands.length) return `${bands.slice(0, 2).join(" · ")}${bands.length > 2 ? " · more" : ""}`;
           if (maxMsps > 0) return `RF sweep up to ${maxMsps.toFixed(1)} Msps`;
@@ -3905,6 +3931,20 @@
           const chips = deviceRole(device).protocols;
           return chips.length ? chips.map((protocol) => sdrRoleChip(protocol)).join("") : "";
         }
+        function sdrScanLabel(device, assignment, scannerOwned) {
+          if (!scannerOwned) return "Idle";
+          if (assignment) {
+            const protocol = String(assignment.protocol || "").toUpperCase();
+            const band = String(assignment.band || "");
+            if (protocol === "BTC" && /BTC\+BLE|BTC\+BTLE|shared/i.test(band)) return "Scanning BTC+BTLE";
+            if (protocol) return `Scanning ${protocol}`;
+          }
+          const protocols = deviceRole(device).protocols;
+          const preferred = ["FM", "WALKIE", "TPMS", "ZIGBEE", "CELLULAR", "LFMF", "BTLE", "BTC", "WIFI"]
+            .find((protocol) => protocols.includes(protocol));
+          if (preferred) return `Scanning ${preferred}`;
+          return "Scanning RF";
+        }
         devices
           .filter((device) => String(device?.id || "").trim())
           .sort((a, b) => String(a.id || "").localeCompare(String(b.id || "")))
@@ -3918,11 +3958,12 @@
             const scannerRunning = Boolean(status?.running || status?.worker_alive);
             const scannerOwned = scannerRunning || active || Boolean(device.occupied);
             const inferredChips = inferredSdrProtocolChips(device);
+            const scanLabel = sdrScanLabel(device, assignment, scannerOwned);
             const pill = active
-              ? `<span class="sdr-assignment-chips">${sdrProtocolChips(assignment)}</span>`
+              ? `<span class="sdr-assignment-chips">${sdrProtocolChips(assignment)}<span class="legend-pill">${scanLabel}</span></span>`
               : inferredChips
-                ? `<span class="sdr-assignment-chips">${inferredChips}<span class="legend-pill">${scannerOwned ? "Scanning" : "Idle"}</span></span>`
-                : `<span class="legend-pill">${scannerOwned ? "Scanning" : "Idle"}</span>`;
+                ? `<span class="sdr-assignment-chips">${inferredChips}<span class="legend-pill">${scanLabel}</span></span>`
+                : `<span class="legend-pill">${scanLabel}</span>`;
             const center = active ? assignmentCenter(assignment) : "";
             const band = active
               ? `${assignment.band || "Scanning"}${center ? ` · center ${center}` : ""}`

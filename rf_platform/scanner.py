@@ -26,7 +26,7 @@ DEFAULT_ZIGBEE_ACTIVE_DWELL_S = 1.0
 DEFAULT_ZIGBEE_FOLLOW_SAMPLE_RATE_SPS = 8_000_000
 DEFAULT_WIFI_INTERFACE = "wlan0"
 DEFAULT_FM_DEVICE = "sdrplay:0"
-DEFAULT_FM_SAMPLE_RATE_SPS = 10_000_000
+DEFAULT_FM_SAMPLE_RATE_SPS = 2_400_000
 DEFAULT_FM_INTERVAL_S = 60.0
 DEFAULT_LFMF_INTERVAL_S = 120.0
 DEFAULT_CELLULAR_CENTER_FREQ_HZ = 751_000_000
@@ -123,8 +123,13 @@ def _terminate_process_group(proc: subprocess.Popen[str], timeout_s: float) -> N
 
 def _bin(name: str) -> str:
     candidate = Path(sys.executable).parent / name
-    if candidate.exists():
-        return str(candidate)
+    candidates = [
+        candidate,
+        Path(__file__).resolve().parents[2] / ".venv" / "bin" / name,
+    ]
+    for item in candidates:
+        if item.exists():
+            return str(item)
     found = shutil.which(name)
     if found:
         return found
@@ -337,8 +342,14 @@ def _build_jobs(args: argparse.Namespace) -> tuple[list[ScanJob], list[ScanJob]]
     def fm_job(name: str, device_id: str) -> ScanJob:
         is_hackrf = str(device_id or "").strip().lower().startswith("hackrf:")
         is_bladerf = str(device_id or "").strip().lower().startswith("bladerf:")
+        is_rtlsdr = str(device_id or "").strip().lower().startswith("rtlsdr:")
         discovery_mode = "wideband" if is_bladerf else str(args.fm_discovery_mode)
-        sample_rate_sps = max(int(args.fm_sample_rate_sps), 20_000_000) if is_bladerf else int(args.fm_sample_rate_sps)
+        if is_bladerf or is_hackrf:
+            sample_rate_sps = max(int(args.fm_sample_rate_sps), 20_000_000)
+        elif is_rtlsdr:
+            sample_rate_sps = min(int(args.fm_sample_rate_sps), DEFAULT_FM_SAMPLE_RATE_SPS)
+        else:
+            sample_rate_sps = int(args.fm_sample_rate_sps)
         sweep_prominence_db = 0.0 if is_hackrf else float(args.fm_sweep_prominence_db)
         station_merge_hz = 0 if is_hackrf else int(args.fm_station_merge_hz)
         active_threshold_db = 4.0 if is_hackrf else float(args.fm_active_threshold_db)
@@ -690,6 +701,8 @@ def _fm_apply_device_defaults(command: list[str], device_id: str) -> list[str]:
         updated = _replace_command_value(updated, "--active-threshold-db", "4.0")
         updated = _replace_command_value(updated, "--min-power-dbfs", "-90.0")
         updated = _replace_command_value(updated, "--max-stations", "50")
+    elif lowered.startswith("rtlsdr:"):
+        updated = _replace_command_value(updated, "--sample-rate-sps", str(DEFAULT_FM_SAMPLE_RATE_SPS))
     return updated
 
 
