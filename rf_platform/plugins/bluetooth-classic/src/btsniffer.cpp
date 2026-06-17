@@ -125,6 +125,11 @@ pthread_mutex_t g_events_lock = PTHREAD_MUTEX_INITIALIZER;
 bool g_show_init_failed = false;
 bool g_record_only = false;
 bool g_jsonl_stdout = false;
+uint32_t g_debug_target_lap = 0;
+bool g_debug_target_lap_enabled = false;
+long long g_debug_target_lap_last_us = 0;
+int g_debug_energy_bin = -1;
+long long g_debug_energy_last_us = 0;
 
 long long now_us()
 {
@@ -232,6 +237,25 @@ double estimate_packet_rssi_db(iqsamp_t *chan, size_t start, size_t bufsize)
     return dbfs;
 }
 
+double estimate_buffer_rssi_db(iqsamp_t *chan, size_t bufsize)
+{
+    if (bufsize == 0) return -120.0;
+    double power = 0.0;
+    size_t stride = std::max((size_t) 1, bufsize / 4096);
+    size_t count = 0;
+    for (size_t k = 0; k < bufsize; k += stride) {
+        power += (chan[k].real() * chan[k].real()) + (chan[k].imag() * chan[k].imag());
+        count++;
+    }
+    if (count == 0) return -120.0;
+    const double fft_gain = std::max(1.0, (double) decfactor);
+    const double normalized_power = (power / (double) count) / (fft_gain * fft_gain);
+    const double dbfs = 10.0 * log10(normalized_power + 1e-12);
+    if (dbfs > 0.0) return 0.0;
+    if (dbfs < -120.0) return -120.0;
+    return dbfs;
+}
+
 struct timeval t_start;
 
 void compute_tsdiff(struct timeval *x, struct timeval *y, struct timeval *diff)
@@ -278,6 +302,7 @@ int length (uint64_t word)
 std::unordered_map<uint32_t, lap_node> lap_map;
 std::unordered_map<uint32_t, uint32_t> solved_lap_uap_map;
 std::unordered_map<uint32_t, uint64_t> passive_bdaddr_map;
+std::unordered_map<uint32_t, long long> page_access_seen_log_ts_map;
 std::unordered_map<uint32_t, long long> solved_lap_seen_log_ts_map;
 std::unordered_map<uint32_t, long long> init_fail_log_ts_map;
 std::unordered_map<uint32_t, unsigned int> init_fail_suppressed_map;
@@ -289,9 +314,19 @@ std::unordered_map<uint64_t, header_sense_stats> header_sense_map;
 const unsigned int HEADER_SENSE_MIN_OBSERVATIONS = 3;
 const int HEADER_SENSE_MIN_MARGIN = 8;
 const long long INIT_FAIL_CONSOLE_INTERVAL_US = 20000;
+const long long PAGE_ACCESS_SEEN_INTERVAL_US = 500000;
 const long long SOLVED_LAP_SEEN_INTERVAL_US = 500000;
 const size_t FHS_PAYLOAD_BYTES = 18;
 int fec23_codewords[32768];
+bool g_expected_bdaddr_enabled = false;
+uint64_t g_expected_bdaddr = 0;
+uint32_t g_expected_lap = 0;
+uint32_t g_expected_uap = 0;
+uint32_t g_expected_nap = 0;
+bool g_debug_fhs_rejects = false;
+long long g_debug_fhs_reject_events = 0;
+const long long DEBUG_FHS_REJECT_LIMIT = 200;
+int g_fhs_max_fec_errors = 0;
 
 int extract_header_bf(uint8_t *buf, uint32_t* head, uint32_t *clks, int *clk_found, uint32_t uap);
 
@@ -492,6 +527,19 @@ bool is_inquiry_access_lap(uint32_t lap)
     return (lap & 0xffffc0) == 0x9e8b00;
 }
 
+uint64_t parse_bdaddr_value(const std::string &value)
+{
+    std::string clean;
+    for (size_t idx = 0; idx < value.size(); idx++) {
+        const char ch = value[idx];
+        if (std::isxdigit((unsigned char) ch)) clean.push_back((char) std::toupper((unsigned char) ch));
+    }
+    if (clean.size() != 12) {
+        throw std::runtime_error("--expected-bdaddr must be exactly 12 hex characters, with optional colons");
+    }
+    return std::stoull(clean, NULL, 16);
+}
+
 struct fhs_decode_result {
     uint32_t lap;
     uint32_t uap;
@@ -514,6 +562,12 @@ struct fhs_decode_stats {
     long long fec_rejects;
     long long address_rejects;
     long long packet_types[16];
+    long long expected_bdaddr_payload_matches;
+    int expected_bdaddr_best_bit_errors;
+    int expected_bdaddr_best_fec_errors;
+    uint64_t expected_bdaddr_best_candidate;
+    unsigned int expected_bdaddr_best_channel;
+    long long expected_bdaddr_best_ts_us;
 };
 
 bool extract_payload_fec23(uint8_t *binbuf, size_t payload_start, size_t bufsize, uint32_t clk,
@@ -560,6 +614,7 @@ bool extract_payload_fec23(uint8_t *binbuf, size_t payload_start, size_t bufsize
 
 bool try_decode_fhs_at(uint8_t *binbuf, size_t access_start, size_t bufsize,
                        bool require_expected, uint32_t expected_lap, uint32_t expected_uap,
+                       uint32_t access_lap, unsigned int channel, long long ts_us, double rssi_dbfs,
                        fhs_decode_result *result, fhs_decode_stats *stats)
 {
     stats->attempts++;
@@ -602,19 +657,57 @@ bool try_decode_fhs_at(uint8_t *binbuf, size_t access_start, size_t bufsize,
                     continue;
                 }
                 stats->payload_decodes++;
-                if (errors != 0) {
-                    stats->fec_rejects++;
-                    continue;
-                }
 
                 const uint32_t fhs_lap = payload_bits_le(payload, 34, 24);
                 const uint32_t fhs_uap = payload_bits_le(payload, 64, 8);
                 const uint32_t fhs_nap = payload_bits_le(payload, 72, 16);
+                const uint64_t decoded_bdaddr = ((uint64_t) fhs_nap << 32) | ((uint64_t) fhs_uap << 24) | fhs_lap;
+                const std::string decoded_address = (boost::format("%02X:%02X:%02X:%02X:%02X:%02X")
+                    % ((decoded_bdaddr >> 40) & 0xff) % ((decoded_bdaddr >> 32) & 0xff)
+                    % ((decoded_bdaddr >> 24) & 0xff) % ((decoded_bdaddr >> 16) & 0xff)
+                    % ((decoded_bdaddr >> 8) & 0xff) % (decoded_bdaddr & 0xff)).str();
+                const bool expected_bdaddr_match = g_expected_bdaddr_enabled && decoded_bdaddr == g_expected_bdaddr;
+                if (g_expected_bdaddr_enabled) {
+                    const int bit_errors = __builtin_popcountll(decoded_bdaddr ^ g_expected_bdaddr);
+                    if (expected_bdaddr_match) stats->expected_bdaddr_payload_matches++;
+                    if (stats->expected_bdaddr_best_bit_errors < 0 ||
+                            bit_errors < stats->expected_bdaddr_best_bit_errors ||
+                            (bit_errors == stats->expected_bdaddr_best_bit_errors &&
+                             errors < stats->expected_bdaddr_best_fec_errors)) {
+                        stats->expected_bdaddr_best_bit_errors = bit_errors;
+                        stats->expected_bdaddr_best_fec_errors = errors;
+                        stats->expected_bdaddr_best_candidate = decoded_bdaddr;
+                        stats->expected_bdaddr_best_channel = channel;
+                        stats->expected_bdaddr_best_ts_us = ts_us;
+                    }
+                }
 
-                if (fhs_uap != uap ||
-                        (require_expected && (fhs_lap != expected_lap || fhs_uap != expected_uap)) ||
-                        fhs_lap == 0 || is_inquiry_access_lap(fhs_lap)) {
+                if (errors > 0 && (!expected_bdaddr_match || errors > g_fhs_max_fec_errors)) {
+                    stats->fec_rejects++;
+                    if (g_debug_fhs_rejects && g_debug_fhs_reject_events < DEBUG_FHS_REJECT_LIMIT) {
+                        g_debug_fhs_reject_events++;
+                        emit_json_event((boost::format("{\"time_us\":%lld,\"type\":\"fhs_reject\",\"reason\":\"fec\",\"address\":%s,\"nap\":\"%04X\",\"uap\":\"%02X\",\"lap\":\"%06X\",\"access_lap\":\"%06X\",\"channel\":%u,\"ts_us\":%lld,\"clk\":%u,\"errors\":%d,\"rssi_dbfs\":%.2f,\"verification\":%s}")
+                                         % now_us() % json_quote(decoded_address) % fhs_nap % fhs_uap % fhs_lap % access_lap % channel % ts_us % clk % errors % rssi_dbfs
+                                         % json_quote(expected_bdaddr_match ? "would_match_expected_bdaddr" : "no_match")).str());
+                    }
+                    continue;
+                }
+
+                const bool expected_mismatch = require_expected && !expected_bdaddr_match &&
+                        (fhs_lap != expected_lap || fhs_uap != expected_uap);
+                const bool invalid_fhs_address = expected_mismatch ||
+                        fhs_lap == 0 || is_inquiry_access_lap(fhs_lap);
+                if (invalid_fhs_address) {
                     stats->address_rejects++;
+                    if (g_debug_fhs_rejects && g_debug_fhs_reject_events < DEBUG_FHS_REJECT_LIMIT) {
+                        const std::string reason = expected_mismatch ? "expected_mismatch" :
+                            ((fhs_lap == 0) ? "zero_lap" : "inquiry_lap");
+                        g_debug_fhs_reject_events++;
+                        emit_json_event((boost::format("{\"time_us\":%lld,\"type\":\"fhs_reject\",\"reason\":%s,\"address\":%s,\"nap\":\"%04X\",\"uap\":\"%02X\",\"lap\":\"%06X\",\"access_lap\":\"%06X\",\"expected_lap\":\"%06X\",\"expected_uap\":\"%02X\",\"channel\":%u,\"ts_us\":%lld,\"clk\":%u,\"rssi_dbfs\":%.2f,\"verification\":%s}")
+                                         % now_us() % json_quote(reason) % json_quote(decoded_address) % fhs_nap % fhs_uap % fhs_lap % access_lap % expected_lap % expected_uap
+                                         % channel % ts_us % clk % rssi_dbfs
+                                         % json_quote(expected_bdaddr_match ? "would_match_expected_bdaddr" : "no_match")).str());
+                    }
                     continue;
                 }
 
@@ -647,16 +740,23 @@ bool record_passive_bdaddr(const fhs_decode_result &fhs, uint32_t access_lap, un
 
     passive_bdaddr_map[fhs.lap] = bdaddr;
     solved_lap_uap_map[fhs.lap] = fhs.uap;
+    const bool verification_match = g_expected_bdaddr_enabled && bdaddr == g_expected_bdaddr;
+    const std::string verification = g_expected_bdaddr_enabled ? (verification_match ? "match" : "mismatch") : "unchecked";
 
-    std::cout << boost::format("[%2u] %12lld us -- %06X -- PASSIVE FHS BD_ADDR %s")
-                 % channel % ts_us % access_lap % address << std::endl;
-    log_event(boost::format("passive fhs bdaddr address=%s nap=%04X uap=%02X lap=%06X access_lap=%06X channel=%u ts_us=%lld clk=%02u header=%03X whitening=%s payload=%s")
+    std::cout << boost::format("[%2u] %12lld us -- %06X -- PASSIVE FHS BD_ADDR %s verification=%s fec_errors=%d")
+                 % channel % ts_us % access_lap % address % verification % fhs.errors << std::endl;
+    log_event(boost::format("passive fhs bdaddr address=%s nap=%04X uap=%02X lap=%06X access_lap=%06X channel=%u ts_us=%lld clk=%02u header=%03X whitening=%s payload=%s verification=%s fec_errors=%d")
               % address % fhs.nap % fhs.uap % fhs.lap % access_lap % channel % ts_us % fhs.clk
               % (fhs.header & 0x3ffff)
               % (fhs.payload_whitener_after_header ? "after-header" : "fresh")
-              % payload_hex(fhs.payload, FHS_PAYLOAD_BYTES));
-    emit_json_event((boost::format("{\"time_us\":%lld,\"type\":\"passive_fhs_bdaddr\",\"address\":%s,\"nap\":\"%04X\",\"uap\":\"%02X\",\"lap\":\"%06X\",\"access_lap\":\"%06X\",\"channel\":%u,\"ts_us\":%lld,\"clk\":%u,\"rssi_dbfs\":%.2f}")
-                     % now_us() % json_quote(address) % fhs.nap % fhs.uap % fhs.lap % access_lap % channel % ts_us % fhs.clk % rssi_dbfs).str());
+              % payload_hex(fhs.payload, FHS_PAYLOAD_BYTES) % verification % fhs.errors);
+    emit_json_event((boost::format("{\"time_us\":%lld,\"type\":\"passive_fhs_bdaddr\",\"address\":%s,\"nap\":\"%04X\",\"uap\":\"%02X\",\"lap\":\"%06X\",\"access_lap\":\"%06X\",\"channel\":%u,\"ts_us\":%lld,\"clk\":%u,\"rssi_dbfs\":%.2f,\"verification\":%s,\"fec_errors\":%d,\"expected_address\":%s}")
+                     % now_us() % json_quote(address) % fhs.nap % fhs.uap % fhs.lap % access_lap % channel % ts_us % fhs.clk % rssi_dbfs % json_quote(verification)
+                     % fhs.errors
+                     % (g_expected_bdaddr_enabled ? json_quote((boost::format("%02X:%02X:%02X:%02X:%02X:%02X")
+                         % ((g_expected_bdaddr >> 40) & 0xff) % ((g_expected_bdaddr >> 32) & 0xff)
+                         % ((g_expected_bdaddr >> 24) & 0xff) % ((g_expected_bdaddr >> 16) & 0xff)
+                         % ((g_expected_bdaddr >> 8) & 0xff) % (g_expected_bdaddr & 0xff)).str()) : std::string("null"))).str());
 
     if (fptrout != NULL) {
         fprintf(fptrout, "%lld %06X -- PASSIVE FHS BD_ADDR %s -- access_lap %06X -- channel %u\n",
@@ -790,6 +890,8 @@ void* proc_routine(void *routine_params)
     long long resolved_events = 0;
     long long fhs_events = 0;
     fhs_decode_stats fhs_stats = {};
+    fhs_stats.expected_bdaddr_best_bit_errors = -1;
+    fhs_stats.expected_bdaddr_best_fec_errors = 9999;
     long long last_metrics_us = now_us();
     FILE *fptrout = fopen("results.txt","w");
     if (fptrout == NULL) {
@@ -900,6 +1002,17 @@ void* proc_routine(void *routine_params)
             }
         }
 
+        if (g_debug_energy_bin >= 0 && g_debug_energy_bin < (int) decfactor) {
+            const long long cur_us = now_us();
+            if (cur_us - g_debug_energy_last_us >= 250000) {
+                g_debug_energy_last_us = cur_us;
+                iqsamp_t *chan = chanbuf + ((size_t) g_debug_energy_bin) * bufsize;
+                const double dbfs = estimate_buffer_rssi_db(chan, bufsize);
+                emit_json_event((boost::format("{\"time_us\":%lld,\"type\":\"debug_bin_energy\",\"bin\":%d,\"rssi_dbfs\":%.2f}")
+                                 % cur_us % g_debug_energy_bin % dbfs).str());
+            }
+        }
+
         for (size_t block = 1; block < nblocks-1; block++) {
 //            printf("proc thread: block %d\n",block);
             for (unsigned int ch = 0; ch < decfactor; ch++) {
@@ -947,10 +1060,31 @@ void* proc_routine(void *routine_params)
                     const double packet_rssi_dbfs = estimate_packet_rssi_db(chan, i, bufsize);
                     if (aw == awfinal) {
                         const long long packet_ts_us = (long long) (samples_processed + i) / srate;
+                        long long last_page_access_ts = page_access_seen_log_ts_map[_lap];
+                        if (packet_ts_us - last_page_access_ts >= PAGE_ACCESS_SEEN_INTERVAL_US) {
+                            page_access_seen_log_ts_map[_lap] = packet_ts_us;
+                            emit_json_event((boost::format("{\"time_us\":%lld,\"type\":\"page_access_seen\",\"lap\":\"%06X\",\"channel\":%u,\"ts_us\":%lld,\"rssi_dbfs\":%.2f,\"status\":\"page_access\"}")
+                                             % now_us() % _lap % ch % packet_ts_us % packet_rssi_dbfs).str());
+                        }
+                        if (g_debug_target_lap_enabled && _lap == g_debug_target_lap &&
+                                (packet_ts_us - g_debug_target_lap_last_us) >= 10000) {
+                            g_debug_target_lap_last_us = packet_ts_us;
+                            emit_json_event((boost::format("{\"time_us\":%lld,\"type\":\"page_access_seen\",\"lap\":\"%06X\",\"channel\":%u,\"ts_us\":%lld,\"rssi_dbfs\":%.2f,\"status\":\"page_access_debug\"}")
+                                             % now_us() % _lap % ch % packet_ts_us % packet_rssi_dbfs).str());
+                        }
+
+                        if (g_expected_bdaddr_enabled && _lap == g_expected_lap) {
+                            fhs_decode_result fhs;
+                            if (try_decode_fhs_at(binbuf, i, bufsize, true, g_expected_lap, g_expected_uap, _lap, ch, packet_ts_us, packet_rssi_dbfs, &fhs, &fhs_stats)) {
+                                record_passive_bdaddr(fhs, _lap, ch, packet_ts_us, packet_rssi_dbfs, fptrout);
+                                fhs_events++;
+                                continue;
+                            }
+                        }
 
                         if (is_inquiry_access_lap(_lap)) {
                             fhs_decode_result fhs;
-                            if (try_decode_fhs_at(binbuf, i, bufsize, false, 0, 0, &fhs, &fhs_stats)) {
+                            if (try_decode_fhs_at(binbuf, i, bufsize, false, 0, 0, _lap, ch, packet_ts_us, packet_rssi_dbfs, &fhs, &fhs_stats)) {
                                 record_passive_bdaddr(fhs, _lap, ch, packet_ts_us, packet_rssi_dbfs, fptrout);
                                 fhs_events++;
                             }
@@ -966,7 +1100,7 @@ void* proc_routine(void *routine_params)
                                                  % now_us() % _lap % solved_it->second % ch % packet_ts_us % packet_rssi_dbfs).str());
                             }
                             fhs_decode_result fhs;
-                            if (try_decode_fhs_at(binbuf, i, bufsize, true, _lap, solved_it->second, &fhs, &fhs_stats)) {
+                            if (try_decode_fhs_at(binbuf, i, bufsize, true, _lap, solved_it->second, _lap, ch, packet_ts_us, packet_rssi_dbfs, &fhs, &fhs_stats)) {
                                 record_passive_bdaddr(fhs, _lap, ch, packet_ts_us, packet_rssi_dbfs, fptrout);
                                 fhs_events++;
                             }
@@ -1369,11 +1503,26 @@ void* proc_routine(void *routine_params)
         {
             const long long cur_us = now_us();
             if (cur_us - last_metrics_us >= 1000000LL) {
-                emit_json_event((boost::format("{\"time_us\":%lld,\"type\":\"metrics\",\"samples_processed\":%llu,\"packets_seen\":%lld,\"preamble_hits\":%lld,\"barker_hits\":%lld,\"access_hits\":%lld,\"access_rejects\":%lld,\"lap_events\":%lld,\"resolved_events\":%lld,\"fhs_events\":%lld,\"fhs_attempts\":%lld,\"fhs_inquiry_attempts\":%lld,\"fhs_solved_lap_attempts\":%lld,\"fhs_truncated\":%lld,\"fhs_header_matches\":%lld,\"fhs_type_matches\":%lld,\"fhs_payload_decodes\":%lld,\"fhs_fec_rejects\":%lld,\"fhs_address_rejects\":%lld,\"fhs_packet_types\":[%lld,%lld,%lld,%lld,%lld,%lld,%lld,%lld,%lld,%lld,%lld,%lld,%lld,%lld,%lld,%lld],\"solved_laps\":%u,\"active_laps\":%u,\"bins\":%u}")
+                const std::string expected_best_address = fhs_stats.expected_bdaddr_best_bit_errors >= 0 ?
+                    (boost::format("%02X:%02X:%02X:%02X:%02X:%02X")
+                        % ((fhs_stats.expected_bdaddr_best_candidate >> 40) & 0xff)
+                        % ((fhs_stats.expected_bdaddr_best_candidate >> 32) & 0xff)
+                        % ((fhs_stats.expected_bdaddr_best_candidate >> 24) & 0xff)
+                        % ((fhs_stats.expected_bdaddr_best_candidate >> 16) & 0xff)
+                        % ((fhs_stats.expected_bdaddr_best_candidate >> 8) & 0xff)
+                        % (fhs_stats.expected_bdaddr_best_candidate & 0xff)).str() :
+                    std::string("");
+                emit_json_event((boost::format("{\"time_us\":%lld,\"type\":\"metrics\",\"samples_processed\":%llu,\"packets_seen\":%lld,\"preamble_hits\":%lld,\"barker_hits\":%lld,\"access_hits\":%lld,\"access_rejects\":%lld,\"lap_events\":%lld,\"resolved_events\":%lld,\"fhs_events\":%lld,\"fhs_attempts\":%lld,\"fhs_inquiry_attempts\":%lld,\"fhs_solved_lap_attempts\":%lld,\"fhs_truncated\":%lld,\"fhs_header_matches\":%lld,\"fhs_type_matches\":%lld,\"fhs_payload_decodes\":%lld,\"fhs_fec_rejects\":%lld,\"fhs_address_rejects\":%lld,\"fhs_expected_payload_matches\":%lld,\"fhs_expected_best_bit_errors\":%d,\"fhs_expected_best_fec_errors\":%d,\"fhs_expected_best_address\":%s,\"fhs_expected_best_channel\":%u,\"fhs_expected_best_ts_us\":%lld,\"fhs_packet_types\":[%lld,%lld,%lld,%lld,%lld,%lld,%lld,%lld,%lld,%lld,%lld,%lld,%lld,%lld,%lld,%lld],\"solved_laps\":%u,\"active_laps\":%u,\"bins\":%u}")
                                  % cur_us % (unsigned long long) samples_processed % packets_seen % preamble_hits % barker_hits % access_hits % access_rejects % lap_events % resolved_events % fhs_events
                                  % fhs_stats.attempts % fhs_stats.inquiry_attempts % fhs_stats.solved_lap_attempts
                                  % fhs_stats.truncated % fhs_stats.header_matches % fhs_stats.type_matches
                                  % fhs_stats.payload_decodes % fhs_stats.fec_rejects % fhs_stats.address_rejects
+                                 % fhs_stats.expected_bdaddr_payload_matches
+                                 % fhs_stats.expected_bdaddr_best_bit_errors
+                                 % (fhs_stats.expected_bdaddr_best_bit_errors >= 0 ? fhs_stats.expected_bdaddr_best_fec_errors : -1)
+                                 % (fhs_stats.expected_bdaddr_best_bit_errors >= 0 ? json_quote(expected_best_address) : std::string("null"))
+                                 % fhs_stats.expected_bdaddr_best_channel
+                                 % fhs_stats.expected_bdaddr_best_ts_us
                                  % fhs_stats.packet_types[0] % fhs_stats.packet_types[1] % fhs_stats.packet_types[2] % fhs_stats.packet_types[3]
                                  % fhs_stats.packet_types[4] % fhs_stats.packet_types[5] % fhs_stats.packet_types[6] % fhs_stats.packet_types[7]
                                  % fhs_stats.packet_types[8] % fhs_stats.packet_types[9] % fhs_stats.packet_types[10] % fhs_stats.packet_types[11]
@@ -1417,6 +1566,9 @@ int SAFE_MAIN(int argc, char *argv[])
 #endif
     std::string log_path = "/var/log/rf_sentinel/btsniffer.log";
     std::string events_path = "";
+    std::string debug_target_lap_arg = "";
+    std::string expected_bdaddr_arg = "";
+    int debug_energy_bin_arg = -1;
     double lna_gain_db = 40.0;
     double vga_gain_db = 40.0;
     double amp_gain_db = 0.0;
@@ -1444,6 +1596,11 @@ int SAFE_MAIN(int argc, char *argv[])
             ("amp-gain-db", po::value<double>(&amp_gain_db)->default_value(amp_gain_db), "RX AMP gain/enable value when the SDR exposes an AMP gain element")
             ("jsonl-stdout", po::bool_switch(&g_jsonl_stdout)->default_value(false), "write JSONL events to stdout for Python supervisors")
             ("show-init-failed", po::bool_switch(&g_show_init_failed)->default_value(false), "show init-failed LAP messages on stdout; always logged to file")
+            ("debug-target-lap", po::value<std::string>(&debug_target_lap_arg)->default_value(debug_target_lap_arg), "emit page_access_seen JSON when this LAP access code is seen")
+            ("expected-bdaddr", po::value<std::string>(&expected_bdaddr_arg)->default_value(expected_bdaddr_arg), "optional full Bluetooth address used to mark FHS events as match/mismatch")
+            ("debug-fhs-rejects", po::bool_switch(&g_debug_fhs_rejects)->default_value(false), "emit limited JSON diagnostics for FHS-shaped packets rejected by validation")
+            ("fhs-max-fec-errors", po::value<int>(&g_fhs_max_fec_errors)->default_value(g_fhs_max_fec_errors), "allow this many uncorrectable FHS payload FEC blocks before rejecting")
+            ("debug-energy-bin", po::value<int>(&debug_energy_bin_arg)->default_value(debug_energy_bin_arg), "emit debug_bin_energy JSON for this 1 MHz bin")
             ("record-only", po::bool_switch(&g_record_only)->default_value(false), "record raw IQ continuously and skip Bluetooth packet processing")
     ;
     po::variables_map vm;
@@ -1466,6 +1623,29 @@ int SAFE_MAIN(int argc, char *argv[])
     if (vm.count("bins")) {
         bandwidth_mhz_arg = (boost::format("%u") % vm["bins"].as<unsigned int>()).str();
     }
+    if (!debug_target_lap_arg.empty()) {
+        std::string clean;
+        for (size_t idx = 0; idx < debug_target_lap_arg.size(); idx++) {
+            const char ch = debug_target_lap_arg[idx];
+            if (std::isxdigit((unsigned char) ch)) clean.push_back((char) std::toupper((unsigned char) ch));
+        }
+        if (clean.size() != 6) {
+            throw std::runtime_error("--debug-target-lap must be exactly 6 hex characters");
+        }
+        g_debug_target_lap = (uint32_t) std::stoul(clean, NULL, 16);
+        g_debug_target_lap_enabled = true;
+    }
+    if (!expected_bdaddr_arg.empty()) {
+        g_expected_bdaddr = parse_bdaddr_value(expected_bdaddr_arg);
+        g_expected_lap = (uint32_t) (g_expected_bdaddr & 0xffffff);
+        g_expected_uap = (uint32_t) ((g_expected_bdaddr >> 24) & 0xff);
+        g_expected_nap = (uint32_t) ((g_expected_bdaddr >> 32) & 0xffff);
+        g_expected_bdaddr_enabled = true;
+    }
+    if (g_fhs_max_fec_errors < 0 || g_fhs_max_fec_errors > 8) {
+        throw std::runtime_error("--fhs-max-fec-errors must be between 0 and 8");
+    }
+    g_debug_energy_bin = debug_energy_bin_arg;
     const double freq_mhz = parse_mhz_value(freq_mhz_arg);
     const double bandwidth_mhz = parse_mhz_value(bandwidth_mhz_arg);
     const double rounded_bandwidth_mhz = floor(bandwidth_mhz + 0.5);

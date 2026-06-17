@@ -26,6 +26,7 @@ from bluetooth_lowenergy.detector import BLE_ADV_CHANNELS, WideBLEAdvertisingDet
 PLUGIN_ROOT = Path(__file__).resolve().parents[2]
 DEFAULT_BINARY = PLUGIN_ROOT / "build" / "btcexplorer-sniffer"
 DEFAULT_GATEWAY_BINARY = PLUGIN_ROOT / "build" / "btcexplorer-sniffer-gateway"
+DEFAULT_PAGE_BINARY = PLUGIN_ROOT / "build" / "btcexplorer-page-stimulus"
 DEFAULT_LOG_DIR = Path(os.getenv("RF_SENTINEL_LOG_DIR", "/var/log/rf_sentinel"))
 DEFAULT_LOG = DEFAULT_LOG_DIR / "btcexplorer-sniffer.log"
 ANSI_RESET = "\033[0m"
@@ -55,6 +56,31 @@ CSV_FIELDS = [
 def _btc_bank_start_channel(center_mhz: float, bandwidth_mhz: int) -> int:
     start = int(round(float(center_mhz) - 2402.0 - ((float(bandwidth_mhz) - 1.0) / 2.0)))
     return max(0, min(78, start))
+
+
+def _normalize_native_json_event(event: dict[str, Any], args: argparse.Namespace) -> dict[str, Any]:
+    event_type = str(event.get("type") or "")
+    if event_type in {"config", "metrics"}:
+        return event
+    if not event.get("lap") and event_type != "passive_fhs_bdaddr":
+        return event
+    event.setdefault("protocol", "btc")
+    event.setdefault("kind", "classic_lap")
+    try:
+        bin_index = int(event.get("channel"))
+    except (TypeError, ValueError):
+        return event
+    event.setdefault("btcsniffer_bin", bin_index)
+    event["channel"] = _btc_bank_start_channel(float(args.center_mhz), int(args.bandwidth_mhz)) + bin_index
+    if event_type == "page_access_seen":
+        event.setdefault("status", "page_access")
+        event.setdefault("detail", "page/inquiry access code observed")
+    return event
+
+
+def _page_detection_enabled(args: argparse.Namespace) -> bool:
+    disabled = str(os.getenv("RF_SENTINEL_DISABLE_PAGE_DETECTION", "")).strip().lower() in {"1", "true", "yes", "on"}
+    return not disabled and not bool(getattr(args, "no_page_detection", False))
 
 
 def _parse_native_status_line(text: str, args: argparse.Namespace) -> dict[str, Any] | None:
@@ -162,10 +188,13 @@ def _binary_arch_matches_host(binary: Path) -> tuple[bool, str]:
     return False, description
 
 
-def _build_inputs() -> list[Path]:
+def _build_inputs(binary: Path) -> list[Path]:
     paths = [PLUGIN_ROOT / "CMakeLists.txt"]
-    paths.extend(sorted((PLUGIN_ROOT / "src").glob("*.cpp")))
-    paths.extend(sorted((PLUGIN_ROOT / "src").glob("*.hpp")))
+    if binary.name == "btcexplorer-page-stimulus":
+        paths.append(PLUGIN_ROOT / "src" / "page_stimulus.cpp")
+    else:
+        paths.extend([PLUGIN_ROOT / "src" / "btsniffer.cpp", PLUGIN_ROOT / "src" / "lapnode.cpp"])
+        paths.extend(sorted((PLUGIN_ROOT / "src").glob("*.hpp")))
     return [path for path in paths if path.exists()]
 
 
@@ -178,7 +207,7 @@ def _rebuild_reason(binary: Path) -> str | None:
     if not arch_ok:
         return f"binary architecture does not match host ({arch_detail})"
     binary_mtime = binary.stat().st_mtime
-    newest_input = max((path.stat().st_mtime for path in _build_inputs()), default=0.0)
+    newest_input = max((path.stat().st_mtime for path in _build_inputs(binary)), default=0.0)
     if newest_input > binary_mtime:
         return "source is newer than binary"
     return None
@@ -194,6 +223,13 @@ def _ensure_binary(auto_build: bool = True, binary: Path = DEFAULT_BINARY) -> Pa
     if not cmake:
         raise RuntimeError(f"Bluetooth Classic sniffer rebuild required ({reason}) but cmake was not found")
     build_dir = PLUGIN_ROOT / "build"
+    if build_dir.exists() and not os.access(build_dir, os.W_OK):
+        build_dir = PLUGIN_ROOT / "build-user"
+        binary = build_dir / binary.name
+        existing_reason = _rebuild_reason(binary)
+        if existing_reason is None:
+            return binary
+        reason = f"{reason}; default build dir not writable, using build-user ({existing_reason})"
     build_dir.mkdir(parents=True, exist_ok=True)
     print(f"building bluetooth-classic native sniffer: {reason}", file=sys.stderr, flush=True)
     configure = subprocess.run([cmake, "-S", str(PLUGIN_ROOT), "-B", str(build_dir)], check=False, capture_output=True, text=True, timeout=120)
@@ -387,6 +423,16 @@ def _run_listen(args: argparse.Namespace) -> int:
         cmd.extend(["--input-stdin", "--input-format", "cs8"])
     if args.show_init_failed:
         cmd.append("--show-init-failed")
+    if getattr(args, "debug_target_lap", ""):
+        cmd.extend(["--debug-target-lap", _clean_hex(args.debug_target_lap, 6, "--debug-target-lap")])
+    if getattr(args, "expected_bdaddr", ""):
+        cmd.extend(["--expected-bdaddr", _clean_bdaddr(args.expected_bdaddr)])
+    if getattr(args, "debug_fhs_rejects", False):
+        cmd.append("--debug-fhs-rejects")
+    if getattr(args, "fhs_max_fec_errors", 0):
+        cmd.extend(["--fhs-max-fec-errors", str(int(args.fhs_max_fec_errors))])
+    if getattr(args, "debug_energy_bin", -1) is not None and int(getattr(args, "debug_energy_bin", -1)) >= 0:
+        cmd.extend(["--debug-energy-bin", str(int(args.debug_energy_bin))])
     if args.events_path:
         cmd.extend(["--events", str(args.events_path)])
 
@@ -447,6 +493,7 @@ def _run_listen(args: argparse.Namespace) -> int:
             if text.startswith("{"):
                 try:
                     event = json.loads(text)
+                    event = _normalize_native_json_event(event, args)
                 except json.JSONDecodeError:
                     event = None
             if event is None:
@@ -456,6 +503,8 @@ def _run_listen(args: argparse.Namespace) -> int:
                     print(text, flush=True)
                 continue
             event_type = str(event.get("type") or "")
+            if event_type == "page_access_seen" and not _page_detection_enabled(args):
+                continue
             if event_type == "metrics" and not args.metrics:
                 continue
             if args.json:
@@ -467,15 +516,44 @@ def _run_listen(args: argparse.Namespace) -> int:
             elif event_type == "config":
                 continue
             elif event_type == "metrics":
+                fhs_best = ""
+                if event.get("fhs_expected_best_address"):
+                    fhs_best = (
+                        f" expected_best={event.get('fhs_expected_best_address')}"
+                        f"/{event.get('fhs_expected_best_bit_errors')}bit"
+                        f"/fec{event.get('fhs_expected_best_fec_errors')}"
+                    )
                 print(
                     f"metrics packets={event.get('packets_seen')} access={event.get('access_hits')} "
-                    f"lap={event.get('lap_events')} resolved={event.get('resolved_events')} fhs={event.get('fhs_events')}",
+                    f"lap={event.get('lap_events')} resolved={event.get('resolved_events')} "
+                    f"fhs={event.get('fhs_events')} fhs_attempts={event.get('fhs_attempts')}"
+                    f" expected_hits={event.get('fhs_expected_payload_matches', 0)}{fhs_best}",
                     flush=True,
                 )
             elif event_type == "passive_fhs_bdaddr":
                 print(
                     f"bdaddr address={event.get('address')} ch={event.get('channel')} "
-                    f"rssi={event.get('rssi_dbfs')} access_lap={event.get('access_lap')}",
+                    f"rssi={event.get('rssi_dbfs')} access_lap={event.get('access_lap')} "
+                    f"verification={event.get('verification', 'unchecked')} "
+                    f"fec_errors={event.get('fec_errors', 0)}",
+                    flush=True,
+                )
+            elif event_type == "fhs_reject":
+                print(
+                    f"fhs_reject reason={event.get('reason')} address={event.get('address', '')} "
+                    f"verification={event.get('verification', '')} ch={event.get('channel')} "
+                    f"rssi={event.get('rssi_dbfs')}",
+                    flush=True,
+                )
+            elif event_type == "page_access_seen":
+                print(
+                    f"page_access_seen lap={event.get('lap')} ch={event.get('channel')} "
+                    f"rssi={event.get('rssi_dbfs')} ts_us={event.get('ts_us')}",
+                    flush=True,
+                )
+            elif event_type == "debug_bin_energy":
+                print(
+                    f"debug_bin_energy bin={event.get('bin')} rssi={event.get('rssi_dbfs')}",
                     flush=True,
                 )
             elif event_type in {"lap_initialized", "lap_resolved", "lap_seen"} or event.get("lap"):
@@ -551,7 +629,9 @@ def _combined_btc_stdout_worker(proc: subprocess.Popen[str], args: argparse.Name
             if text.startswith("{"):
                 try:
                     event = json.loads(text)
-                    event["protocol"] = "btc"
+                    event = _normalize_native_json_event(event, args)
+                    if str(event.get("type") or "") == "page_access_seen" and not _page_detection_enabled(args):
+                        continue
                     events.put(event)
                     continue
                 except json.JSONDecodeError:
@@ -711,6 +791,302 @@ def _run_combined(args: argparse.Namespace) -> int:
         signal.signal(signal.SIGTERM, previous_term)
 
 
+def _clean_hex(value: str, width: int, name: str) -> str:
+    cleaned = "".join(ch for ch in str(value or "").upper() if ch in "0123456789ABCDEF")
+    if len(cleaned) != width:
+        raise RuntimeError(f"{name} must be exactly {width} hex characters")
+    return cleaned
+
+
+def _clean_bdaddr(value: str, name: str = "--expected-bdaddr") -> str:
+    cleaned = _clean_hex(value, 12, name)
+    return ":".join(cleaned[idx : idx + 2] for idx in range(0, 12, 2))
+
+
+def _run_page_stimulus(args: argparse.Namespace) -> int:
+    if not args.lab_authorized:
+        raise RuntimeError("--lab-authorized is required for active RF page stimulus")
+    target_lap = _clean_hex(args.target_lap, 6, "--target-lap")
+    target_uap = _clean_hex(args.target_uap, 2, "--target-uap") if args.target_uap else ""
+    expected_bdaddr = _clean_bdaddr(args.expected_bdaddr) if args.expected_bdaddr else ""
+    if args.timeout_s <= 0.0 or args.timeout_s > 60.0:
+        raise RuntimeError("--timeout-s must be >0 and <=60")
+
+    rx_binary = _ensure_binary(auto_build=not args.no_auto_build, binary=DEFAULT_GATEWAY_BINARY if args.source == "gateway" else DEFAULT_BINARY)
+    tx_binary = _ensure_binary(auto_build=not args.no_auto_build, binary=DEFAULT_PAGE_BINARY)
+
+    rx_device = args.rx_device_id or args.device_id
+    tx_device = args.tx_device_id or args.device_id
+    rx_driver = _device_driver(rx_device, args.driver)
+    tx_driver = _device_driver(tx_device, args.tx_driver or rx_driver)
+    stop = threading.Event()
+
+    rx_cmd = [
+        sys.executable,
+        "-m",
+        "bluetooth_classic.cli",
+        "listen",
+        "--source",
+        args.source,
+        "--device-id",
+        rx_device,
+        "--driver",
+        rx_driver,
+        "--center-mhz",
+        f"{float(args.center_mhz):.3f}",
+        "--bandwidth-mhz",
+        str(int(args.bandwidth_mhz)),
+        "--seconds",
+        f"{float(args.seconds):.3f}",
+        "--lna-gain-db",
+        f"{float(args.lna_gain_db):.1f}",
+        "--vga-gain-db",
+        f"{float(args.vga_gain_db):.1f}",
+        "--amp-gain-db",
+        f"{float(args.amp_gain_db):.1f}",
+        "--json",
+        "--debug-target-lap",
+        target_lap,
+    ]
+    if expected_bdaddr:
+        rx_cmd.extend(["--expected-bdaddr", expected_bdaddr])
+    if args.debug_fhs_rejects:
+        rx_cmd.append("--debug-fhs-rejects")
+    if args.fhs_max_fec_errors:
+        rx_cmd.extend(["--fhs-max-fec-errors", str(int(args.fhs_max_fec_errors))])
+    debug_bin = -1
+    channel_text = str(args.page_channels or "").strip()
+    if re.fullmatch(r"\d+", channel_text):
+        debug_bin = int(channel_text) - _btc_bank_start_channel(float(args.center_mhz), int(args.bandwidth_mhz))
+        if 0 <= debug_bin < int(args.bandwidth_mhz):
+            rx_cmd.extend(["--debug-energy-bin", str(debug_bin)])
+    if args.gateway_base_url:
+        rx_cmd.extend(["--gateway-base-url", args.gateway_base_url])
+    if args.gateway_token:
+        rx_cmd.extend(["--gateway-token", args.gateway_token])
+    if args.raw:
+        rx_cmd.append("--raw")
+
+    tx_cmd = [
+        str(tx_binary),
+        "--lab-authorized",
+        "--driver",
+        tx_driver,
+        "--device-id",
+        tx_device,
+        "--target-lap",
+        target_lap,
+        "--channels",
+        args.page_channels,
+        "--seconds",
+        f"{float(args.timeout_s):.3f}",
+        "--dwell-ms",
+        f"{float(args.page_dwell_ms):.3f}",
+        "--guard-us",
+        f"{float(args.page_guard_us):.3f}",
+        "--sample-rate-sps",
+        str(int(args.tx_sample_rate_sps)),
+        "--tx-gain-db",
+        f"{float(args.tx_gain_db):.1f}",
+        "--tx-vga-gain-db",
+        f"{float(args.tx_vga_gain_db):.1f}",
+        "--amplitude",
+        f"{float(args.tx_amplitude):.3f}",
+        "--fsk-polarity",
+        args.fsk_polarity,
+        "--edge-mode",
+        args.edge_mode,
+    ]
+    if args.dry_run:
+        tx_cmd.append("--dry-run")
+
+    if not args.json:
+        target = f"{target_uap + ':' if target_uap else ''}{target_lap}"
+        print(
+            f"lab page-stimulus target={target} rx={rx_device}/{rx_driver} tx={tx_device}/{tx_driver} "
+            f"rx_center={float(args.center_mhz):.3f}MHz rx_bw={int(args.bandwidth_mhz)}MHz timeout={args.timeout_s:.1f}s",
+            file=sys.stderr,
+            flush=True,
+        )
+
+    rx_proc = subprocess.Popen(
+        rx_cmd,
+        cwd=str(PLUGIN_ROOT),
+        stdout=subprocess.PIPE,
+        stderr=subprocess.STDOUT,
+        text=True,
+        bufsize=1,
+        env={**os.environ, "PYTHONUNBUFFERED": "1"},
+    )
+    # Give the receiver a moment to open before the active stimulus starts.
+    time.sleep(max(0.1, float(args.rx_settle_s)))
+    tx_proc = subprocess.Popen(
+        tx_cmd,
+        cwd=str(PLUGIN_ROOT),
+        stdout=subprocess.PIPE,
+        stderr=subprocess.STDOUT,
+        text=True,
+        bufsize=1,
+    )
+
+    def terminate_children() -> None:
+        stop.set()
+        for proc in (tx_proc, rx_proc):
+            if proc.poll() is None:
+                proc.terminate()
+        deadline = time.monotonic() + 1.5
+        for proc in (tx_proc, rx_proc):
+            while proc.poll() is None and time.monotonic() < deadline:
+                time.sleep(0.05)
+            if proc.poll() is None:
+                proc.kill()
+
+    def _stop(_signum: int, _frame: Any) -> None:
+        terminate_children()
+
+    previous_int = signal.signal(signal.SIGINT, _stop)
+    previous_term = signal.signal(signal.SIGTERM, _stop)
+    tx_lines: "queue.Queue[str]" = queue.Queue()
+    rx_lines: "queue.Queue[str]" = queue.Queue()
+
+    def tx_reader() -> None:
+        assert tx_proc.stdout is not None
+        for line in tx_proc.stdout:
+            tx_lines.put(line.rstrip())
+
+    def rx_reader() -> None:
+        assert rx_proc.stdout is not None
+        for line in rx_proc.stdout:
+            rx_lines.put(line.rstrip())
+
+    threading.Thread(target=tx_reader, daemon=True).start()
+    threading.Thread(target=rx_reader, daemon=True).start()
+    deadline = time.monotonic() + float(args.timeout_s) + float(args.rx_tail_s)
+    recovered: dict[str, Any] | None = None
+    rx_started = False
+    rx_json_events = 0
+    last_rx_notice = time.monotonic()
+    try:
+        while time.monotonic() < deadline and not stop.is_set():
+            while True:
+                try:
+                    tx_line = tx_lines.get_nowait()
+                except queue.Empty:
+                    break
+                if tx_line:
+                    print(f"[tx] {tx_line}", file=sys.stderr, flush=True)
+            try:
+                text = rx_lines.get(timeout=0.1)
+            except queue.Empty:
+                now = time.monotonic()
+                if now - last_rx_notice >= 2.0 and not rx_started and rx_json_events == 0:
+                    last_rx_notice = now
+                    rx_rc = rx_proc.poll()
+                    tx_rc = tx_proc.poll()
+                    if rx_rc is not None:
+                        print(f"[rx] receiver exited rc={rx_rc}", file=sys.stderr, flush=True)
+                        break
+                    print(f"[rx] waiting for receiver telemetry tx_rc={tx_rc}", file=sys.stderr, flush=True)
+                if rx_proc.poll() is not None and tx_proc.poll() is not None:
+                    break
+                continue
+            text = text.strip()
+            if not text:
+                continue
+            event = None
+            if text.startswith("{"):
+                try:
+                    event = json.loads(text)
+                except json.JSONDecodeError:
+                    event = None
+            if event is None:
+                lower_text = text.lower()
+                important_rx_line = (
+                    "error" in lower_text
+                    or "failed" in lower_text
+                    or "traceback" in lower_text
+                    or "exception" in lower_text
+                    or "conflict" in lower_text
+                    or "stream_id=" in lower_text
+                    or text.startswith("using source=")
+                )
+                if args.raw or important_rx_line:
+                    print(f"[rx] {text}", flush=True)
+                if text.startswith("using source=") or "stream_id=" in lower_text:
+                    rx_started = True
+                continue
+            event_type = str(event.get("type") or "")
+            rx_json_events += 1
+            if args.json:
+                print(json.dumps({"type": "rx", "event": event}, separators=(",", ":")), flush=True)
+            elif args.raw and event_type != "metrics":
+                print(f"[rx] {event}", flush=True)
+            if event_type == "page_access_seen":
+                if args.show_page_seen and not args.json:
+                    print(
+                        f"page_seen lap={event.get('lap')} ch={event.get('channel')} "
+                        f"rssi_dbfs={event.get('rssi_dbfs')} ts_us={event.get('ts_us')}",
+                        flush=True,
+                    )
+                continue
+            if event_type == "debug_bin_energy":
+                rx_started = True
+                if not args.json:
+                    print(
+                        f"rx_energy bin={event.get('bin')} rssi_dbfs={event.get('rssi_dbfs')}",
+                        flush=True,
+                    )
+                continue
+            if event_type == "fhs_reject":
+                if args.raw and not args.json:
+                    print(
+                        f"fhs_reject reason={event.get('reason')} address={event.get('address')} "
+                        f"verification={event.get('verification')} ch={event.get('channel')} "
+                        f"rssi_dbfs={event.get('rssi_dbfs')} errors={event.get('errors', 0)}",
+                        flush=True,
+                    )
+                continue
+            if event_type != "passive_fhs_bdaddr":
+                continue
+            lap = str(event.get("lap") or "").upper()
+            uap = str(event.get("uap") or "").upper()
+            if lap == target_lap and (not target_uap or uap == target_uap):
+                verification = str(event.get("verification") or "unchecked")
+                if expected_bdaddr and verification != "match":
+                    if args.json:
+                        print(json.dumps({"type": "page_stimulus_result", "status": "fhs_mismatch", **event}, separators=(",", ":")), flush=True)
+                    else:
+                        print(
+                            f"fhs_mismatch decoded={event.get('address')} expected={expected_bdaddr} "
+                            f"nap={event.get('nap')} uap={uap} lap={lap} channel={event.get('channel')} "
+                            f"rssi_dbfs={event.get('rssi_dbfs')}",
+                            flush=True,
+                        )
+                    continue
+                recovered = event
+                status = "verified_fhs" if verification == "match" else "recovered"
+                if args.json:
+                    print(json.dumps({"type": "page_stimulus_result", "status": status, **event}, separators=(",", ":")), flush=True)
+                else:
+                    print(
+                        f"{status} bd_addr={event.get('address')} nap={event.get('nap')} uap={uap} lap={lap} "
+                        f"channel={event.get('channel')} rssi_dbfs={event.get('rssi_dbfs')} verification={verification}",
+                        flush=True,
+                    )
+                break
+        if recovered is None:
+            if args.json:
+                print(json.dumps({"type": "page_stimulus_result", "status": "timeout", "target_lap": target_lap, "target_uap": target_uap}, separators=(",", ":")), flush=True)
+            else:
+                print(f"page stimulus timed out target={target_uap + ':' if target_uap else ''}{target_lap}; no matching FHS decoded", flush=True)
+            return 1
+        return 0
+    finally:
+        terminate_children()
+        signal.signal(signal.SIGINT, previous_int)
+        signal.signal(signal.SIGTERM, previous_term)
+
+
 def _add_common_gateway_capture_args(parser: argparse.ArgumentParser) -> None:
     parser.add_argument("--device-id", default="hackrf:0")
     parser.add_argument("--driver", default="hackrf", help="SoapySDR driver fallback if --device-id is generic")
@@ -727,6 +1103,12 @@ def _add_common_gateway_capture_args(parser: argparse.ArgumentParser) -> None:
     parser.add_argument("--metrics", action="store_true")
     parser.add_argument("--raw", action="store_true", help="also print non-JSON native sniffer lines")
     parser.add_argument("--show-init-failed", action="store_true")
+    parser.add_argument("--debug-target-lap", default="", help="emit page_access_seen when this LAP access code is observed")
+    parser.add_argument("--no-page-detection", action="store_true", help="suppress page/inquiry access-code events for legacy BTC+BLE behavior")
+    parser.add_argument("--expected-bdaddr", default="", help="full Bluetooth address used to mark FHS events as match/mismatch")
+    parser.add_argument("--debug-fhs-rejects", action="store_true", help="emit limited diagnostics for FHS-shaped packets rejected by validation")
+    parser.add_argument("--fhs-max-fec-errors", type=int, default=0, help="allow this many uncorrectable FHS payload FEC blocks before rejecting")
+    parser.add_argument("--debug-energy-bin", type=int, default=-1, help="emit debug_bin_energy for this 1 MHz bin")
     parser.add_argument("--no-auto-build", action="store_true")
 
 
@@ -747,6 +1129,33 @@ def _build_parser() -> argparse.ArgumentParser:
     combined.add_argument("--debug-bursts", action="store_true")
     combined.add_argument("--max-events", type=int, default=0)
 
+    page = subparsers.add_parser("page-stimulus", help="lab-only active page stimulus and passive FHS/NAP recovery")
+    _add_common_gateway_capture_args(page)
+    page.set_defaults(source="gateway")
+    page.set_defaults(center_mhz=2442.0)
+    page.set_defaults(bandwidth_mhz=60)
+    page.add_argument("--source", choices=("sdr", "gateway"), default="gateway", help="receiver source")
+    page.add_argument("--lab-authorized", action="store_true", help="required: confirms owned/authorized lab target")
+    page.add_argument("--target-lap", required=True, help="target LAP, 6 hex chars")
+    page.add_argument("--target-uap", default="", help="optional expected UAP, 2 hex chars; match any UAP if omitted")
+    page.add_argument("--rx-device-id", default="", help="receiver SDR device; defaults to --device-id")
+    page.add_argument("--tx-device-id", default="", help="transmitter SDR device; defaults to --device-id")
+    page.add_argument("--tx-driver", default="", help="transmitter Soapy driver fallback")
+    page.add_argument("--tx-sample-rate-sps", type=int, default=4_000_000)
+    page.add_argument("--tx-gain-db", type=float, default=0.0)
+    page.add_argument("--tx-vga-gain-db", type=float, default=20.0)
+    page.add_argument("--tx-amplitude", type=float, default=0.35)
+    page.add_argument("--fsk-polarity", choices=("normal", "inverted", "auto"), default="auto")
+    page.add_argument("--edge-mode", choices=("hard", "shaped"), default="hard")
+    page.add_argument("--page-channels", default="all", help="TX channels: all, 0-78, or comma/range list")
+    page.add_argument("--page-dwell-ms", type=float, default=6.0)
+    page.add_argument("--page-guard-us", type=float, default=80.0)
+    page.add_argument("--timeout-s", type=float, default=10.0)
+    page.add_argument("--rx-settle-s", type=float, default=0.4)
+    page.add_argument("--rx-tail-s", type=float, default=1.0)
+    page.add_argument("--dry-run", action="store_true")
+    page.add_argument("--show-page-seen", action="store_true", default=True, help="print RX observations of the target LAP access code")
+
     build = subparsers.add_parser("build", help="build the native Bluetooth Classic sniffer")
     build.add_argument("--no-auto-build", action="store_true")
     return parser
@@ -759,8 +1168,12 @@ def main(argv: list[str] | None = None) -> int:
         return _run_listen(args)
     if args.command == "combined":
         return _run_combined(args)
+    if args.command == "page-stimulus":
+        return _run_page_stimulus(args)
     if args.command == "build":
         print(_ensure_binary(auto_build=not args.no_auto_build))
+        print(_ensure_binary(auto_build=not args.no_auto_build, binary=DEFAULT_GATEWAY_BINARY))
+        print(_ensure_binary(auto_build=not args.no_auto_build, binary=DEFAULT_PAGE_BINARY))
         return 0
     parser.print_help()
     return 2

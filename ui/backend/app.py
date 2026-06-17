@@ -310,6 +310,7 @@ class ExplorerState:
     classic_addresses: list[dict[str, Any]] = field(default_factory=list)
     discovery_table: list[dict[str, Any]] = field(default_factory=list)
     channel_activity: dict[int, dict[str, Any]] = field(default_factory=dict)
+    page_activity: dict[str, dict[str, Any]] = field(default_factory=dict)
     decoder_stats: dict[str, Any] = field(default_factory=dict)
     test_target: dict[str, Any] | None = None
     test_target_error: str = ""
@@ -2607,6 +2608,18 @@ def _btcsniffer_event_from_json(payload: dict[str, Any], center_freq_hz: int, ba
         candidates.append({**event, "uap_hex": f"{payload.get('uap0')} / {payload.get('uap1')}", "score": 0.82})
         return events, candidates
 
+    if event_type == "page_access_seen":
+        event = {
+            **base,
+            "uap": None,
+            "status": str(payload.get("status") or "page_access"),
+            "candidate_count": int(payload.get("candidate_count") or 0),
+            "detail": "page/inquiry access code observed",
+            "notes": [f"Bluetooth Classic access code for LAP {lap} observed on channel {channel}."],
+        }
+        events.append(event)
+        return events, candidates
+
     if event_type in {"lap_resolved", "lap_seen"}:
         uap = str(payload.get("uap") or "").upper()
         event = {
@@ -3968,7 +3981,11 @@ def _scanner_json_to_events(source: str, payload: dict[str, Any]) -> list[dict[s
     if kind == "classic_lap" or protocol in {"btc", "bluetooth_classic", "classic"} or (source_protocol == "btc" and payload.get("lap")):
         payload.setdefault("kind", "classic_lap")
         payload.setdefault("seen_at", now)
-        payload.setdefault("status", payload.get("type") or "observed")
+        if str(payload.get("type") or "") == "page_access_seen":
+            payload.setdefault("status", payload.get("status") or "page_access")
+            payload.setdefault("detail", "page/inquiry access code observed")
+        else:
+            payload.setdefault("status", payload.get("type") or "observed")
         return [payload]
 
     if protocol == "ieee802154" or source_protocol == "zigbee":
@@ -4299,6 +4316,63 @@ def _scanner_json_to_events(source: str, payload: dict[str, Any]) -> list[dict[s
     return []
 
 
+PAGE_ACTIVITY_UI_INTERVAL_S = 0.75
+
+
+def _is_page_access_event(event: dict[str, Any]) -> bool:
+    if str(event.get("kind") or "") != "classic_lap":
+        return False
+    status = str(event.get("status") or event.get("type") or "").lower()
+    return status.startswith("page_access")
+
+
+def _update_page_activity(event: dict[str, Any]) -> bool:
+    lap = re.sub(r"[^0-9A-Fa-f]", "", str(event.get("lap") or "")).upper()
+    if len(lap) != 6:
+        return True
+    now = float(event.get("seen_at") or time.time())
+    channel = event.get("channel")
+    key = f"{lap}:{channel}"
+    previous = state.page_activity.get(key) or {}
+    hits = int(previous.get("hits") or 0) + 1
+    first_seen = float(previous.get("first_seen") or now)
+    last_emit = float(previous.get("last_emit") or 0.0)
+    try:
+        rssi = float(event.get("rssi_dbfs", event.get("last_rssi_dbfs", previous.get("rssi_dbfs", -120.0))))
+    except (TypeError, ValueError):
+        rssi = float(previous.get("rssi_dbfs", -120.0))
+    state.page_activity[key] = {
+        "lap": lap,
+        "channel": channel,
+        "rssi_dbfs": round(rssi, 1),
+        "hits": hits,
+        "first_seen": first_seen,
+        "last_seen": now,
+        "last_emit": now if now - last_emit >= PAGE_ACTIVITY_UI_INTERVAL_S else last_emit,
+        "status": str(event.get("status") or "page_access"),
+    }
+    # Keep detections/UI updates bounded during page/inquiry storms while the
+    # TUI page panel still gets accurate hit counts from page_activity.
+    return now - last_emit >= PAGE_ACTIVITY_UI_INTERVAL_S
+
+
+def _coalesce_detection_events(events: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    if not events:
+        return events
+    filtered: list[dict[str, Any]] = []
+    for event in events:
+        if _is_page_access_event(event):
+            if _update_page_activity(event):
+                filtered.append(event)
+            continue
+        filtered.append(event)
+    cutoff = time.time() - 120.0
+    stale_keys = [key for key, item in state.page_activity.items() if float(item.get("last_seen") or 0.0) < cutoff]
+    for key in stale_keys:
+        state.page_activity.pop(key, None)
+    return filtered
+
+
 def _append_detections(events: list[dict[str, Any]], candidates: list[dict[str, Any]]) -> None:
     if not events and not candidates:
         return
@@ -4312,6 +4386,10 @@ def _append_detections(events: list[dict[str, Any]], candidates: list[dict[str, 
             item["uap"] = str(uap_value or "XX").upper()
             item["full_mac"] = _classic_full_mac(item.get("nap"), item.get("uap"), item.get("lap"))
             item.setdefault("mac", item["full_mac"])
+    with state_lock:
+        events = _coalesce_detection_events(events)
+    if not events and not candidates:
+        return
     _append_csv_rows(events)
     with state_lock:
         for event in events:
@@ -4355,7 +4433,8 @@ def _append_detections(events: list[dict[str, Any]], candidates: list[dict[str, 
         state.detections = (visible_events + state.detections)[:240]
         if candidates:
             state.classic_candidates = (candidates + state.classic_candidates)[:64]
-    _console_render()
+    if not CONSOLE_DASHBOARD:
+        _console_render()
 
 
 def _classic_full_mac(nap: Any = None, uap: Any = None, lap: Any = None) -> str:
@@ -4436,7 +4515,7 @@ def _upsert_discovery_row(event: dict[str, Any]) -> None:
         full_mac = _classic_full_mac(nap, uap, lap)
         target = _classic_test_match(lap, uap)
         identity = full_mac
-        detail = str(event.get("status") or "")
+        detail = str(event.get("detail") or event.get("status") or "")
         if target:
             identity = f"TEST DONGLE {identity}"
             detail = "target-match" if not detail else f"target-match · {detail}"
@@ -5393,10 +5472,10 @@ def _scanner_protocol_from_job_name(job_name: str) -> str:
 
 def _scanner_band_from_command(command: str, protocol: str) -> str:
     text = str(command or "")
-    if protocol == "btc":
+    if protocol in {"btc", "btle+btc", "btc+btle"}:
         match = re.search(r"--center-mhz\s+([0-9.]+)\s+--bandwidth-mhz\s+([0-9]+)", text)
         if match:
-            if "bluetooth_scanner" in text:
+            if "bluetooth_scanner" in text or protocol in {"btle+btc", "btc+btle"}:
                 return f"2.4 GHz ISM shared BTC+BLE · {match.group(1)} MHz / {match.group(2)} MHz BW"
             return f"{match.group(1)} MHz / {match.group(2)} MHz BW"
     if protocol == "ble":
@@ -5510,12 +5589,12 @@ def _console_protocol_count(protocol: str) -> int:
     for row in state.discovery_table:
         if str(row.get("protocol") or "").upper() in aliases:
             total += max(1, int(row.get("detections") or 0))
-    if total > 0:
-        return total
     if protocol == "BTC":
         total = max(total, int(state.classic_bursts_seen or 0))
     elif protocol in {"BLE", "BTLE"}:
         total = max(total, int(state.ble_packets_seen or 0))
+    if total > 0 and protocol not in {"BTC", "BLE", "BTLE"}:
+        return total
     source_needles = {
         "BTC": ("btc", "classic"),
         "BLE": ("ble", "btle"),
@@ -5561,6 +5640,38 @@ def _console_protocol_color(protocol: str) -> str:
         "LFMF": "36;1",
         "CELLULAR": "31;1",
     }.get(protocol, "37;1")
+
+
+def _console_page_activity_lines(*, color: bool = True, limit: int = 6) -> list[str]:
+    now = time.time()
+    items = sorted(
+        list(state.page_activity.values()),
+        key=lambda item: float(item.get("last_seen") or 0.0),
+        reverse=True,
+    )[:limit]
+
+    def style(code: str, text: str) -> str:
+        return _c(code, text) if color else str(text)
+
+    lines = [style("90;1", "Page / Inquiry Activity:")]
+    if not items:
+        lines.append(style("90", "  no page/inquiry access codes yet"))
+        return lines
+    for item in items:
+        lap = str(item.get("lap") or "------")
+        channel = str(item.get("channel") if item.get("channel") is not None else "?")
+        hits = int(item.get("hits") or 0)
+        age = max(0.0, now - float(item.get("last_seen") or now))
+        try:
+            rssi = float(item.get("rssi_dbfs"))
+            rssi_text = f"{rssi:.1f} dBFS"
+        except (TypeError, ValueError):
+            rssi_text = "RSSI ?"
+        lines.append(
+            f"  LAP {style('96;1', lap)}  CH {channel:>2}  "
+            f"{style('32;1', str(hits))} hits  {rssi_text}  {age:.1f}s ago"
+        )
+    return lines
 
 
 def _console_log_style(line: str) -> str:
@@ -5792,6 +5903,8 @@ def _console_packet_info_lines(running: str, enabled: str, logs: list[str]) -> l
         f"  FM: {_c('32;1', 'playing') if fm_playback.running else ('pending' if fm_playback.pending else 'idle')}",
         f"  Walkie: {_c('32;1', 'playing') if walkie_playback.running else ('pending' if walkie_playback.pending else 'idle')}",
         f"  Walkie recent chunks: {walkie_playback.recent_chunks}",
+        "",
+        *_console_page_activity_lines(color=True),
         "",
         _c("90;1", "Recent Backend Log:"),
     ]
@@ -6181,6 +6294,7 @@ if TextualApp is not None:
                     "walkie_state": "playing" if walkie_playback.running else ("pending" if walkie_playback.pending else "idle"),
                     "walkie_recent": int(walkie_playback.recent_chunks or 0),
                     "chunks_by_mode": dict(state.chunks_by_mode or {}),
+                    "page_lines": _console_page_activity_lines(color=False),
                 }
             self.query_one("#summary", Static).update(
                 f"RF Sentinel {running} | enabled {enabled} | web http://{self.host or '127.0.0.1'}:{self.port or '5050'} | "
@@ -6210,6 +6324,8 @@ if TextualApp is not None:
                     f"  FM: {activity['fm_state']}",
                     f"  Walkie: {activity['walkie_state']}",
                     f"  Walkie recent chunks: {activity['walkie_recent']}",
+                    "",
+                    *activity.get("page_lines", []),
                 ]
             )
 
@@ -6315,6 +6431,8 @@ def _parse_scanner_assignment(line: str) -> dict[str, Any] | None:
         job_name = auto_match.group("job")
         protocol = _scanner_protocol_from_job_name(job_name)
         command = auto_match.group("command")
+        if "bluetooth_scanner" in command:
+            protocol = "btle+btc"
         return {
             "device_id": auto_match.group("device"),
             "job_name": job_name,
@@ -6333,6 +6451,8 @@ def _parse_scanner_assignment(line: str) -> dict[str, Any] | None:
             return None
         job_name = cont_match.group("job")
         protocol = _scanner_protocol_from_job_name(job_name)
+        if "bluetooth_scanner" in command:
+            protocol = "btle+btc"
         return {
             "device_id": device_match.group(1),
             "job_name": job_name,
@@ -6563,6 +6683,9 @@ def _start_rf_sentinel_engine(
         cmd.append("--no-lfmf")
     if "cellular" not in protocols:
         cmd.append("--no-cellular")
+    page_detection_enabled = str(os.getenv("RF_SENTINEL_ENABLE_PAGE_DETECTION", "")).strip().lower() in {"1", "true", "yes", "on"}
+    if not page_detection_enabled:
+        cmd.append("--no-page-detection")
     # Start in discovery mode; only the explicit right-click Follow action locks Zigbee.
     zigbee_follow_channel = None
     control = _write_rf_sentinel_control(
@@ -6839,6 +6962,7 @@ def _reset_stats() -> None:
     state.classic_addresses = []
     state.discovery_table = []
     state.channel_activity = {}
+    state.page_activity = {}
     state.decoder_stats = {}
     state.scanner_log = []
 
@@ -7270,11 +7394,12 @@ def start_scan():
             btc_device_id = combined_device_id
             other_sdr_protocols = enabled_protocols & {"zigbee", "tpms", "fm", "cellular"}
             alternate_hop_device_id = _pick_non_bluetooth_hop_device(devices_available, combined_device_id, enabled_devices)
+            # BTC and BLE share the proven wideband bladeRF command:
+            # bluetooth_scanner --device-id <bladeRF> --center-mhz 2442 --bandwidth-mhz 60.
+            # Keep the hop SDR for non-Bluetooth protocols only; sweep-both
+            # cycles separate BTC/BLE jobs and starves the UI of steady updates.
             btle_device_id = combined_device_id
             sentinel_hop_device_id = alternate_hop_device_id or combined_device_id
-            # Keep BTC+BLE on the known-good continuous bluetooth_scanner path.
-            # The old sweep-both mode cycles separate BTC/BLE jobs and starves
-            # the UI of steady Bluetooth updates.
             sweep_both_radios = False
             combined_rate_mhz = max(1, min(BT_CLASSIC_BANK_SIZE, _btc_max_bandwidth_mhz_for_device(combined_device_id)))
             device_meta = next((dev for dev in devices_available if str(dev.get("id") or "") == combined_device_id), None)

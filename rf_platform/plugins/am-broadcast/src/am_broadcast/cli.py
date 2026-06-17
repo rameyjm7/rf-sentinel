@@ -241,7 +241,7 @@ class GatewayReceiver:
     def _stream_payload(self, freq_hz: int) -> dict[str, Any]:
         return {
             "device_id": str(self.args.device_id or "sdrplay:0"),
-            "center_freq_hz": int(freq_hz + int(self.args.tune_offset_hz)),
+            "center_freq_hz": int(freq_hz + int(self.args.tune_offset_hz) + int(getattr(self.args, "upconverter_offset_hz", 0) or 0)),
             "sample_rate_sps": int(self.args.sample_rate_sps),
             "baseband_filter_hz": int(self.args.bandwidth_hz),
             "lna_gain_db": int(float(self.args.rfgr)),
@@ -520,7 +520,8 @@ def _scan_wideband(args: argparse.Namespace, scan_plan: ScanPlan, freqs: list[in
     if args.debug:
         print(
             f"lowfreq_wideband center_khz={center_hz/1000:.1f} sr={args.sample_rate_sps} "
-            f"bandwidth={args.bandwidth_hz} bytes={len(raw)} samples={iq.size}",
+            f"bandwidth={args.bandwidth_hz} upconverter_offset_hz={int(getattr(args, 'upconverter_offset_hz', 0) or 0)} "
+            f"bytes={len(raw)} samples={iq.size}",
             file=sys.stderr,
             flush=True,
         )
@@ -1107,6 +1108,12 @@ def build_parser() -> argparse.ArgumentParser:
     scan.add_argument("--sample-rate-sps", type=int, default=DEFAULT_SAMPLE_RATE_SPS)
     scan.add_argument("--bandwidth-hz", type=int, default=DEFAULT_BANDWIDTH_HZ)
     scan.add_argument("--tune-offset-hz", type=int, default=25_000, help="Tune this far above each channel so the AM carrier avoids DC.")
+    scan.add_argument(
+        "--upconverter-offset-hz",
+        type=int,
+        default=0,
+        help="Add this fixed frequency offset to SDR tuning while keeping reported signal frequencies unchanged.",
+    )
     scan.add_argument("--carrier-width-hz", type=float, default=350.0, help="Narrow FFT window used to score the AM carrier.")
     scan.add_argument("--wideband", dest="wideband", action="store_true", help="Capture one wide IQ buffer and score all requested LF/MF channels from it.")
     scan.add_argument(

@@ -149,6 +149,33 @@ def _score_station_iq(
     return station
 
 
+def _merge_station_candidates(args: argparse.Namespace, candidates: list[StationCandidate]) -> list[StationCandidate]:
+    """Keep the strongest candidate when one FM signal smears into neighboring channels."""
+    merge_hz = max(0, int(getattr(args, "station_merge_hz", 0) or 0))
+    if merge_hz <= 0 or len(candidates) <= 1:
+        return candidates[: int(args.max_stations)]
+    ranked = sorted(candidates, key=lambda item: (item.excess_db, item.power_dbfs), reverse=True)
+    selected: list[StationCandidate] = []
+    for candidate in ranked:
+        if any(abs(candidate.freq_hz - kept.freq_hz) <= merge_hz for kept in selected):
+            continue
+        selected.append(candidate)
+        if len(selected) >= int(args.max_stations):
+            break
+    return sorted(selected, key=lambda item: item.freq_hz)
+
+
+def _sweep_prominence_db(freq: int, power_by_freq: dict[int, float], step_hz: int) -> float:
+    neighbors = [
+        power_by_freq[neighbor]
+        for neighbor in (freq - step_hz, freq + step_hz)
+        if neighbor in power_by_freq
+    ]
+    if not neighbors:
+        return 99.0
+    return float(power_by_freq[freq] - max(neighbors))
+
+
 def _discover_candidates_wideband(args: argparse.Namespace, client: GatewayClient, device_id: str) -> list[StationCandidate]:
     grid = station_grid(int(args.start_freq_hz), int(args.stop_freq_hz), int(args.station_step_hz))
     stations: dict[int, StationCandidate] = {}
@@ -208,7 +235,7 @@ def _discover_candidates_wideband(args: argparse.Namespace, client: GatewayClien
                 file=sys.stderr,
                 flush=True,
             )
-    ranked = sorted(stations.values(), key=lambda item: item.power_dbfs, reverse=True)[: int(args.max_stations)]
+    ranked = _merge_station_candidates(args, list(stations.values()))
     scored: list[StationCandidate] = []
     for station in ranked:
         capture = captures.get(int(station.source_center_hz))
@@ -276,11 +303,19 @@ def _discover_candidates_sweep(args: argparse.Namespace, client: GatewayClient, 
         if args.debug:
             print("fm_sweep samples=0 active=none", file=sys.stderr, flush=True)
         return []
+    power_by_freq = {freq: power for freq, power in powers}
+    step_hz = int(args.station_step_hz)
+    min_prominence_db = float(args.sweep_prominence_db)
     noise = float(np.median([power for _, power in powers]))
     candidates: list[StationCandidate] = []
     for freq, power in powers:
         excess = float(power - noise)
-        if power < float(args.min_power_dbfs) or excess < float(args.active_threshold_db):
+        prominence = _sweep_prominence_db(freq, power_by_freq, step_hz)
+        if (
+            power < float(args.min_power_dbfs)
+            or excess < float(args.active_threshold_db)
+            or prominence < min_prominence_db
+        ):
             continue
         candidates.append(
             StationCandidate(
@@ -291,13 +326,14 @@ def _discover_candidates_sweep(args: argparse.Namespace, client: GatewayClient, 
                 samples=len(samples),
             )
         )
-    candidates.sort(key=lambda item: item.power_dbfs, reverse=True)
+    candidates = _merge_station_candidates(args, candidates)
     if args.debug:
         strongest = sorted(powers, key=lambda item: item[1], reverse=True)[:8]
         summary = ";".join(f"{freq/1e6:.1f}:{power:.1f}" for freq, power in strongest)
         active = ";".join(f"{item.freq_hz/1e6:.1f}:{item.excess_db:.1f}" for item in candidates[:8]) or "none"
         print(
-            f"fm_sweep samples={len(samples)} ranges={','.join(debug_ranges) or '-'} noise={noise:.1f} top={summary} active={active}",
+            f"fm_sweep samples={len(samples)} ranges={','.join(debug_ranges) or '-'} noise={noise:.1f} "
+            f"prom_min={min_prominence_db:.1f} top={summary} active={active}",
             file=sys.stderr,
             flush=True,
         )
@@ -356,7 +392,7 @@ def _discover_candidates_iq(args: argparse.Namespace, client: GatewayClient, dev
             strongest = sorted(zip(visible, powers), key=lambda item: item[1], reverse=True)[:5]
             summary = ";".join(f"{freq/1e6:.1f}:{power:.1f}" for freq, power in strongest)
             print(f"fm_window center={center_hz/1e6:.3f} samples={iq.size} noise={noise:.1f} top={summary}", file=sys.stderr, flush=True)
-    return sorted(stations.values(), key=lambda item: item.power_dbfs, reverse=True)[: int(args.max_stations)]
+    return _merge_station_candidates(args, list(stations.values()))
 
 
 def _score_station(args: argparse.Namespace, client: GatewayClient, device_id: str, station: StationCandidate) -> StationCandidate:
@@ -386,13 +422,19 @@ def _score_station(args: argparse.Namespace, client: GatewayClient, device_id: s
 
 
 def _station_payload(station: StationCandidate) -> dict[str, Any]:
-    freq_mhz = station.freq_hz / 1_000_000.0
+    offset_hz = int(getattr(station, "tuner_offset_hz", 0) or 0)
+    rf_freq_hz = int(station.freq_hz) - offset_hz
+    freq_mhz = rf_freq_hz / 1_000_000.0
+    tuned_freq_mhz = station.freq_hz / 1_000_000.0
     return {
         "protocol": "fm",
         "kind": "fm_station",
         "timestamp": time.time(),
-        "frequency_hz": station.freq_hz,
+        "frequency_hz": rf_freq_hz,
         "frequency_mhz": round(freq_mhz, 1),
+        "tuned_frequency_hz": station.freq_hz,
+        "tuned_frequency_mhz": round(tuned_freq_mhz, 1),
+        "tuner_offset_hz": offset_hz,
         "identity": f"FM {freq_mhz:.1f} MHz",
         "power_dbfs": station.power_dbfs,
         "noise_dbfs": station.noise_dbfs,
@@ -421,8 +463,9 @@ def _run_scan(args: argparse.Namespace) -> int:
     if not candidates and args.debug:
         print("fm_scan active=none", file=sys.stderr, flush=True)
     for station in candidates:
+        setattr(station, "tuner_offset_hz", int(args.tuner_offset_hz))
         scored = station
-        if not station.scored:
+        if not station.scored and not args.skip_decode:
             try:
                 scored = _score_station(args, client, device_id, station)
             except Exception as exc:
@@ -435,6 +478,7 @@ def _run_scan(args: argparse.Namespace) -> int:
         else:
             print(
                 f"fm station {payload['frequency_mhz']:.1f}MHz "
+                f"tuned={payload['tuned_frequency_mhz']:.1f}MHz "
                 f"power={payload['power_dbfs']:.1f}dBFS excess={payload['excess_db']:.1f}dB "
                 f"pilot={payload['pilot_db']:.1f}dB rds={payload['rds_subcarrier_db']:.1f}dB",
                 flush=True,
@@ -451,11 +495,29 @@ def build_parser() -> argparse.ArgumentParser:
     scan.add_argument("--device-id", default="")
     scan.add_argument("--start-freq-hz", type=int, default=DEFAULT_START_HZ)
     scan.add_argument("--stop-freq-hz", type=int, default=DEFAULT_STOP_HZ)
+    scan.add_argument(
+        "--tuner-offset-hz",
+        type=int,
+        default=0,
+        help="subtract this offset from tuned frequencies when reporting RF frequencies, useful for upconverters",
+    )
     scan.add_argument("--station-step-hz", type=int, default=200_000)
+    scan.add_argument(
+        "--station-merge-hz",
+        type=int,
+        default=300_000,
+        help="merge adjacent FM channel candidates within this distance and keep the strongest",
+    )
     scan.add_argument("--sample-rate-sps", type=int, default=DEFAULT_SAMPLE_RATE_SPS)
     scan.add_argument("--channel-width-hz", type=int, default=160_000)
     scan.add_argument("--discovery-mode", choices=("auto", "wideband", "sweep", "iq"), default="auto")
     scan.add_argument("--sweep-bin-width-hz", type=int, default=100_000)
+    scan.add_argument(
+        "--sweep-prominence-db",
+        type=float,
+        default=1.5,
+        help="require a sweep candidate to stand above adjacent FM channels by this many dB",
+    )
     scan.add_argument("--discovery-dwell-s", type=float, default=0.18)
     scan.add_argument("--decode-dwell-s", type=float, default=0.35)
     scan.add_argument("--active-threshold-db", type=float, default=8.0)
@@ -464,6 +526,11 @@ def build_parser() -> argparse.ArgumentParser:
     scan.add_argument("--lna-gain-db", type=int, default=32)
     scan.add_argument("--vga-gain-db", type=int, default=32)
     scan.add_argument("--amp-enable", action="store_true")
+    scan.add_argument(
+        "--skip-decode",
+        action="store_true",
+        help="emit sweep/IQ candidates immediately without retuning for FM audio quality, pilot, and RDS scoring",
+    )
     scan.add_argument("--json", action="store_true")
     scan.add_argument("--debug", action="store_true")
     return parser

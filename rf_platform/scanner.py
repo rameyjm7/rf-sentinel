@@ -192,27 +192,31 @@ def _build_jobs(args: argparse.Namespace) -> tuple[list[ScanJob], list[ScanJob]]
         )
 
     def bluetooth_combined_job(name: str, device_id: str, bandwidth_mhz: int) -> ScanJob:
+        command = [
+            _bin("bluetooth_scanner"),
+            "--device-id",
+            device_id,
+            "--center-mhz",
+            f"{args.btc_center_mhz:.3f}",
+            "--bandwidth-mhz",
+            str(int(bandwidth_mhz)),
+            "--lna-gain-db",
+            str(args.btc_lna_gain_db),
+            "--vga-gain-db",
+            str(args.btc_vga_gain_db),
+            "--amp-gain-db",
+            str(args.btc_amp_gain_db),
+            "--json",
+            "--metrics",
+        ]
+        if args.no_page_detection:
+            command.append("--no-page-detection")
         return ScanJob(
             name=name,
             protocol="btle+btc",
             continuous=True,
             dwell_s=0.0,
-            command=[
-                _bin("bluetooth_scanner"),
-                "--device-id",
-                device_id,
-                "--center-mhz",
-                f"{args.btc_center_mhz:.3f}",
-                "--bandwidth-mhz",
-                str(int(bandwidth_mhz)),
-                "--lna-gain-db",
-                str(args.btc_lna_gain_db),
-                "--vga-gain-db",
-                str(args.btc_vga_gain_db),
-                "--amp-gain-db",
-                str(args.btc_amp_gain_db),
-                "--json",
-            ],
+            command=command,
         )
 
     def zigbee_job(name: str, device_id: str) -> ScanJob:
@@ -1053,6 +1057,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--btc-lna-gain-db", type=float, default=40.0)
     parser.add_argument("--btc-vga-gain-db", type=float, default=40.0)
     parser.add_argument("--btc-amp-gain-db", type=float, default=0.0)
+    parser.add_argument("--no-page-detection", action="store_true", help="legacy Bluetooth mode: suppress page/inquiry access-code events")
 
     parser.add_argument("--ble-slice-s", type=float, default=DEFAULT_JOB_DWELL_S)
     parser.add_argument("--ble-dwell-s", type=float, default=DEFAULT_BLE_DWELL_S)
