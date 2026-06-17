@@ -3436,9 +3436,12 @@
                   ${protocolChip(row.protocol)}
                   ${fcsChip(row)}
                   ${row.inferred_merge ? `<span class="chip inferred">inferred merge${Number(row.inferred_merge_count || 0) > 1 ? ` · ${Number(row.inferred_merge_count || 0)} linked` : ""}</span>` : ""}
+                  ${row.protocol === "BTC" && row.active_piconet ? `<span class="chip protocol-btc">active piconet</span>` : ""}
                   ${deviceType ? `<span class="chip">Type ${deviceType}</span>` : ""}
                   ${deviceTypeDetail ? `<span class="chip">${deviceTypeDetail}</span>` : ""}
                   <span class="chip">${Number(row.detections || 0).toLocaleString()} hits</span>
+                  ${row.protocol === "BTC" && Number(row.candidate_count || 0) > 1 ? `<span class="chip">${Number(row.candidate_count || 0)} UAP candidates</span>` : ""}
+                  ${row.protocol === "BTC" && Number(row.tracking_us || 0) > 0 ? `<span class="chip">${(Number(row.tracking_us || 0) / 1000).toFixed(0)} ms tracked</span>` : ""}
                   ${seenDaysChip(row)}
                   <span class="chip">${age(row.last_seen_at)}</span>
                   <span class="chip">${fmtMaybeDb(row.last_rssi_dbfs)}</span>

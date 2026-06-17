@@ -105,6 +105,7 @@ WIFI_SUPPORTED_CHANNELS = {
 PROTOCOL_DEVICE_OVERRIDES = {"zigbee", "tpms", "walkie", "fm", "cellular"}
 RF_SENTINEL_KEEP_BAD_FCS = os.getenv("RF_SENTINEL_KEEP_BAD_FCS", "0").strip().lower() in {"1", "true", "yes", "on"}
 BLE_IDENTITY_CACHE_PATH = DATA_DIR / "ble_identities.json"
+BTC_NAME_CACHE_PATH = DATA_DIR / "btc_names.json"
 COMPANY_IDENTIFIERS_PATH = DATA_DIR / "company_identifiers.json"
 UUID16_IDENTIFIERS_PATH = DATA_DIR / "uuid16_identifiers.json"
 BTC_SNIFFER_ROOT = Path(os.getenv("BTC_SNIFFER_ROOT", str(PROJECT_ROOT / "rf_platform" / "plugins" / "bluetooth-classic")))
@@ -2106,6 +2107,97 @@ def _remember_ble_identity(
         return dict(row)
 
 
+def _btc_name_keys(address: Any = "", lap: Any = "", uap: Any = "") -> list[str]:
+    keys: list[str] = []
+    address_clean = _classic_mac_key(address)
+    lap_clean = _classic_lap_key(lap or address)
+    uap_clean = re.sub(r"[^0-9A-Fa-f]", "", str(uap or "")).upper()
+    if address_clean:
+        keys.append(f"addr:{address_clean}")
+    if lap_clean and _classic_uap_resolved(uap_clean):
+        keys.append(f"uaplap:{uap_clean}:{lap_clean}")
+    if lap_clean:
+        keys.append(f"lap:{lap_clean}")
+    return list(dict.fromkeys(keys))
+
+
+def _load_btc_name_cache() -> dict[str, dict[str, Any]]:
+    if not BTC_NAME_CACHE_PATH.exists():
+        return {}
+    try:
+        with BTC_NAME_CACHE_PATH.open("r", encoding="utf-8") as fh:
+            data = json.load(fh)
+    except (OSError, json.JSONDecodeError):
+        return {}
+    rows = data.get("devices", data) if isinstance(data, dict) else {}
+    if not isinstance(rows, dict):
+        return {}
+    out: dict[str, dict[str, Any]] = {}
+    for key, value in rows.items():
+        if not isinstance(value, dict):
+            continue
+        name = str(value.get("name") or "").strip()
+        if not name:
+            continue
+        row = {
+            "name": name,
+            "address": _classic_mac_key(value.get("address")),
+            "lap": _classic_lap_key(value.get("lap")),
+            "uap": re.sub(r"[^0-9A-Fa-f]", "", str(value.get("uap") or "")).upper()[:2],
+            "checked_at": float(value.get("checked_at") or value.get("last_seen_at") or 0.0),
+            "last_seen_at": float(value.get("last_seen_at") or value.get("checked_at") or 0.0),
+            "pending": False,
+            "ok": True,
+        }
+        out[str(key)] = row
+    return out
+
+
+def _save_btc_name_cache() -> None:
+    DATA_DIR.mkdir(parents=True, exist_ok=True)
+    payload = {
+        "version": 1,
+        "updated_at": time.time(),
+        "devices": dict(sorted((key, value) for key, value in btc_name_cache.items() if value.get("name"))),
+    }
+    tmp_path = BTC_NAME_CACHE_PATH.with_suffix(".json.tmp")
+    with tmp_path.open("w", encoding="utf-8") as fh:
+        json.dump(payload, fh, indent=2, sort_keys=True)
+        fh.write("\n")
+    tmp_path.replace(BTC_NAME_CACHE_PATH)
+
+
+def _remember_btc_name(name: str, address: Any = "", lap: Any = "", uap: Any = "") -> dict[str, Any]:
+    clean_name = str(name or "").strip()
+    if not clean_name:
+        return {}
+    row = {
+        "name": clean_name,
+        "address": _classic_mac_key(address),
+        "lap": _classic_lap_key(lap or address),
+        "uap": re.sub(r"[^0-9A-Fa-f]", "", str(uap or "")).upper()[:2],
+        "checked_at": time.time(),
+        "last_seen_at": time.time(),
+        "pending": False,
+        "ok": True,
+    }
+    with btc_name_cache_lock:
+        for key in _btc_name_keys(row["address"], row["lap"], row["uap"]):
+            btc_name_cache[key] = dict(row)
+        _save_btc_name_cache()
+    return dict(row)
+
+
+def _cached_btc_name(lap: Any = "", uap: Any = "", address: Any = "") -> str:
+    keys = _btc_name_keys(address, lap, uap)
+    with btc_name_cache_lock:
+        for key in keys:
+            name = str((btc_name_cache.get(key) or {}).get("name") or "").strip()
+            if name:
+                return name
+    return ""
+
+
 company_identifier_lut.update(_load_company_identifier_lut())
 uuid16_identifier_lut.update(_load_uuid16_identifier_lut())
 ble_identity_cache.update(_load_ble_identity_cache())
@@ -4033,11 +4125,16 @@ def _scanner_json_to_events(source: str, payload: dict[str, Any]) -> list[dict[s
     if kind == "classic_lap" or protocol in {"btc", "bluetooth_classic", "classic"} or (source_protocol == "btc" and payload.get("lap")):
         payload.setdefault("kind", "classic_lap")
         payload.setdefault("seen_at", now)
-        if str(payload.get("type") or "") == "page_access_seen":
+        event_type = str(payload.get("type") or "")
+        if event_type == "page_access_seen":
             payload.setdefault("status", payload.get("status") or "page_access")
             payload.setdefault("detail", "page/inquiry access code observed")
+        elif event_type in {"lap_initialized", "lap_resolved", "lap_seen", "lap_narrowed", "lap_two_uap_left"}:
+            payload.setdefault("active_piconet", True)
+            payload.setdefault("status", "active_piconet" if event_type == "lap_seen" else event_type.replace("lap_", ""))
+            payload.setdefault("detail", "active Bluetooth Classic piconet traffic observed")
         else:
-            payload.setdefault("status", payload.get("type") or "observed")
+            payload.setdefault("status", event_type or "observed")
         return [payload]
 
     if protocol == "ieee802154" or source_protocol == "zigbee":
@@ -4512,6 +4609,9 @@ def _apply_btc_name_to_rows(lap: str, name: str, source_address: str) -> None:
     clean_name = str(name or "").strip()
     if len(clean_lap) != 6 or not clean_name:
         return
+    source_clean = _classic_mac_key(source_address)
+    source_uap = source_clean[4:6] if source_clean else ""
+    _remember_btc_name(clean_name, source_clean, clean_lap, source_uap)
     with state_lock:
         for row in state.discovery_table:
             if row.get("protocol") != "BTC" or str(row.get("lap") or "").upper() != clean_lap:
@@ -4539,7 +4639,10 @@ def _btc_name_lookup_worker(address: str, lap: str) -> None:
     except requests.RequestException:
         ok = False
     with btc_name_cache_lock:
-        btc_name_cache[address] = {"name": name, "checked_at": time.time(), "pending": False, "ok": ok}
+        address_clean = _classic_mac_key(address)
+        row = {"name": name, "address": address_clean, "lap": _classic_lap_key(lap), "uap": address_clean[4:6] if address_clean else "", "checked_at": time.time(), "last_seen_at": time.time(), "pending": False, "ok": ok}
+        for key in _btc_name_keys(address_clean, lap, row["uap"]):
+            btc_name_cache[key] = dict(row)
     if ok:
         _apply_btc_name_to_rows(lap, name, address)
 
@@ -4609,6 +4712,55 @@ def _classic_lap_key(value: Any) -> str:
 def _classic_mac_key(value: Any) -> str:
     clean = re.sub(r"[^0-9A-Fa-f]", "", str(value or "")).upper()
     return clean if len(clean) == 12 else ""
+
+
+def _classic_uap_resolved(value: Any) -> bool:
+    clean = re.sub(r"[^0-9A-Fa-f]", "", str(value or "")).upper()
+    return bool(re.fullmatch(r"[0-9A-F]{2}", clean)) and clean not in {"XX"}
+
+
+def _classic_evidence_label(status: Any, event_type: Any = "") -> str:
+    status_text = str(status or "").strip().lower()
+    event_text = str(event_type or "").strip().lower()
+    if event_text == "passive_fhs_bdaddr" or status_text == "passive_fhs":
+        return "Passive FHS BD_ADDR"
+    if event_text == "page_access_seen" or status_text.startswith("page_access"):
+        return "Page / inquiry access"
+    if event_text in {"lap_resolved", "lap_seen"} or status_text in {"resolved", "seen", "active_piconet"}:
+        return "Active piconet"
+    if event_text in {"lap_initialized", "lap_narrowed", "lap_two_uap_left"} or status_text in {"initialized", "brute_forcing"}:
+        return "Active piconet candidate"
+    return "Bluetooth Classic evidence"
+
+
+def _classic_display_identity(lap: Any, uap: Any, nap: Any, full_mac: Any, status: Any, name: Any = "") -> str:
+    clean_name = str(name or "").strip()
+    if clean_name:
+        return clean_name
+    lap_key = _classic_lap_key(lap)
+    if _classic_uap_resolved(uap):
+        return str(full_mac or _classic_full_mac(nap, uap, lap)).upper()
+    label = _classic_evidence_label(status)
+    if label.startswith("Active piconet") and lap_key:
+        return f"Active piconet {lap_key}"
+    if lap_key:
+        return f"LAP {lap_key}"
+    return "Bluetooth Classic"
+
+
+def _classic_identity_source(event: dict[str, Any], lap: str, uap: str) -> str:
+    event_type = str(event.get("type") or "")
+    status = str(event.get("status") or "")
+    if _classic_uap_resolved(uap):
+        return "LAP extracted from Classic access code; UAP validated from packet header HEC across active traffic."
+    if event_type == "page_access_seen" or status.startswith("page_access"):
+        return f"Bluetooth Classic access code for LAP {lap} observed during page/inquiry style traffic."
+    candidate_count = event.get("candidate_count")
+    suffix = f"; {candidate_count} UAP candidates remain" if candidate_count not in {None, "", 0} else ""
+    return f"LAP extracted from connected Bluetooth Classic piconet access code{suffix}."
+
+
+btc_name_cache.update(_load_btc_name_cache())
 
 
 def _history_date_from_row(row: dict[str, str]) -> str:
@@ -4859,9 +5011,14 @@ def _upsert_discovery_row(event: dict[str, Any]) -> None:
         uap = str(event.get("uap") or "XX").upper()
         nap = str(event.get("nap") or "XXXX").upper()
         full_mac = _classic_full_mac(nap, uap, lap)
+        event_type = str(event.get("type") or "")
+        status = str(event.get("status") or event_type or "observed")
+        if event_type in {"lap_initialized", "lap_resolved", "lap_seen", "lap_narrowed", "lap_two_uap_left"} and status == event_type:
+            status = "active_piconet" if event_type == "lap_seen" else event_type.replace("lap_", "")
+        evidence_label = _classic_evidence_label(status, event_type)
         target = _classic_test_match(lap, uap)
-        identity = full_mac
-        detail = str(event.get("detail") or event.get("status") or "")
+        identity = _classic_display_identity(lap, uap, nap, full_mac, status, event.get("name"))
+        detail = str(event.get("detail") or evidence_label)
         if target:
             identity = f"TEST DONGLE {identity}"
             detail = "target-match" if not detail else f"target-match · {detail}"
@@ -4869,18 +5026,31 @@ def _upsert_discovery_row(event: dict[str, Any]) -> None:
             "key": f"btc:{lap}",
             "protocol": "BTC",
             "identity": identity,
-            "mac": full_mac,
+            "mac": full_mac if _classic_uap_resolved(uap) else f"LAP {lap}",
             "nap": nap,
             "uap": uap,
             "lap": lap,
             "full_mac": full_mac,
             "detail": detail,
+            "status": status,
+            "event_type": event_type,
+            "active_piconet": bool(event.get("active_piconet") or evidence_label.startswith("Active piconet")),
+            "device_type": "Bluetooth Classic",
+            "device_type_detail": evidence_label,
+            "identity_source": _classic_identity_source(event, lap, uap),
             "target": bool(target),
             "detections": 1,
             "last_seen_at": now,
             "last_rssi_dbfs": event.get("rssi_dbfs"),
             "channel": event.get("channel"),
             "center_freq_hz": event.get("center_freq_hz"),
+            "candidate_count": event.get("candidate_count"),
+            "tracking_us": event.get("tracking_us"),
+            "processed_packets": event.get("processed_packets"),
+            "broken_packets": event.get("broken_packets"),
+            "access_word": event.get("access_word"),
+            "btcsniffer_bin": event.get("btcsniffer_bin"),
+            "uaps": event.get("uaps"),
         }
     elif event.get("kind") == "zigbee_frame":
         source_address = str(event.get("source_address") or "").strip()
@@ -5140,8 +5310,20 @@ def _upsert_discovery_row(event: dict[str, Any]) -> None:
             if existing_nap not in {"", "XXXX", "XX:XX", "NONE"} and row_nap in {"", "XXXX", "XX:XX", "NONE"}:
                 row["nap"] = existing_nap
             row["full_mac"] = _classic_full_mac(row.get("nap"), row.get("uap"), row.get("lap"))
-            row["mac"] = row["full_mac"]
-            row["identity"] = row["full_mac"]
+            row["mac"] = row["full_mac"] if _classic_uap_resolved(row.get("uap")) else f"LAP {row.get('lap')}"
+            row["identity"] = _classic_display_identity(
+                row.get("lap"),
+                row.get("uap"),
+                row.get("nap"),
+                row.get("full_mac"),
+                row.get("status"),
+                row.get("name") or existing.get("name"),
+            )
+            row.setdefault("device_type", existing.get("device_type") or "Bluetooth Classic")
+            row.setdefault("device_type_detail", existing.get("device_type_detail") or _classic_evidence_label(row.get("status"), row.get("event_type")))
+            row.setdefault("identity_source", existing.get("identity_source") or _classic_identity_source(row, str(row.get("lap") or ""), str(row.get("uap") or "")))
+            if existing.get("active_piconet") and "active_piconet" not in row:
+                row["active_piconet"] = existing.get("active_piconet")
             if existing.get("target") and not row.get("target"):
                 row["target"] = True
             if row.get("target"):

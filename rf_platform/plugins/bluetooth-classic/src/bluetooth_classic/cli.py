@@ -77,6 +77,10 @@ def _normalize_native_json_event(event: dict[str, Any], args: argparse.Namespace
     if event_type == "page_access_seen":
         event.setdefault("status", "page_access")
         event.setdefault("detail", "page/inquiry access code observed")
+    elif event_type in {"lap_initialized", "lap_resolved", "lap_seen", "lap_narrowed", "lap_two_uap_left"}:
+        event.setdefault("active_piconet", True)
+        event.setdefault("status", "active_piconet" if event_type == "lap_seen" else event_type.replace("lap_", ""))
+        event.setdefault("detail", "active Bluetooth Classic piconet traffic observed")
     return event
 
 
