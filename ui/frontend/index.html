@@ -1499,6 +1499,40 @@
         font-size: 0.88rem;
       }
 
+      .config-switch {
+        width: 50px;
+        min-width: 50px;
+        height: 28px;
+        border-radius: 999px;
+        background: rgba(255, 255, 255, 0.16);
+        border: 1px solid rgba(255, 255, 255, 0.22);
+        padding: 3px;
+        display: inline-flex;
+        align-items: center;
+        transition: background 0.18s ease, border-color 0.18s ease, box-shadow 0.18s ease;
+      }
+
+      .config-switch::before {
+        content: "";
+        width: 20px;
+        height: 20px;
+        border-radius: 50%;
+        background: #fffdf8;
+        box-shadow: 0 2px 8px rgba(0, 0, 0, 0.38);
+        transform: translateX(0);
+        transition: transform 0.18s ease;
+      }
+
+      .config-switch.on {
+        background: linear-gradient(135deg, var(--teal), #25d0bd);
+        border-color: rgba(37, 208, 189, 0.85);
+        box-shadow: 0 0 0 3px rgba(37, 208, 189, 0.16);
+      }
+
+      .config-switch.on::before {
+        transform: translateX(22px);
+      }
+
       .config-actions {
         margin-top: 16px;
         display: flex;
@@ -4564,7 +4598,7 @@
                   <strong>${option.label}</strong>
                   <span>${option.detail}</span>
                 </div>
-                ${materialIcon(active ? "check_box" : "check_box_outline_blank")}
+                <span class="config-switch ${active ? "on" : ""}" role="switch" aria-checked="${active ? "true" : "false"}"></span>
               </button>
             `);
           });
@@ -4799,8 +4833,11 @@
           draft[optionKey] = !Boolean(draft[optionKey]);
           protocolConfigDraft = { key: "btc", bluetooth_classic: draft };
           btcButton.classList.toggle("active", Boolean(draft[optionKey]));
-          const icon = btcButton.querySelector(".material-symbols-rounded");
-          if (icon) icon.textContent = draft[optionKey] ? "check_box" : "check_box_outline_blank";
+          const switchEl = btcButton.querySelector(".config-switch");
+          if (switchEl) {
+            switchEl.classList.toggle("on", Boolean(draft[optionKey]));
+            switchEl.setAttribute("aria-checked", draft[optionKey] ? "true" : "false");
+          }
         } else {
           protocolConfigDraft = {
             key: String(deviceButton.dataset.protocolDeviceKey || "").toLowerCase(),
