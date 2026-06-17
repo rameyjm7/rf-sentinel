@@ -24,6 +24,28 @@ def main() -> int:
     app = module.app
     host = os.getenv("RF_SENTINEL_HOST", os.getenv("BT_EXPLORER_HOST", "0.0.0.0"))
     port = int(os.getenv("RF_SENTINEL_PORT", os.getenv("BT_EXPLORER_PORT", "5050")))
+    run_textual_console_dashboard = getattr(module, "run_textual_console_dashboard", None)
+    if callable(run_textual_console_dashboard) and os.getenv("RF_SENTINEL_TEXTUAL_CONSOLE", "1").strip().lower() not in {"0", "false", "no", "off"}:
+        def run_flask() -> None:
+            try:
+                app.run(host=host, port=port, threaded=True, use_reloader=False)
+            except Exception as exc:
+                append_log = getattr(module, "_console_append_log", None)
+                if callable(append_log):
+                    append_log(f"Flask server stopped: {exc}")
+
+        flask_thread = module.threading.Thread(target=run_flask, daemon=True)
+        flask_thread.start()
+        try:
+            if run_textual_console_dashboard(host, port):
+                return 0
+        except KeyboardInterrupt:
+            print("\n[ui] Ctrl+C received, disconnecting from sdr-gateway...", file=sys.stderr)
+        finally:
+            shutdown = getattr(module, "shutdown", None)
+            if callable(shutdown):
+                shutdown()
+        return 0
     start_console_dashboard = getattr(module, "start_console_dashboard", None)
     if callable(start_console_dashboard):
         start_console_dashboard(host, port)

@@ -27,6 +27,19 @@ from flask import Flask, Response, jsonify, request, send_from_directory
 from werkzeug.exceptions import BadRequest
 from websocket._exceptions import WebSocketConnectionClosedException
 
+try:
+    from rich.text import Text
+    from textual.app import App as TextualApp
+    from textual.app import ComposeResult
+    from textual.containers import Horizontal, Vertical
+    from textual.widgets import DataTable, Footer, Header, RichLog, Static
+except Exception:
+    Text = None
+    TextualApp = None
+    ComposeResult = Any
+    Horizontal = Vertical = None
+    DataTable = Footer = Header = RichLog = Static = None
+
 
 BLE_ADV_CHANNELS = {
     37: 2_402_000_000,
@@ -1564,6 +1577,7 @@ console_log_lines: list[str] = []
 console_last_render = 0.0
 console_dashboard_stop = threading.Event()
 console_dashboard_thread: threading.Thread | None = None
+console_textual_active = threading.Event()
 inquiry_process: subprocess.Popen[str] | None = None
 btc_engine_process: subprocess.Popen[str] | None = None
 btc_engine_thread: threading.Thread | None = None
@@ -5445,6 +5459,8 @@ def _console_append_log(line: str) -> None:
     with console_lock:
         console_log_lines.append(f"{timestamp} {text}")
         del console_log_lines[:-CONSOLE_LOG_BUFFER_LINES]
+    if console_textual_active.is_set():
+        return
     _console_render()
 
 
@@ -5512,6 +5528,7 @@ def _console_protocol_color(protocol: str) -> str:
         "ZIGBEE": "35;1",
         "TPMS": "33;1",
         "WALKIE": "33;1",
+        "WALKIE-AUDIO": "33;1",
         "WIFI": "32;1",
         "FM": "33;1",
         "FM-AUDIO": "33;1",
@@ -5635,6 +5652,10 @@ def _console_term_width() -> int:
     return max(72, min(180, shutil.get_terminal_size((120, 32)).columns - 1))
 
 
+def _console_term_height() -> int:
+    return max(24, min(80, shutil.get_terminal_size((120, 32)).lines))
+
+
 def _console_fit(text: str, width: int) -> str:
     clean = str(text or "").replace("\r", " ").replace("\n", " ").replace("\t", " ").strip()
     visible = ANSI_RE.sub("", clean)
@@ -5650,35 +5671,148 @@ def _console_scrollbar(total: int, visible: int) -> list[str]:
         return [" "] * visible
     thumb = max(1, min(visible, int(round((visible / max(1, total)) * visible))))
     top = visible - thumb
-    return ["#" if top <= idx < top + thumb else "|" for idx in range(visible)]
+    return ["█" if top <= idx < top + thumb else "│" for idx in range(visible)]
 
 
-def _console_box(title: str, lines: list[str], width: int, height: int | None = None, scrollbar: bool = False, total_lines: int | None = None) -> list[str]:
+def _console_box(
+    title: str,
+    lines: list[str],
+    width: int,
+    height: int | None = None,
+    scrollbar: bool = False,
+    total_lines: int | None = None,
+    border_color: str = "36;1",
+) -> list[str]:
     width = max(40, int(width))
     title_text = f" {title.strip()} "
-    top = _c("90", "+") + _c("36;1", title_text) + _c("90", "-" * max(0, width - len(title_text) - 2) + "+")
-    bottom = _c("90", "+" + "-" * (width - 2) + "+")
+    top = _c(border_color, "┏" + title_text + ("━" * max(0, width - len(title_text) - 2)) + "┓")
+    bottom = _c(border_color, "┗" + ("━" * max(0, width - 2)) + "┛")
+    side = _c(border_color, "┃")
     if height is not None:
         body = list(lines[-height:])
         while len(body) < height:
             body.insert(0, "")
     else:
         body = list(lines)
-    bar = _console_scrollbar(int(total_lines if total_lines is not None else len(lines)), len(body)) if scrollbar else [""] * len(body)
-    content_width = width - (5 if scrollbar else 4)
+    total = int(total_lines if total_lines is not None else len(lines))
+    show_scrollbar = bool(scrollbar and total > len(body))
+    bar = _console_scrollbar(total, len(body)) if show_scrollbar else [""] * len(body)
+    content_width = width - (5 if show_scrollbar else 4)
     rendered = [top]
     for idx, line in enumerate(body):
-        scroll = _c("36;1", bar[idx]) if bar[idx] == "#" else _c("90", bar[idx])
-        if scrollbar:
-            rendered.append(f"{_c('90', '|')} {_console_fit(line, content_width)}{scroll}{_c('90', '|')}")
+        scroll = _c(border_color, bar[idx]) if bar[idx] == "█" else _c("90", bar[idx])
+        if show_scrollbar:
+            rendered.append(f"{side} {_console_fit(line, content_width)}{scroll}{side}")
         else:
-            rendered.append(f"{_c('90', '|')} {_console_fit(line, content_width)} {_c('90', '|')}")
+            rendered.append(f"{side} {_console_fit(line, content_width)} {side}")
     rendered.append(bottom)
     return rendered
 
 
+def _console_join_columns(left: list[str], right: list[str], gap: int = 2) -> list[str]:
+    height = max(len(left), len(right))
+    left_width = max((len(ANSI_RE.sub("", line)) for line in left), default=0)
+    blank_left = " " * left_width
+    joined: list[str] = []
+    for idx in range(height):
+        left_line = left[idx] if idx < len(left) else blank_left
+        right_line = right[idx] if idx < len(right) else ""
+        left_visible = len(ANSI_RE.sub("", left_line))
+        joined.append(f"{left_line}{' ' * max(0, left_width - left_visible + gap)}{right_line}")
+    return joined
+
+
+def _console_packet_info_lines(running: str, enabled: str, logs: list[str]) -> list[str]:
+    total_detections = sum(max(1, int(row.get("detections") or 0)) for row in state.discovery_table)
+    lines = [
+        _c("90;1", "=== RF Activity ==="),
+        f"Total Detections:  {_c('32;1', str(total_detections))}",
+        f"Classic Bursts:    {_c('96;1', str(int(state.classic_bursts_seen or 0)))}",
+        f"BLE Packets:       {_c('34;1', str(int(state.ble_packets_seen or 0)))}",
+        f"Chunks Seen:       {_c('37;1', str(int(state.chunks_seen or 0)))}",
+        f"Last RSSI:         {_c('33;1', f'{float(state.last_rssi_dbfs or -120.0):.1f} dBFS')}",
+        "",
+        _c("90;1", "Settings:"),
+        f"  state: {running}",
+        f"  enabled: {enabled}",
+        f"  csv run: {state.csv_run_id or '-'}",
+        "",
+        _c("90;1", "Audio:"),
+        f"  FM: {_c('32;1', 'playing') if fm_playback.running else ('pending' if fm_playback.pending else 'idle')}",
+        f"  Walkie: {_c('32;1', 'playing') if walkie_playback.running else ('pending' if walkie_playback.pending else 'idle')}",
+        f"  Walkie recent chunks: {walkie_playback.recent_chunks}",
+        "",
+        _c("90;1", "Recent Backend Log:"),
+    ]
+    lines.extend(logs or [_c("90", "  (no backend log messages yet)")])
+    return lines
+
+
+def _console_channel_stats_lines() -> list[str]:
+    protocol_order = ["BTC", "BTLE", "ZIGBEE", "TPMS", "WALKIE", "WIFI", "FM", "LFMF", "CELLULAR"]
+    lines = [_c("90;1", "=== Protocol Counters ===")]
+    for protocol in protocol_order:
+        count = _console_protocol_count(protocol)
+        if count <= 0 and protocol not in {str(item).upper() for item in state.decoder_stats.get("enabled_protocols", [])}:
+            continue
+        label = _c(_console_protocol_color(protocol), f"{protocol:<8}")
+        lines.append(f"  {label} | {count:>8}")
+    if len(lines) == 1:
+        lines.append(_c("90", "  no protocol activity yet"))
+    lines.append("")
+    lines.append(_c("90;1", "Mode Counters:"))
+    for mode, chunks in sorted((state.chunks_by_mode or {}).items(), key=lambda item: str(item[0])):
+        rssi = state.rssi_by_mode.get(mode, -120.0)
+        lines.append(f"  {str(mode)[:18]:<18} | {int(chunks or 0):>7} | {float(rssi):>6.1f} dBFS")
+    if not state.chunks_by_mode:
+        lines.append(_c("90", "  no stream chunks yet"))
+    return lines
+
+
+def _textual_default_scan_payload() -> dict[str, Any]:
+    config = _read_ui_config()
+    devices_available = _available_devices()
+    disabled_devices = {str(item).strip() for item in config.get("disabled_devices", []) if str(item).strip()}
+    enabled_devices = _enabled_devices_from_disabled(devices_available, disabled_devices)
+    protocols = sorted((set(config.get("protocols", [])) or RF_SENTINEL_PROTOCOLS) & RF_SENTINEL_PROTOCOLS)
+    btc_device_id = _pick_ism24_bluetooth_device(devices_available, enabled_devices)
+    if not btc_device_id:
+        btc_device_id = _pick_device(devices_available, "bladerf")
+    hop_device_id = _pick_non_bluetooth_hop_device(devices_available, btc_device_id, enabled_devices)
+    if not hop_device_id:
+        hop_device_id = _pick_device(devices_available, "hackrf", btc_device_id or "sidekiq")
+    return {
+        "device_id": btc_device_id or hop_device_id,
+        "btc_device_id": btc_device_id,
+        "btle_device_id": hop_device_id or btc_device_id,
+        "btc_engine": BTC_ENGINE_DEFAULT,
+        "btc_center_mhz": 2442.0,
+        "btc_target_mac": "",
+        "mode": "sentinel",
+        "hop_device_id": hop_device_id or btc_device_id,
+        "channel": 37,
+        "ble_channel": 37,
+        "sample_rate_sps": 60_000_000,
+        "lna_gain_db": 40,
+        "vga_gain_db": 32,
+        "btc_lna_gain_db": 40,
+        "btc_vga_gain_db": 32,
+        "btle_lna_gain_db": 40,
+        "btle_vga_gain_db": 16,
+        "preserve_detections": False,
+        "protocols": protocols,
+        "devices": sorted(enabled_devices),
+        "wifi_channels": config.get("wifi_channels", [1, 6, 11]),
+        "protocol_devices": config.get("protocol_devices", {}),
+        "sweep_both_radios": False,
+    }
+
+
 def _console_sdr_lines(rows: list[dict[str, Any]]) -> list[str]:
-    lines = [_c("90;1", f"{'DEVICE':<14} {'PROTO':<10} {'CENTER':<18} {'COUNT':>8}  BAND")]
+    lines = [
+        _c("90;1", f"{'DEVICE':<18} | {'PROTO':<12} | {'CENTER':<18} | {'COUNT':>8} | BAND"),
+        _c("32;1", "━" * 78),
+    ]
     for row in rows:
         device = str(row.get("device") or "")
         protocol = str(row.get("protocol") or "")
@@ -5688,10 +5822,10 @@ def _console_sdr_lines(rows: list[dict[str, Any]]) -> list[str]:
         if not protocol:
             lines.append(_c("90", device))
             continue
-        chip = _c(_console_protocol_color(protocol), f"{protocol:<10}")
+        chip = _c(_console_protocol_color(protocol), f"{protocol:<12}")
         center_text = _c("36", f"{center:<18}")
         count_text = f"{int(count):>8}" if isinstance(count, int) else f"{str(count):>8}"
-        lines.append(f"{_c('37;1', f'{device:<14}')} {chip} {center_text} {_c('32;1', count_text)}  {_c('37', band)}")
+        lines.append(f"{_c('37;1', f'{device:<18}')} | {chip} | {center_text} | {_c('32;1', count_text)} | {_c('37', band)}")
     return lines
 
 
@@ -5711,17 +5845,49 @@ def _console_render(force: bool = False) -> None:
         running = "running" if state.running else "idle"
         enabled = ", ".join(str(item).upper() for item in state.decoder_stats.get("enabled_protocols", [])) or "-"
     width = _console_term_width()
-    divider = "=" * width
+    height = _console_term_height()
     log_lines = [_console_log_style(line) for line in (logs or ["(no backend log messages yet)"])]
+    top_panel_height = max(9, min(18, (height - 8) // 2))
+    bottom_panel_height = max(8, height - top_panel_height - 7)
+    gap = 2
+    left_width = max(40, (width - gap) // 2)
+    right_width = max(40, width - left_width - gap)
+    packet_lines = _console_packet_info_lines(running, enabled, log_lines)
+    channel_lines = _console_channel_stats_lines()
     sdr_lines = _console_sdr_lines(rows)
+    left_panel = _console_box(
+        "RF Activity",
+        packet_lines,
+        left_width,
+        height=top_panel_height,
+        scrollbar=True,
+        total_lines=len(packet_lines),
+        border_color="34;1",
+    )
+    right_panel = _console_box(
+        "Protocol Counters",
+        channel_lines,
+        right_width,
+        height=top_panel_height,
+        scrollbar=True,
+        total_lines=len(channel_lines),
+        border_color="35;1",
+    )
+    bottom_panel = _console_box(
+        "Radios / Current Work",
+        sdr_lines,
+        width,
+        height=bottom_panel_height,
+        scrollbar=True,
+        total_lines=len(sdr_lines),
+        border_color="32;1",
+    )
     output = [
         "\033[2J\033[H",
         _c("36;1", "RF Sentinel backend").ljust(width),
         f"{_c('90', 'State:')} {_c('32;1' if running == 'running' else '33;1', running)}   {_c('90', 'Enabled:')} {_c('37', enabled)}",
-        _c("90", divider),
-        *_console_box("Flask / backend log", log_lines, width, height=CONSOLE_LOG_VIEW_LINES, scrollbar=True, total_lines=len(all_logs)),
-        _c("90", divider),
-        *_console_box("SDRs / current work", sdr_lines, width),
+        *_console_join_columns(left_panel, right_panel, gap=gap),
+        *bottom_panel,
         "",
     ]
     try:
@@ -5734,6 +5900,322 @@ def _console_render(force: bool = False) -> None:
 def _console_dashboard_loop() -> None:
     while not console_dashboard_stop.wait(CONSOLE_REFRESH_S):
         _console_render(force=True)
+
+
+if TextualApp is not None:
+    class RFSentinelConsoleApp(TextualApp[None]):
+        CSS = """
+        Screen {
+            layout: vertical;
+            background: #071011;
+            color: #d7e7df;
+        }
+
+        Header, Footer {
+            background: #0b1d1f;
+            color: #d7e7df;
+        }
+
+        #summary {
+            height: 3;
+            padding: 0 1;
+            content-align: left middle;
+            background: #10282b;
+            color: #d7e7df;
+        }
+
+        #top-row {
+            height: 1fr;
+            min-height: 12;
+        }
+
+        #bottom-row {
+            height: 2fr;
+            min-height: 10;
+        }
+
+        .pane {
+            height: 100%;
+            border: solid $accent;
+            padding: 0 1;
+        }
+
+        #activity-pane {
+            width: 1fr;
+            border-title-color: #7aa2ff;
+            border: solid #406ee8;
+        }
+
+        #protocol-pane {
+            width: 1fr;
+            border-title-color: #ff7ad9;
+            border: solid #a84fd7;
+        }
+
+        #log-pane {
+            width: 3fr;
+            border-title-color: #7aa2ff;
+            border: solid #406ee8;
+        }
+
+        #radios-pane {
+            width: 2fr;
+            border-title-color: #58d68d;
+            border: solid #2fae66;
+        }
+
+        Static {
+            scrollbar-color: #58d68d #10282b;
+            scrollbar-size: 1 1;
+        }
+
+        RichLog {
+            background: #081719;
+            scrollbar-color: #7aa2ff #10282b;
+            scrollbar-size: 1 1;
+            overflow-x: scroll;
+            overflow-y: scroll;
+        }
+
+        DataTable {
+            background: #081719;
+            color: #d7e7df;
+            scrollbar-color: #58d68d #10282b;
+            scrollbar-size: 1 1;
+        }
+        """
+
+        BINDINGS = [
+            ("q", "quit", "Quit"),
+            ("r", "toggle_scan", "Start/Stop"),
+            ("u", "refresh_now", "Refresh"),
+            ("l", "focus_log", "Log"),
+            ("d", "focus_radios", "Radios"),
+            ("=", "widen_log", "Widen Log"),
+            ("-", "narrow_log", "Narrow Log"),
+            ("b", "toggle_bottom_space", "Bottom Size"),
+        ]
+
+        def __init__(self, *, host: str = "", port: int | str = "") -> None:
+            super().__init__()
+            self.host = str(host or "")
+            self.port = str(port or "")
+            self._log_seen = 0
+            self._log_weight = 3
+            self._radios_weight = 2
+            self._bottom_large = True
+            self._scan_toggle_pending = False
+
+        def compose(self) -> ComposeResult:
+            yield Header(show_clock=True)
+            yield Static("Starting RF Sentinel backend...", id="summary")
+            with Horizontal(id="top-row"):
+                yield Static("", id="activity-pane", classes="pane")
+                yield DataTable(id="protocol-pane", classes="pane")
+            with Horizontal(id="bottom-row"):
+                yield RichLog(id="log-pane", classes="pane", highlight=True, markup=True, wrap=False, min_width=140)
+                yield DataTable(id="radios-pane", classes="pane")
+            yield Footer()
+
+        def on_mount(self) -> None:
+            self.title = "RF Sentinel Console"
+            self.sub_title = f"http://{self.host or '127.0.0.1'}:{self.port or '5050'}"
+            self.query_one("#activity-pane", Static).border_title = "RF Activity"
+            self.query_one("#protocol-pane", DataTable).border_title = "Protocol Counters"
+            log_pane = self.query_one("#log-pane", RichLog)
+            log_pane.border_title = "Backend Log"
+            log_pane.wrap = False
+            log_pane.min_width = 140
+            log_pane.styles.overflow_x = "scroll"
+            log_pane.styles.overflow_y = "scroll"
+            log_pane.show_horizontal_scrollbar = True
+            log_pane.show_vertical_scrollbar = True
+            self.query_one("#radios-pane", DataTable).border_title = "Radios / Current Work"
+            protocols = self.query_one("#protocol-pane", DataTable)
+            protocols.cursor_type = "row"
+            protocols.zebra_stripes = True
+            protocols.add_columns("Protocol", "Count", "Status")
+            radios = self.query_one("#radios-pane", DataTable)
+            radios.cursor_type = "row"
+            radios.zebra_stripes = True
+            radios.add_columns("Device", "Protocol", "Center", "Count", "Band")
+            self._apply_layout_weights()
+            self.set_interval(0.5, self._refresh)
+            self._refresh()
+
+        def action_refresh_now(self) -> None:
+            self._refresh()
+
+        def action_toggle_scan(self) -> None:
+            if self._scan_toggle_pending:
+                _console_append_log("[tui] scan toggle already in progress")
+                return
+            self._scan_toggle_pending = True
+            threading.Thread(target=self._toggle_scan_worker, daemon=True).start()
+
+        def action_focus_log(self) -> None:
+            self.query_one("#log-pane", RichLog).focus()
+
+        def action_focus_radios(self) -> None:
+            self.query_one("#radios-pane", DataTable).focus()
+
+        def action_widen_log(self) -> None:
+            self._log_weight = min(6, self._log_weight + 1)
+            self._radios_weight = max(1, self._radios_weight - 1) if self._log_weight >= 4 else self._radios_weight
+            self._apply_layout_weights()
+
+        def action_narrow_log(self) -> None:
+            self._log_weight = max(1, self._log_weight - 1)
+            self._radios_weight = min(5, self._radios_weight + 1)
+            self._apply_layout_weights()
+
+        def action_toggle_bottom_space(self) -> None:
+            self._bottom_large = not self._bottom_large
+            self._apply_layout_weights()
+
+        def _apply_layout_weights(self) -> None:
+            top_row = self.query_one("#top-row")
+            bottom_row = self.query_one("#bottom-row")
+            log_pane = self.query_one("#log-pane", RichLog)
+            radios_pane = self.query_one("#radios-pane", DataTable)
+            top_row.styles.height = "1fr"
+            bottom_row.styles.height = "3fr" if self._bottom_large else "2fr"
+            log_pane.styles.width = f"{self._log_weight}fr"
+            radios_pane.styles.width = f"{self._radios_weight}fr"
+
+        def _toggle_scan_worker(self) -> None:
+            try:
+                with state_lock:
+                    running = bool(state.running)
+                if running:
+                    _stop_scan()
+                    _console_append_log("[tui] stopped RF Sentinel scan")
+                    return
+                payload = _textual_default_scan_payload()
+                _console_append_log("[tui] starting RF Sentinel scan")
+                with app.test_request_context("/api/scan/start", method="POST", json=payload):
+                    response = app.make_response(start_scan())
+                data = response.get_json(silent=True) or {}
+                if response.status_code >= 400:
+                    detail = data.get("detail") or data.get("error") or f"HTTP {response.status_code}"
+                    raise RuntimeError(str(detail))
+                mode = data.get("mode") or payload.get("mode", "sentinel")
+                _console_append_log(f"[tui] started RF Sentinel scan mode={mode}")
+            except Exception as exc:
+                _console_append_log(f"[tui] scan toggle failed: {exc}")
+            finally:
+                with contextlib.suppress(Exception):
+                    self.call_from_thread(self._scan_toggle_done)
+
+        def _scan_toggle_done(self) -> None:
+            self._scan_toggle_pending = False
+            self._refresh()
+
+        def _refresh(self) -> None:
+            with console_lock:
+                logs = list(console_log_lines)
+            with state_lock:
+                running = "running" if state.running else "idle"
+                enabled_items = [str(item).upper() for item in state.decoder_stats.get("enabled_protocols", [])]
+                enabled = ", ".join(enabled_items) or "-"
+                rows = _console_assignment_rows()
+                activity = {
+                    "total_detections": sum(max(1, int(row.get("detections") or 0)) for row in state.discovery_table),
+                    "classic_bursts": int(state.classic_bursts_seen or 0),
+                    "ble_packets": int(state.ble_packets_seen or 0),
+                    "chunks_seen": int(state.chunks_seen or 0),
+                    "last_rssi": float(state.last_rssi_dbfs or -120.0),
+                    "csv_run_id": state.csv_run_id or "-",
+                    "fm_state": "playing" if fm_playback.running else ("pending" if fm_playback.pending else "idle"),
+                    "walkie_state": "playing" if walkie_playback.running else ("pending" if walkie_playback.pending else "idle"),
+                    "walkie_recent": int(walkie_playback.recent_chunks or 0),
+                    "chunks_by_mode": dict(state.chunks_by_mode or {}),
+                }
+            self.query_one("#summary", Static).update(
+                f"RF Sentinel {running} | enabled {enabled} | web http://{self.host or '127.0.0.1'}:{self.port or '5050'} | "
+                "r start/stop, u refresh, Tab focus, =/- resize log, b bottom size, q quit"
+            )
+            self.query_one("#activity-pane", Static).update(self._activity_text(activity, running, enabled))
+            self._refresh_protocol_table(enabled_items, activity)
+            self._refresh_radio_table(rows)
+            self._refresh_log(logs)
+
+        def _activity_text(self, activity: dict[str, Any], running: str, enabled: str) -> str:
+            return "\n".join(
+                [
+                    "=== RF Activity ===",
+                    f"Total Detections:  {activity['total_detections']}",
+                    f"Classic Bursts:    {activity['classic_bursts']}",
+                    f"BLE Packets:       {activity['ble_packets']}",
+                    f"Chunks Seen:       {activity['chunks_seen']}",
+                    f"Last RSSI:         {activity['last_rssi']:.1f} dBFS",
+                    "",
+                    "Settings:",
+                    f"  state: {running}",
+                    f"  enabled: {enabled}",
+                    f"  csv run: {activity['csv_run_id']}",
+                    "",
+                    "Audio:",
+                    f"  FM: {activity['fm_state']}",
+                    f"  Walkie: {activity['walkie_state']}",
+                    f"  Walkie recent chunks: {activity['walkie_recent']}",
+                ]
+            )
+
+        def _refresh_protocol_table(self, enabled_items: list[str], activity: dict[str, Any]) -> None:
+            protocols = self.query_one("#protocol-pane", DataTable)
+            protocols.clear(columns=False)
+            enabled_set = set(enabled_items)
+            for protocol in ["BTC", "BTLE", "ZIGBEE", "TPMS", "WALKIE", "WIFI", "FM", "LFMF", "CELLULAR"]:
+                count = _console_protocol_count(protocol)
+                if count <= 0 and protocol not in enabled_set:
+                    continue
+                status = "enabled" if protocol in enabled_set else "seen"
+                protocols.add_row(protocol, str(count), status)
+            for mode, chunks in sorted(activity.get("chunks_by_mode", {}).items(), key=lambda item: str(item[0])):
+                protocols.add_row(str(mode)[:22], str(int(chunks or 0)), "chunks")
+
+        def _refresh_radio_table(self, rows: list[dict[str, Any]]) -> None:
+            radios = self.query_one("#radios-pane", DataTable)
+            radios.clear(columns=False)
+            for row in rows:
+                radios.add_row(
+                    str(row.get("device") or ""),
+                    str(row.get("protocol") or ""),
+                    str(row.get("center") or ""),
+                    str(row.get("count") or ""),
+                    str(row.get("band") or ""),
+                )
+
+        def _refresh_log(self, logs: list[str]) -> None:
+            log = self.query_one("#log-pane", RichLog)
+            if self._log_seen > len(logs):
+                log.clear()
+                self._log_seen = 0
+            for line in logs[self._log_seen :]:
+                text = str(line)
+                if re.search(r"\b(ERROR|failed|exception|traceback)\b", text, re.IGNORECASE):
+                    log.write(Text.from_markup(f"[bold red]{text}[/]"))
+                elif re.search(r"\b(WARNING|WARN|busy|conflict)\b", text, re.IGNORECASE):
+                    log.write(Text.from_markup(f"[yellow]{text}[/]"))
+                elif re.search(r"\b(started|running|active|restored|released)\b", text, re.IGNORECASE):
+                    log.write(Text.from_markup(f"[green]{text}[/]"))
+                else:
+                    log.write(text)
+            self._log_seen = len(logs)
+
+
+def run_textual_console_dashboard(host: str = "", port: int | str = "") -> bool:
+    if TextualApp is None or not CONSOLE_DASHBOARD:
+        return False
+    console_textual_active.set()
+    try:
+        label = f"RF Sentinel UI starting on {host}:{port}" if host or port else "RF Sentinel UI starting"
+        _console_append_log(label)
+        RFSentinelConsoleApp(host=host, port=port).run(mouse=True)
+    finally:
+        console_textual_active.clear()
+    return True
 
 
 def start_console_dashboard(host: str = "", port: int | str = "") -> None:
@@ -7150,8 +7632,16 @@ if __name__ == "__main__":
     host = os.getenv("BT_EXPLORER_HOST", "0.0.0.0")
     port = int(os.getenv("BT_EXPLORER_PORT", "5050"))
     try:
-        start_console_dashboard(host, port)
-        app.run(host=host, port=port, threaded=True, use_reloader=False)
+        if os.getenv("RF_SENTINEL_TEXTUAL_CONSOLE", "1").strip().lower() not in {"0", "false", "no", "off"} and TextualApp is not None:
+            flask_thread = threading.Thread(
+                target=lambda: app.run(host=host, port=port, threaded=True, use_reloader=False),
+                daemon=True,
+            )
+            flask_thread.start()
+            run_textual_console_dashboard(host, port)
+        else:
+            start_console_dashboard(host, port)
+            app.run(host=host, port=port, threaded=True, use_reloader=False)
     except KeyboardInterrupt:
         print("\n[ui] Ctrl+C received, disconnecting from sdr-gateway...", file=sys.stderr)
     finally:
