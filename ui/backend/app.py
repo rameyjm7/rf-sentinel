@@ -4447,8 +4447,40 @@ def _classic_full_mac(nap: Any = None, uap: Any = None, lap: Any = None) -> str:
     return f"{nap_hex[0:2]}:{nap_hex[2:4]}:{uap_hex}:{lap_hex[0:2]}:{lap_hex[2:4]}:{lap_hex[4:6]}"
 
 
+def _utc_date_key(timestamp_s: Any) -> str:
+    try:
+        value = float(timestamp_s)
+    except (TypeError, ValueError):
+        value = time.time()
+    return time.strftime("%Y-%m-%d", time.gmtime(value))
+
+
+def _seen_day_stats(dates: list[str]) -> dict[str, Any]:
+    clean_dates = sorted({str(date) for date in dates if re.fullmatch(r"\d{4}-\d{2}-\d{2}", str(date))})
+    if not clean_dates:
+        clean_dates = [_utc_date_key(time.time())]
+    last_date = clean_dates[-1]
+    streak = 0
+    try:
+        cursor = calendar.timegm(time.strptime(last_date, "%Y-%m-%d"))
+        date_set = set(clean_dates)
+        while _utc_date_key(cursor) in date_set:
+            streak += 1
+            cursor -= 86400
+    except (TypeError, ValueError):
+        streak = 1
+    return {
+        "seen_dates": clean_dates[-30:],
+        "seen_days": streak,
+        "seen_day_count": len(clean_dates),
+        "first_seen_date": clean_dates[0],
+        "last_seen_date": last_date,
+    }
+
+
 def _upsert_discovery_row(event: dict[str, Any]) -> None:
     now = float(event.get("seen_at", time.time()))
+    seen_date = _utc_date_key(now)
     if event.get("kind") == "ble_burst":
         row = {
             "key": "ble:activity",
@@ -4769,11 +4801,19 @@ def _upsert_discovery_row(event: dict[str, Any]) -> None:
     else:
         return
 
+    row.setdefault("first_seen_at", now)
+    row.update(_seen_day_stats([seen_date]))
     for idx, existing in enumerate(state.discovery_table):
         same_classic_lap = row.get("protocol") == "BTC" and existing.get("protocol") == "BTC" and existing.get("lap") == row.get("lap")
         if existing.get("key") != row["key"] and not same_classic_lap:
             continue
         row["detections"] = int(existing.get("detections") or 0) + 1
+        row["first_seen_at"] = float(existing.get("first_seen_at") or row.get("first_seen_at") or now)
+        prior_dates = list(existing.get("seen_dates") or [])
+        if not prior_dates and existing.get("last_seen_at"):
+            prior_dates.append(_utc_date_key(existing.get("last_seen_at")))
+        prior_dates.append(seen_date)
+        row.update(_seen_day_stats(prior_dates))
         if row.get("protocol") == "BTC":
             existing_uap = str(existing.get("uap") or "").upper()
             row_uap = str(row.get("uap") or "").upper()
