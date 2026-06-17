@@ -2044,6 +2044,14 @@
                 <option value="table">Table</option>
                 <option value="wifi-map">WiFi Map</option>
               </select>
+              <select class="view-select" id="lastSeenFilterSelect" title="Filter detections by last seen time">
+                <option value="all">Last seen: All</option>
+                <option value="60">Last seen: 1 min</option>
+                <option value="300">Last seen: 5 min</option>
+                <option value="900">Last seen: 15 min</option>
+                <option value="3600">Last seen: 1 hour</option>
+                <option value="86400">Last seen: 24 hours</option>
+              </select>
             </div>
             <div class="identity-table-wrap" id="identityTableWrap"></div>
           </section>
@@ -2133,6 +2141,7 @@
       const candidatePanelTitle = document.getElementById("candidatePanelTitle");
       const candidatesEl = document.getElementById("candidates");
       const detectionViewSelect = document.getElementById("detectionViewSelect");
+      const lastSeenFilterSelect = document.getElementById("lastSeenFilterSelect");
       const followMenu = document.getElementById("followMenu");
       const protocolConfigOverlay = document.getElementById("protocolConfigOverlay");
       const protocolConfigTitle = document.getElementById("protocolConfigTitle");
@@ -3082,6 +3091,13 @@
         } else {
           tableSort = { key, direction: key === "identity" || key === "device_type" || key === "manufacturer" || key === "mac" ? "asc" : "desc" };
         }
+      }
+
+      function applyLastSeenFilter(rows) {
+        const seconds = Number(lastSeenFilterSelect?.value || 0);
+        if (!Number.isFinite(seconds) || seconds <= 0) return rows;
+        const cutoff = Date.now() / 1000 - seconds;
+        return rows.filter((row) => Number(row.last_seen_at || 0) >= cutoff);
       }
 
       function renderDetectionTable(rows) {
@@ -4221,8 +4237,9 @@
           metrics.lfmf.textContent = Number(protocolDetections("LFMF") || 0).toLocaleString();
           metrics.cellular.textContent = Number(protocolDetections("CELLULAR") || 0).toLocaleString();
           updateBtcTargetVisibility(Boolean((btcTargetMacInput.value || "").trim() || status.test_target));
-          renderIdentityTable(status.discovery_table || []);
-          renderCandidates(status.classic_candidates || [], status.classic_addresses || [], status.discovery_table || []);
+          const visibleRows = applyLastSeenFilter(status.discovery_table || []);
+          renderIdentityTable(visibleRows);
+          renderCandidates(status.classic_candidates || [], status.classic_addresses || [], visibleRows);
           renderSdrAssignments(status);
           renderBars(status);
           renderChannelActivity(status);
@@ -4828,6 +4845,7 @@
       channelSelect.addEventListener("change", refreshPlannedStatusLabel);
       sampleRateInput.addEventListener("input", refreshPlannedStatusLabel);
       detectionViewSelect.addEventListener("change", pollStatus);
+      lastSeenFilterSelect?.addEventListener("change", pollStatus);
       hopDwellInput.addEventListener("change", scheduleAutoHop);
       btcLogPassiveFhsInput?.addEventListener("change", () => {
         applyProtocolSelection({ commit: true }).catch((err) => showToast(err.message || "Bluetooth Classic config save failed"));

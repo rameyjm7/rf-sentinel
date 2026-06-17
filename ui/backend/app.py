@@ -93,6 +93,7 @@ RF_SENTINEL_RUNS_DIR = RF_SENTINEL_LOG_DIR / "runs"
 RF_SENTINEL_ARCHIVE_DIR = RF_SENTINEL_LOG_DIR / "archives"
 RF_SENTINEL_CSV_RETENTION_DAYS = max(1, int(os.getenv("RF_SENTINEL_CSV_RETENTION_DAYS", "7")))
 RF_SENTINEL_CSV_ARCHIVE_MAX_MB = max(1, int(os.getenv("RF_SENTINEL_CSV_ARCHIVE_MAX_MB", "1000")))
+RF_SENTINEL_DISCOVERY_TABLE_MAX_ROWS = max(500, int(os.getenv("RF_SENTINEL_DISCOVERY_TABLE_MAX_ROWS", "5000")))
 RF_SENTINEL_NO_CHANGE = object()
 RF_SENTINEL_PROTOCOLS = {"btc", "ble", "zigbee", "tpms", "walkie", "wifi", "fm", "lfmf", "cellular"}
 WIFI_SUPPORTED_CHANNELS = {
@@ -5116,7 +5117,7 @@ def _upsert_discovery_row(event: dict[str, Any]) -> None:
     else:
         state.discovery_table.insert(0, row)
     state.discovery_table.sort(key=lambda item: float(item.get("last_seen_at") or 0), reverse=True)
-    state.discovery_table = state.discovery_table[:160]
+    state.discovery_table = state.discovery_table[:RF_SENTINEL_DISCOVERY_TABLE_MAX_ROWS]
 
 
 def _upsert_classic_address(event: dict[str, Any]) -> None:
@@ -8101,7 +8102,7 @@ def status():
                 "ble_packets_seen": state.ble_packets_seen,
                 "classic_bursts_seen": state.classic_bursts_seen,
                 "detections": state.detections[:120],
-                "discovery_table": state.discovery_table[:120],
+                "discovery_table": state.discovery_table,
                 "classic_candidates": state.classic_candidates[:32],
                 "classic_addresses": state.classic_addresses[:64],
                 "decoder_stats": {**state.decoder_stats, "follow": follow_target},
