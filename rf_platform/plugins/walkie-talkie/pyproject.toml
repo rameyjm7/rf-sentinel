@@ -1,0 +1,25 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "walkie-talkie"
+version = "0.1.0"
+description = "RF Sentinel narrowband walkie-talkie detector and offline classifier"
+requires-python = ">=3.10"
+dependencies = [
+  "numpy>=1.24",
+  "requests>=2.31",
+  "websocket-client>=1.6",
+]
+
+[project.scripts]
+walkie-talkie = "walkie_talkie.cli:main"
+walkie_talkie = "walkie_talkie.cli:main"
+walkie_talkie_scanner = "walkie_talkie.cli:main"
+
+[tool.setuptools]
+package-dir = {"" = "src"}
+
+[tool.setuptools.packages.find]
+where = ["src"]

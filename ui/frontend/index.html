@@ -22,6 +22,7 @@
         --btc-blue: #64b5f6;
         --zigbee-purple: #7e3ff2;
         --wifi-green: #16a34a;
+        --walkie-orange: #ea580c;
         --fm-amber: #f59e0b;
         --lfmf-cyan: #0891b2;
         --cellular-magenta: #db2777;
@@ -1128,6 +1129,12 @@
         border-left-color: #6b7280;
       }
 
+      .detection-card.protocol-walkie,
+      .candidate.protocol-walkie {
+        border-left-color: var(--walkie-orange);
+        background: linear-gradient(90deg, rgba(234, 88, 12, 0.12), rgba(255, 250, 240, 0.86) 34%);
+      }
+
       .detection-card.protocol-wifi,
       .candidate.protocol-wifi {
         border-left-color: var(--wifi-green);
@@ -1408,6 +1415,120 @@
         background: rgba(126, 63, 242, 0.26);
       }
 
+      .config-overlay {
+        position: fixed;
+        inset: 0;
+        z-index: 60;
+        display: grid;
+        place-items: center;
+        padding: 24px;
+        background:
+          radial-gradient(circle at 20% 20%, rgba(8, 123, 131, 0.28), transparent 34%),
+          rgba(13, 13, 5, 0.78);
+        backdrop-filter: blur(7px);
+      }
+
+      .config-overlay[hidden] {
+        display: none;
+      }
+
+      .config-panel {
+        width: min(760px, 96vw);
+        max-height: min(720px, 90vh);
+        overflow: auto;
+        border: 1px solid rgba(240, 183, 77, 0.42);
+        border-radius: 18px;
+        background: linear-gradient(145deg, rgba(58, 38, 0, 0.98), rgba(28, 24, 12, 0.98));
+        box-shadow: 0 24px 70px rgba(0, 0, 0, 0.48);
+        padding: 18px;
+      }
+
+      .config-panel-head {
+        display: flex;
+        align-items: start;
+        justify-content: space-between;
+        gap: 16px;
+        margin-bottom: 14px;
+      }
+
+      .config-panel h2 {
+        margin: 0;
+        color: var(--cream);
+        font-size: 1.45rem;
+      }
+
+      .config-panel p {
+        margin: 4px 0 0;
+        color: var(--muted);
+      }
+
+      .config-options {
+        display: grid;
+        gap: 10px;
+      }
+
+      .config-option {
+        width: 100%;
+        border: 1px solid rgba(255, 255, 255, 0.13);
+        border-radius: 14px;
+        background: rgba(255, 255, 255, 0.045);
+        color: var(--cream);
+        padding: 12px 14px;
+        display: flex;
+        align-items: center;
+        justify-content: space-between;
+        gap: 14px;
+        cursor: pointer;
+        text-align: left;
+      }
+
+      .config-option:hover,
+      .config-option.active {
+        border-color: rgba(8, 123, 131, 0.75);
+        background: rgba(8, 123, 131, 0.18);
+      }
+
+      .config-option strong {
+        display: block;
+      }
+
+      .config-option span {
+        display: block;
+        color: var(--muted);
+        margin-top: 2px;
+        font-size: 0.88rem;
+      }
+
+      .config-actions {
+        margin-top: 16px;
+        display: flex;
+        justify-content: flex-end;
+        gap: 10px;
+      }
+
+      .ghost-btn,
+      .primary-btn {
+        border: 1px solid rgba(255, 255, 255, 0.18);
+        border-radius: 999px;
+        color: var(--cream);
+        padding: 9px 14px;
+        display: inline-flex;
+        align-items: center;
+        gap: 7px;
+        cursor: pointer;
+        font: inherit;
+        font-weight: 800;
+      }
+
+      .ghost-btn {
+        background: rgba(255, 255, 255, 0.04);
+      }
+
+      .primary-btn {
+        background: var(--teal);
+        border-color: rgba(8, 123, 131, 0.9);
+      }
+
       .decoded-text {
         margin-top: 8px;
         padding: 8px 10px;
@@ -1499,6 +1620,11 @@
         background: #e5e7eb;
       }
 
+      .chip.protocol-walkie {
+        color: #431407;
+        background: #fdba74;
+      }
+
       .chip.protocol-wifi {
         color: #052e16;
         background: #bbf7d0;
@@ -1530,6 +1656,10 @@
 
       .chip.sdr-role-selected.protocol-tpms {
         border-color: #f8fafc;
+      }
+
+      .chip.sdr-role-selected.protocol-walkie {
+        border-color: var(--walkie-orange);
       }
 
       .chip.sdr-role-selected.protocol-wifi {
@@ -1623,6 +1753,10 @@
         border-left: 4px solid #6b7280;
       }
 
+      .candidate.protocol-walkie {
+        border-left: 4px solid var(--walkie-orange);
+      }
+
       .candidate.protocol-wifi {
         border-left: 4px solid var(--wifi-green);
       }
@@ -1713,6 +1847,22 @@
   </head>
   <body>
     <div id="followMenu" class="follow-menu" hidden></div>
+    <div id="protocolConfigOverlay" class="config-overlay" hidden>
+      <section class="config-panel" role="dialog" aria-modal="true" aria-labelledby="protocolConfigTitle">
+        <div class="config-panel-head">
+          <div>
+            <h2 id="protocolConfigTitle">Configure Protocol</h2>
+            <p id="protocolConfigSubtitle">Choose how RF Sentinel should scan this protocol.</p>
+          </div>
+          <button class="ghost-btn" type="button" id="protocolConfigClose"><span class="material-symbols-rounded">close</span>Close</button>
+        </div>
+        <div id="protocolConfigOptions" class="config-options"></div>
+        <div class="config-actions">
+          <button class="ghost-btn" type="button" id="protocolConfigCancel">Cancel</button>
+          <button class="primary-btn" type="button" id="protocolConfigApply"><span class="material-symbols-rounded">check</span>Apply</button>
+        </div>
+      </section>
+    </div>
     <div id="toast" class="toast" role="status" aria-live="polite"></div>
     <div class="app">
       <header>
@@ -1796,7 +1946,7 @@
             <div class="metric"><span>BLE Devices</span><strong id="bleMetric">0</strong></div>
             <div class="metric"><span>BTC Evidence</span><strong id="classicMetric">0</strong></div>
             <div class="metric"><span>Zigbee Frames</span><strong id="zigbeeMetric">0</strong></div>
-            <div class="metric"><span>TPMS Frames</span><strong id="tpmsMetric">0</strong></div>
+            <div class="metric"><span>Sub-GHz</span><strong id="tpmsMetric">0</strong></div>
             <div class="metric"><span>WiFi Frames</span><strong id="wifiMetric">0</strong></div>
             <div class="metric"><span>FM Stations</span><strong id="fmMetric">0</strong></div>
             <div class="metric"><span>VLF/LF/MF</span><strong id="lfmfMetric">0</strong></div>
@@ -1815,7 +1965,7 @@
                 <button class="tab-btn" id="btcTabBtn" type="button">BTC</button>
                 <button class="tab-btn" id="btleTabBtn" type="button">BTLE</button>
                 <button class="tab-btn" id="zigbeeTabBtn" type="button">Zigbee</button>
-                <button class="tab-btn" id="tpmsTabBtn" type="button">TPMS</button>
+                <button class="tab-btn" id="tpmsTabBtn" type="button">Sub-GHz</button>
                 <button class="tab-btn" id="wifiTabBtn" type="button">WiFi</button>
                 <button class="tab-btn" id="fmTabBtn" type="button">FM</button>
                 <button class="tab-btn" id="lfmfTabBtn" type="button">VLF/LF/MF</button>
@@ -1916,6 +2066,13 @@
       const candidatesEl = document.getElementById("candidates");
       const detectionViewSelect = document.getElementById("detectionViewSelect");
       const followMenu = document.getElementById("followMenu");
+      const protocolConfigOverlay = document.getElementById("protocolConfigOverlay");
+      const protocolConfigTitle = document.getElementById("protocolConfigTitle");
+      const protocolConfigSubtitle = document.getElementById("protocolConfigSubtitle");
+      const protocolConfigOptions = document.getElementById("protocolConfigOptions");
+      const protocolConfigClose = document.getElementById("protocolConfigClose");
+      const protocolConfigCancel = document.getElementById("protocolConfigCancel");
+      const protocolConfigApply = document.getElementById("protocolConfigApply");
       const toast = document.getElementById("toast");
       let devicesReady = false;
       let latestStatus = null;
@@ -1924,6 +2081,8 @@
       let lfmfDeviceAvailable = false;
       let savedProtocolList = [];
       const disabledSdrIds = new Set();
+      let wifiChannelSelection = [1, 6, 11];
+      let protocolDeviceOverrides = {};
       let configLoaded = false;
       let protocolConfigDirty = false;
       let activeDetectionTab = "ALL";
@@ -1932,6 +2091,11 @@
       let fmGainNode = null;
       let fmPlayCursor = 0;
       let fmAudioLoopActive = false;
+      let walkieAudioCtx = null;
+      let walkieGainNode = null;
+      let walkiePlayCursor = 0;
+      let walkieAudioLoopActive = false;
+      let protocolConfigDraft = null;
       const detectionGroupOpen = new Map();
       const btcTargetMetrics = Array.from(document.querySelectorAll(".btc-target-metric"));
       const metrics = {
@@ -1952,12 +2116,20 @@
         { key: "btc", label: "2.4G BTC", protocol: "BTC", input: btcInput, detail: "Classic Bluetooth hopping" },
         { key: "ble", label: "2.4G BLE", protocol: "BTLE", input: btleInput, detail: "BLE advertisements" },
         { key: "zigbee", label: "2.4G Zigbee", protocol: "ZIGBEE", input: zigbeeInput, detail: "802.15.4 channels" },
-        { key: "tpms", label: "TPMS", protocol: "TPMS", input: tpmsInput, detail: "315 / 433.92 MHz sensors" },
+        { key: "tpms", label: "Sub-GHz", protocol: "SUBGHZ", input: tpmsInput, detail: "TPMS, walkie-talkie, and related 315 / 433 / 462 MHz activity" },
         { key: "wifi", label: "WiFi", protocol: "WIFI", input: wifiInput, detail: "802.11 monitor frames", available: () => wifiDeviceAvailable },
         { key: "fm", label: "FM", protocol: "FM", input: fmInput, detail: "Broadcast FM stations" },
         { key: "lfmf", label: "VLF/LF/MF", protocol: "LFMF", input: lfmfInput, detail: "SDRplay RSP2 low-frequency scan", available: () => lfmfDeviceAvailable },
         { key: "cellular", label: "Cellular", protocol: "CELLULAR", input: cellularInput, detail: "Passive 700 MHz-6 GHz infrastructure awareness" },
       ];
+      const WIFI_CHANNEL_GROUPS = [
+        { label: "2.4 GHz non-overlap", channels: [1, 6, 11] },
+        { label: "2.4 GHz all", channels: [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13] },
+        { label: "5 GHz low", channels: [36, 40, 44, 48, 52, 56, 60, 64] },
+        { label: "5 GHz DFS", channels: [100, 104, 108, 112, 116, 120, 124, 128, 132, 136, 140] },
+        { label: "All supported", channels: [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 36, 40, 44, 48, 52, 56, 60, 64, 100, 104, 108, 112, 116, 120, 124, 128, 132, 136, 140] },
+      ];
+      const DEVICE_SELECT_PROTOCOLS = new Set(["zigbee", "tpms", "fm", "cellular"]);
 
       const bars = Array.from({ length: 40 }, (_, idx) => {
         const bar = document.createElement("div");
@@ -2099,12 +2271,17 @@
           row.title = available ? "Right-click to enable or disable" : `${control.label} source is missing`;
           control.input.disabled = !available;
           const stateText = available ? (enabled ? "Enabled" : "Off") : "Missing";
+          let detail = control.detail;
+          if (control.key === "wifi") detail = `${detail} · CH ${wifiChannelSelection.join(",")}`;
+          if (DEVICE_SELECT_PROTOCOLS.has(control.key) && protocolDeviceOverrides[control.key]) {
+            detail = `${detail} · ${protocolDeviceOverrides[control.key]}`;
+          }
           const template = document.createElement("template");
           template.innerHTML = `
             ${protocolChip(control.protocol)}
             <span class="protocol-row-main">
               <strong>${control.label}</strong>
-              <span>${control.detail}</span>
+              <span>${detail}</span>
             </span>
             <span class="protocol-state-pill">${stateText}</span>
           `;
@@ -2182,7 +2359,10 @@
         if (btcInput.checked) protocols.push("btc");
         if (btleInput.checked) protocols.push("ble");
         if (zigbeeInput.checked) protocols.push("zigbee");
-        if (tpmsInput.checked) protocols.push("tpms");
+        if (tpmsInput.checked) {
+          protocols.push("tpms");
+          protocols.push("walkie");
+        }
         if (!wifiInput.disabled && wifiInput.checked) protocols.push("wifi");
         if (fmInput.checked) protocols.push("fm");
         if (!lfmfInput.disabled && lfmfInput.checked) protocols.push("lfmf");
@@ -2204,6 +2384,37 @@
         return Array.from(disabledSdrIds).filter(Boolean).sort();
       }
 
+      function cleanWifiChannels(channels) {
+        const supported = new Set(WIFI_CHANNEL_GROUPS.at(-1).channels);
+        const clean = [];
+        (Array.isArray(channels) ? channels : []).forEach((channel) => {
+          const value = Number(channel);
+          if (Number.isInteger(value) && supported.has(value) && !clean.includes(value)) clean.push(value);
+        });
+        return clean.length ? clean : [1, 6, 11];
+      }
+
+      function radioADeviceId() {
+        return String(latestStatus?.device_ids?.radio_a || latestStatus?.device_ids?.classic || selectedDeviceId(btcDeviceSelect) || "");
+      }
+
+      function selectableProtocolDevices() {
+        const radioA = radioADeviceId();
+        return knownSdrDevices
+          .filter((device) => {
+            const id = String(device?.id || "").trim();
+            return id && id !== radioA && !disabledSdrIds.has(id) && !isWifiDevice(device);
+          });
+      }
+
+      function protocolDevicePayload() {
+        const allowed = new Set(selectableProtocolDevices().map((device) => String(device.id)));
+        return Object.fromEntries(
+          Object.entries(protocolDeviceOverrides)
+            .filter(([protocol, deviceId]) => DEVICE_SELECT_PROTOCOLS.has(protocol) && allowed.has(String(deviceId || "")))
+        );
+      }
+
       function applyProtocolList(protocols) {
         const values = new Set((Array.isArray(protocols) ? protocols : [])
           .map((item) => String(item).toLowerCase())
@@ -2213,7 +2424,7 @@
         btcInput.checked = values.has("btc");
         btleInput.checked = values.has("ble");
         zigbeeInput.checked = values.has("zigbee");
-        tpmsInput.checked = values.has("tpms");
+        tpmsInput.checked = values.has("tpms") || values.has("walkie");
         wifiInput.checked = wifiDeviceAvailable && values.has("wifi");
         fmInput.checked = values.has("fm");
         lfmfInput.checked = lfmfDeviceAvailable && values.has("lfmf");
@@ -2229,6 +2440,21 @@
         });
       }
 
+      function applyWifiChannels(channels) {
+        wifiChannelSelection = cleanWifiChannels(channels);
+      }
+
+      function applyProtocolDevices(devices) {
+        protocolDeviceOverrides = {};
+        if (devices && typeof devices === "object") {
+          Object.entries(devices).forEach(([protocol, deviceId]) => {
+            const key = String(protocol || "").toLowerCase();
+            const value = String(deviceId || "").trim();
+            if (DEVICE_SELECT_PROTOCOLS.has(key) && value) protocolDeviceOverrides[key] = value;
+          });
+        }
+      }
+
       async function loadConfig() {
         try {
           const resp = await fetch("/api/config");
@@ -2237,6 +2463,9 @@
           savedProtocolList = Array.isArray(config.protocols) ? config.protocols : [];
           applyProtocolList(config.protocols);
           applyDisabledSdrList(config.disabled_devices);
+          applyWifiChannels(config.wifi_channels);
+          applyProtocolDevices(config.protocol_devices);
+          renderProtocolControls();
         } catch {
           // Defaults remain usable if the config file is missing or unreadable.
         } finally {
@@ -2248,10 +2477,12 @@
       async function saveConfig({ toastMessage = "Config saved" } = {}) {
         const protocols = selectedProtocols();
         const disabled_devices = disabledSdrPayload();
+        const wifi_channels = cleanWifiChannels(wifiChannelSelection);
+        const protocol_devices = protocolDevicePayload();
         const resp = await fetch("/api/config", {
           method: "POST",
           headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ protocols, disabled_devices }),
+          body: JSON.stringify({ protocols, disabled_devices, wifi_channels, protocol_devices }),
         });
         const data = await resp.json().catch(() => ({}));
         if (!resp.ok) throw new Error(data.error || data.detail || "Config save failed");
@@ -2317,7 +2548,7 @@
           btc: "BTC",
           ble: "BLE",
           zigbee: "Zigbee",
-          tpms: "TPMS",
+          tpms: "Sub-GHz",
           wifi: "WiFi",
           fm: "FM",
           lfmf: "VLF/LF/MF",
@@ -2500,6 +2731,7 @@
         if (value === "BTC") return "protocol-btc";
         if (value === "ZIGBEE") return "protocol-zigbee";
         if (value === "TPMS") return "protocol-tpms";
+        if (value === "WALKIE") return "protocol-walkie";
         if (value === "WIFI") return "protocol-wifi";
         if (value === "FM") return "protocol-fm";
         if (value === "LFMF") return "protocol-lfmf";
@@ -2598,6 +2830,19 @@
         return Number.isFinite(value) ? value : null;
       }
 
+      function playingWalkieMhz() {
+        const value = Number(latestStatus?.walkie_playback?.freq_mhz);
+        return Number.isFinite(value) ? value : null;
+      }
+
+      function walkieRowFreqMhz(row) {
+        const direct = Number(row?.frequency_mhz);
+        if (Number.isFinite(direct) && direct > 0) return direct;
+        const hz = Number(row?.center_freq_hz || row?.frequency_hz || row?.last_frequency_hz);
+        if (Number.isFinite(hz) && hz > 0) return hz / 1_000_000;
+        return 462.5;
+      }
+
       function isFollowedZigbee(row) {
         return row?.protocol === "ZIGBEE" && Number(row.channel) === zigbeeFollowChannel();
       }
@@ -2607,6 +2852,13 @@
         const rowFreq = Number(row.frequency_mhz);
         const current = playingFmMhz();
         return Number.isFinite(rowFreq) && Number.isFinite(current) && Math.abs(rowFreq - current) < 0.05;
+      }
+
+      function isPlayingWalkie(row) {
+        if (row?.protocol !== "WALKIE") return false;
+        const rowFreq = walkieRowFreqMhz(row);
+        const current = playingWalkieMhz();
+        return Number.isFinite(rowFreq) && Number.isFinite(current) && latestStatus?.walkie_playback?.running && Math.abs(rowFreq - current) < 0.05;
       }
 
       function followAttrs(row) {
@@ -2623,6 +2875,12 @@
             attrs.push(`data-play-protocol="fm"`, `data-play-freq-mhz="${freq.toFixed(1)}"`);
           }
         }
+        if (row?.protocol === "WALKIE") {
+          const freq = walkieRowFreqMhz(row);
+          if (Number.isFinite(freq) && freq >= 300.0 && freq <= 500.0) {
+            attrs.push(`data-play-protocol="walkie"`, `data-play-freq-mhz="${freq.toFixed(3)}"`);
+          }
+        }
         return attrs.length ? ` ${attrs.join(" ")}` : "";
       }
 
@@ -2633,7 +2891,15 @@
         const play = isPlayingFm(row)
           ? `<button class="lock-button" type="button" data-stop-fm="${Number(row.frequency_mhz).toFixed(1)}" title="Stop FM ${Number(row.frequency_mhz).toFixed(1)} MHz">${materialIcon("volume_up")}${Number(row.frequency_mhz).toFixed(1)}</button>`
           : "";
-        return `<span class="title-text">${titleWithBrandIcon(row)}</span>${lock}${play}`;
+        const walkieFreq = row?.protocol === "WALKIE" ? walkieRowFreqMhz(row) : NaN;
+        const walkieLive = isPlayingWalkie(row)
+          ? `<button class="lock-button" type="button" data-stop-walkie="${walkieFreq.toFixed(3)}" title="Stop walkie audio ${walkieFreq.toFixed(3)} MHz">${materialIcon("volume_up")}${walkieFreq.toFixed(3)}</button>`
+          : "";
+        const recentReady = row?.protocol === "WALKIE" && Number(latestStatus?.walkie_playback?.recent_chunks || 0) > 0;
+        const walkieRecent = recentReady
+          ? `<button class="lock-button" type="button" data-play-walkie-recent="1" title="Play recent walkie audio">${materialIcon("history")}recent</button>`
+          : "";
+        return `<span class="title-text">${titleWithBrandIcon(row)}</span>${lock}${play}${walkieLive}${walkieRecent}`;
       }
 
       function uuidVendorName(row) {
@@ -3043,7 +3309,11 @@
       }
 
       function renderIdentityTable(rows) {
-        const filtered = activeDetectionTab === "ALL" ? rows : rows.filter((row) => row.protocol === activeDetectionTab);
+        const filtered = activeDetectionTab === "ALL"
+          ? rows
+          : activeDetectionTab === "SUBGHZ"
+            ? rows.filter((row) => row.protocol === "TPMS" || row.protocol === "WALKIE")
+            : rows.filter((row) => row.protocol === activeDetectionTab);
         const displayRows = activeDetectionTab === "BTC" ? mergeBtcRows(filtered) : filtered;
         if (!displayRows.length) {
           identityTableWrap.innerHTML = `<div class="empty">No detections yet</div>`;
@@ -3348,10 +3618,15 @@
           return;
         }
         if (!["ALL", "BTC"].includes(activeDetectionTab)) {
-          candidatePanelTitle.textContent = `${activeDetectionTab} Activity`;
-          const protocolRows = rows.filter((row) => row.protocol === activeDetectionTab).slice(0, 24);
+          const tabLabel = activeDetectionTab === "SUBGHZ" ? "Sub-GHz" : activeDetectionTab;
+          candidatePanelTitle.textContent = `${tabLabel} Activity`;
+          const protocolRows = (
+            activeDetectionTab === "SUBGHZ"
+              ? rows.filter((row) => row.protocol === "TPMS" || row.protocol === "WALKIE")
+              : rows.filter((row) => row.protocol === activeDetectionTab)
+          ).slice(0, 24);
           if (!protocolRows.length) {
-            candidatesEl.innerHTML = `<div class="empty">No ${activeDetectionTab} detections yet</div>`;
+            candidatesEl.innerHTML = `<div class="empty">No ${tabLabel} detections yet</div>`;
             return;
           }
           candidatesEl.innerHTML = protocolRows
@@ -3493,7 +3768,10 @@
       function statusLabel(status) {
         const fmPlaying = Number(status?.fm_playback?.freq_mhz);
         const fmSuffix = Number.isFinite(fmPlaying) && status?.fm_playback?.running ? ` · FM ${fmPlaying.toFixed(1)} MHz playing` : "";
-        if (!status.running) return `${plannedStatusLabel()}${fmSuffix}`;
+        const walkiePlaying = Number(status?.walkie_playback?.freq_mhz);
+        const walkieSuffix = Number.isFinite(walkiePlaying) && status?.walkie_playback?.running ? ` · Walkie ${walkiePlaying.toFixed(3)} MHz playing` : "";
+        const audioSuffix = `${fmSuffix}${walkieSuffix}`;
+        if (!status.running) return `${plannedStatusLabel()}${audioSuffix}`;
         if (status.mode === "sentinel") {
           const sdrs = autoSdrCount(status);
           const active = Object.keys(status.scanner_assignments || {}).length;
@@ -3501,9 +3779,9 @@
           const ismPrefix = enabled.has("btc") && enabled.has("ble") ? "2.4 GHz ISM BTC+BLE shared stream" : "Multi-SDR sweep";
           const followChannel = status.follow_target?.zigbee?.channel ?? status.decoder_stats?.follow?.zigbee?.channel;
           if (followChannel !== undefined && followChannel !== null) {
-            return `${ismPrefix} · ${active || sdrs || 0}/${sdrs || 0} radios active · Zigbee locked CH ${followChannel}${fmSuffix}`;
+            return `${ismPrefix} · ${active || sdrs || 0}/${sdrs || 0} radios active · Zigbee locked CH ${followChannel}${audioSuffix}`;
           }
-          return `${ismPrefix} · ${active || sdrs || 0}/${sdrs || 0} radios active${fmSuffix}`;
+          return `${ismPrefix} · ${active || sdrs || 0}/${sdrs || 0} radios active${audioSuffix}`;
         }
         if (status.mode === "classic" || status.mode === "both") {
           const rateMhz = Math.max(1, Math.round(Number(status.sample_rate_sps || 0) / 1_000_000) || 60);
@@ -3522,7 +3800,7 @@
         function deviceRole(device) {
           const id = String(device?.id || "");
           const selectedClassic = String(status?.device_ids?.classic || status?.device_ids?.radio_a || selectedDeviceId(btcDeviceSelect) || "");
-          const separateBandsEnabled = enabledProtocols.has("zigbee") || enabledProtocols.has("tpms") || enabledProtocols.has("fm") || enabledProtocols.has("cellular");
+          const separateBandsEnabled = enabledProtocols.has("zigbee") || enabledProtocols.has("tpms") || enabledProtocols.has("walkie") || enabledProtocols.has("fm") || enabledProtocols.has("cellular");
           const inferredHop = separateBandsEnabled
             ? bestNonBluetoothHopDevice(devices, selectedClassic)?.id || ""
             : "";
@@ -3537,6 +3815,7 @@
           if (isClassic && enabledProtocols.has("ble")) protocols.push("BTLE");
           if (isHop && enabledProtocols.has("zigbee")) protocols.push("ZIGBEE");
           if (isHop && enabledProtocols.has("tpms")) protocols.push("TPMS");
+          if (isHop && enabledProtocols.has("walkie")) protocols.push("WALKIE");
           if (isHop && enabledProtocols.has("cellular")) protocols.push("CELLULAR");
           if (isFm) protocols.push("FM");
           if (isWifi) protocols.push("WIFI");
@@ -3554,6 +3833,7 @@
             const parts = [];
             if (enabledProtocols.has("zigbee")) parts.push("Zigbee-ready 2405-2480 MHz");
             if (enabledProtocols.has("tpms")) parts.push("TPMS 315/433.92 MHz");
+            if (enabledProtocols.has("walkie")) parts.push("Walkie 462.500 MHz");
             if (enabledProtocols.has("cellular")) parts.push("Cellular 700 MHz-6 GHz");
             return parts.length ? parts.join(" · ") : "RF hopping";
           }
@@ -3595,6 +3875,8 @@
           return "RF scanning";
         }
         function assignmentCenter(assignment) {
+          const liveHz = Number(assignment?.last_center_freq_hz || assignment?.last_frequency_hz || 0);
+          if (Number.isFinite(liveHz) && liveHz > 0) return `${(liveHz / 1_000_000).toFixed(3).replace(/\.?0+$/, "")} MHz`;
           const text = `${assignment?.band || ""} ${assignment?.command || ""}`;
           const centerMatch = text.match(/(?:center-mhz|center)\s+([0-9.]+)/i) || text.match(/([0-9.]+)\s*MHz/i);
           if (centerMatch) return `${Number(centerMatch[1]).toFixed(3).replace(/\.?0+$/, "")} MHz`;
@@ -3728,12 +4010,13 @@
 
       async function pollStatus() {
         try {
-          const resp = await fetch("/api/status");
+          const resp = await fetch("/api/status", { cache: "no-store" });
           const status = await resp.json();
           latestStatus = status;
           liveDot.classList.toggle("live", Boolean(status.running && status.worker_alive));
           runState.textContent = statusLabel(status);
           if (status.fm_playback?.running) fmAudioLoop();
+          if (status.walkie_playback?.running) walkieAudioLoop();
           runToggleBtn.classList.toggle("danger", Boolean(status.running));
           runToggleText.textContent = status.running ? "Stop" : "Start";
           runToggleBtn.querySelector(".material-symbols-rounded").textContent = status.running ? "stop" : "play_arrow";
@@ -3756,7 +4039,7 @@
           metrics.ble.textContent = Number(rows.filter((row) => row.protocol === "BTLE").length || 0).toLocaleString();
           metrics.classic.textContent = Number(protocolDetections("BTC") || status.classic_bursts_seen || 0).toLocaleString();
           metrics.zigbee.textContent = Number(protocolDetections("ZIGBEE") || 0).toLocaleString();
-          metrics.tpms.textContent = Number(protocolDetections("TPMS") || 0).toLocaleString();
+          metrics.tpms.textContent = Number((protocolDetections("TPMS") || 0) + (protocolDetections("WALKIE") || 0)).toLocaleString();
           metrics.wifi.textContent = Number(protocolDetections("WIFI") || 0).toLocaleString();
           metrics.fm.textContent = Number(protocolDetections("FM") || 0).toLocaleString();
           metrics.lfmf.textContent = Number(protocolDetections("LFMF") || 0).toLocaleString();
@@ -3797,7 +4080,12 @@
           const resp = await fetch("/api/scan/protocols", {
             method: "POST",
             headers: { "Content-Type": "application/json" },
-            body: JSON.stringify({ protocols, devices: selectedSdrPayload() }),
+            body: JSON.stringify({
+              protocols,
+              devices: selectedSdrPayload(),
+              wifi_channels: cleanWifiChannels(wifiChannelSelection),
+              protocol_devices: protocolDevicePayload(),
+            }),
           });
           const data = await resp.json().catch(() => ({}));
           if (!resp.ok) throw new Error(data.error || data.detail || "Protocol update failed");
@@ -3940,12 +4228,118 @@
         await pollStatus();
       }
 
+      async function ensureWalkieAudio() {
+        if (!walkieAudioCtx) walkieAudioCtx = new AudioContext({ sampleRate: 48000 });
+        if (!walkieGainNode) {
+          walkieGainNode = walkieAudioCtx.createGain();
+          walkieGainNode.gain.value = 0.95;
+          walkieGainNode.connect(walkieAudioCtx.destination);
+        }
+        if (walkieAudioCtx.state === "suspended") await walkieAudioCtx.resume();
+        if (walkiePlayCursor < walkieAudioCtx.currentTime + 0.25) walkiePlayCursor = walkieAudioCtx.currentTime + 0.25;
+      }
+
+      function queueWalkiePcm(arrayBuffer) {
+        if (!walkieAudioCtx || !walkieGainNode) return;
+        const pcm = new Int16Array(arrayBuffer);
+        const frames = pcm.length;
+        if (!frames) return;
+        const mono = new Float32Array(frames);
+        for (let i = 0; i < frames; i += 1) {
+          mono[i] = pcm[i] / 32768.0;
+        }
+        const buf = walkieAudioCtx.createBuffer(1, frames, 48000);
+        buf.copyToChannel(mono, 0);
+        const src = walkieAudioCtx.createBufferSource();
+        src.buffer = buf;
+        src.connect(walkieGainNode);
+        const startAt = Math.max(walkiePlayCursor, walkieAudioCtx.currentTime + 0.02);
+        src.start(startAt);
+        walkiePlayCursor = startAt + buf.duration;
+      }
+
+      async function walkieAudioLoop() {
+        if (walkieAudioLoopActive) return;
+        walkieAudioLoopActive = true;
+        try {
+          while (latestStatus?.walkie_playback?.running) {
+            await ensureWalkieAudio();
+            const lead = walkiePlayCursor - walkieAudioCtx.currentTime;
+            if (lead > 0.8) {
+              await new Promise((resolve) => setTimeout(resolve, 120));
+              continue;
+            }
+            const resp = await fetch("/api/subghz/walkie/audio/batch?count=3&timeout=0.4", { cache: "no-store" });
+            if (resp.status === 204) {
+              await new Promise((resolve) => setTimeout(resolve, 80));
+              continue;
+            }
+            if (!resp.ok) throw new Error(`Walkie audio fetch failed (${resp.status})`);
+            const buffer = await resp.arrayBuffer();
+            if (buffer.byteLength) queueWalkiePcm(buffer);
+            if (walkiePlayCursor - walkieAudioCtx.currentTime > 1.2) {
+              walkiePlayCursor = walkieAudioCtx.currentTime + 0.3;
+            }
+          }
+        } finally {
+          walkieAudioLoopActive = false;
+        }
+      }
+
+      async function setWalkiePlayback(freqMhz) {
+        const playing = freqMhz !== null && freqMhz !== undefined && Number.isFinite(Number(freqMhz));
+        const currentWalkie = playingWalkieMhz();
+        const switchingWalkie = playing && Number.isFinite(currentWalkie) && Math.abs(currentWalkie - Number(freqMhz)) >= 0.05;
+        if (playing) await ensureWalkieAudio();
+        if (switchingWalkie && walkieAudioCtx) {
+          walkiePlayCursor = walkieAudioCtx.currentTime + 0.2;
+        }
+        const resp = await fetch(playing ? "/api/subghz/walkie/play" : "/api/subghz/walkie/stop", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify(playing ? { freq_mhz: Number(freqMhz) } : {}),
+        });
+        const data = await resp.json().catch(() => ({}));
+        if (!resp.ok) throw new Error(data.error || data.detail || "Walkie playback update failed");
+        latestStatus = { ...(latestStatus || {}), walkie_playback: data.walkie_playback || {} };
+        runState.textContent = playing
+          ? data.walkie_playback?.pending
+            ? `Queued walkie ${Number(freqMhz).toFixed(3)} MHz; waiting for SDR`
+            : switchingWalkie
+              ? `Switching walkie audio to ${Number(freqMhz).toFixed(3)} MHz on ${data.walkie_playback?.device_id || "SDR"}`
+              : `Playing walkie ${Number(freqMhz).toFixed(3)} MHz on ${data.walkie_playback?.device_id || "SDR"}`
+          : "Walkie playback stopped";
+        if (playing && !data.walkie_playback?.pending) walkieAudioLoop();
+        await pollStatus();
+      }
+
+      async function playRecentWalkieAudio() {
+        await ensureWalkieAudio();
+        walkiePlayCursor = walkieAudioCtx.currentTime + 0.08;
+        const resp = await fetch("/api/subghz/walkie/audio/recent", { cache: "no-store" });
+        if (resp.status === 204) {
+          runState.textContent = "No recent walkie audio buffered yet";
+          return;
+        }
+        if (!resp.ok) throw new Error(`Recent walkie audio fetch failed (${resp.status})`);
+        const buffer = await resp.arrayBuffer();
+        if (!buffer.byteLength) {
+          runState.textContent = "No recent walkie audio buffered yet";
+          return;
+        }
+        queueWalkiePcm(buffer);
+        runState.textContent = "Playing recent walkie audio";
+      }
+
       function showFollowMenu(event, card) {
         const channel = Number(card.dataset.followChannel);
-        const fmFreq = Number(card.dataset.playFreqMhz);
+        const playProtocol = String(card.dataset.playProtocol || "");
+        const fmFreq = playProtocol === "fm" ? Number(card.dataset.playFreqMhz) : NaN;
+        const walkieFreq = playProtocol === "walkie" ? Number(card.dataset.playFreqMhz) : NaN;
         const zigbee = Number.isFinite(channel);
         const fm = Number.isFinite(fmFreq);
-        if (!zigbee && !fm) return;
+        const walkie = Number.isFinite(walkieFreq);
+        if (!zigbee && !fm && !walkie) return;
         event.preventDefault();
         const actions = [];
         if (zigbee) {
@@ -3966,12 +4360,25 @@
             </button>
           `);
         }
+        if (walkie) {
+          const playing = latestStatus?.walkie_playback?.running && Math.abs((playingWalkieMhz() ?? -999) - walkieFreq) < 0.05;
+          actions.push(`
+            <button type="button" data-walkie-menu-action="${playing ? "stop" : "play"}" data-freq-mhz="${walkieFreq.toFixed(3)}">
+              ${materialIcon(playing ? "stop" : "play_arrow")}
+              ${playing ? `Stop walkie ${walkieFreq.toFixed(3)} MHz` : `Play walkie ${walkieFreq.toFixed(3)} MHz`}
+            </button>
+            <button type="button" data-walkie-menu-action="recent">
+              ${materialIcon("history")}
+              Play recent walkie audio
+            </button>
+          `);
+        }
         followMenu.innerHTML = actions.join("");
         positionContextMenu(event, 210);
       }
 
       function handleFollowContextMenu(event) {
-        const card = event.target.closest("[data-follow-protocol='zigbee'], [data-play-protocol='fm']");
+        const card = event.target.closest("[data-follow-protocol='zigbee'], [data-play-protocol='fm'], [data-play-protocol='walkie']");
         if (!card) return;
         showFollowMenu(event, card);
       }
@@ -3997,24 +4404,95 @@
           </button>
         `;
         positionContextMenu(event, 250);
+        followMenu.dataset.anchorX = String(event.clientX);
+        followMenu.dataset.anchorY = String(event.clientY);
+      }
+
+      function closeProtocolConfigOverlay() {
+        protocolConfigOverlay.hidden = true;
+        protocolConfigOptions.innerHTML = "";
+        protocolConfigDraft = null;
+      }
+
+      function showProtocolConfigurePanel(key) {
+        const control = protocolControls.find((item) => item.key === key);
+        if (!control) return;
+        const options = [];
+        protocolConfigTitle.textContent = `Configure ${control.label}`;
+        protocolConfigSubtitle.textContent = key === "wifi"
+          ? "Choose the WiFi monitor channel set RF Sentinel should hop."
+          : "Choose which non-BTC/BLE radio should scan this protocol, or leave it on auto assignment.";
+        if (key === "wifi") {
+          WIFI_CHANNEL_GROUPS.forEach((group) => {
+            const active = group.channels.join(",") === wifiChannelSelection.join(",");
+            options.push(`
+              <button type="button" class="config-option ${active ? "active" : ""}" data-wifi-channel-group="${group.channels.join(",")}">
+                <div>
+                  <strong>${group.label}</strong>
+                  <span>Channels ${group.channels.join(", ")}</span>
+                </div>
+                ${materialIcon(active ? "radio_button_checked" : "radio_button_unchecked")}
+              </button>
+            `);
+          });
+        } else if (DEVICE_SELECT_PROTOCOLS.has(key)) {
+          const devices = selectableProtocolDevices();
+          devices.forEach((device) => {
+            const id = String(device.id || "");
+            const active = protocolDeviceOverrides[key] === id;
+            const label = String(device.label || id);
+            const driver = String(device.driver || "").toUpperCase();
+            options.push(`
+              <button type="button" class="config-option ${active ? "active" : ""}" data-protocol-device-key="${key}" data-protocol-device-id="${id}">
+                <div>
+                  <strong>${label}</strong>
+                  <span>${id}${driver ? ` · ${driver}` : ""}</span>
+                </div>
+                ${materialIcon(active ? "radio_button_checked" : "radio_button_unchecked")}
+              </button>
+            `);
+          });
+          options.push(`
+            <button type="button" class="config-option ${protocolDeviceOverrides[key] ? "" : "active"}" data-protocol-device-key="${key}" data-protocol-device-id="">
+              <div>
+                <strong>Auto assign</strong>
+                <span>Let RF Sentinel choose a compatible non-Radio-A SDR.</span>
+              </div>
+              ${materialIcon(protocolDeviceOverrides[key] ? "radio_button_unchecked" : "radio_button_checked")}
+            </button>
+          `);
+        }
+        if (!options.length) {
+          showToast(`${control.label} has no extra settings yet`);
+          return;
+        }
+        protocolConfigDraft = { key };
+        protocolConfigOptions.innerHTML = options.join("");
+        protocolConfigOverlay.hidden = false;
       }
 
       async function handleFollowClick(event) {
         const menuButton = event.target.closest("[data-follow-menu-action]");
         const fmButton = event.target.closest("[data-fm-menu-action]");
+        const walkieButton = event.target.closest("[data-walkie-menu-action]");
         const protocolButton = event.target.closest("[data-protocol-menu-action]");
         const unlockButton = event.target.closest("[data-unfollow-zigbee]");
         const stopFmButton = event.target.closest("[data-stop-fm]");
-        if (!menuButton && !unlockButton && !fmButton && !stopFmButton && !protocolButton) return;
+        const stopWalkieButton = event.target.closest("[data-stop-walkie]");
+        const recentWalkieButton = event.target.closest("[data-play-walkie-recent]");
+        if (!menuButton && !unlockButton && !fmButton && !walkieButton && !stopFmButton && !stopWalkieButton && !recentWalkieButton && !protocolButton) return;
         event.preventDefault();
         event.stopPropagation();
+        if (typeof event.stopImmediatePropagation === "function") event.stopImmediatePropagation();
         hideFollowMenu();
+        let keepMenuOpen = false;
         try {
           if (protocolButton) {
             const key = String(protocolButton.dataset.protocolKey || "");
             const action = String(protocolButton.dataset.protocolMenuAction || "");
             if (action === "configure") {
-              showToast("TBD later");
+              showProtocolConfigurePanel(key);
+              return;
             } else {
               setProtocolEnabled(key, action === "enable");
             }
@@ -4022,6 +4500,12 @@
             await setFmPlayback(null);
           } else if (fmButton) {
             await setFmPlayback(Number(fmButton.dataset.freqMhz));
+          } else if (recentWalkieButton || (walkieButton && walkieButton.dataset.walkieMenuAction === "recent")) {
+            await playRecentWalkieAudio();
+          } else if (stopWalkieButton || (walkieButton && walkieButton.dataset.walkieMenuAction === "stop")) {
+            await setWalkiePlayback(null);
+          } else if (walkieButton) {
+            await setWalkiePlayback(Number(walkieButton.dataset.freqMhz));
           } else if (unlockButton || menuButton.dataset.followMenuAction === "unfollow") {
             await setZigbeeFollow(null);
           } else {
@@ -4030,7 +4514,7 @@
         } catch (err) {
           runState.textContent = err.message || "Follow update failed";
         } finally {
-          hideFollowMenu();
+          if (!keepMenuOpen) hideFollowMenu();
         }
       }
 
@@ -4072,6 +4556,8 @@
             preserve_detections: preserve,
             protocols,
             devices: selectedSdrPayload(),
+            wifi_channels: cleanWifiChannels(wifiChannelSelection),
+            protocol_devices: protocolDevicePayload(),
             sweep_both_radios: false,
           }),
         });
@@ -4153,6 +4639,48 @@
         await applyProtocolSelection();
         refreshPlannedStatusLabel();
       });
+      protocolConfigOptions.addEventListener("click", (event) => {
+        const wifiButton = event.target.closest("[data-wifi-channel-group]");
+        const deviceButton = event.target.closest("[data-protocol-device-key]");
+        if (!wifiButton && !deviceButton) return;
+        event.preventDefault();
+        if (wifiButton) {
+          protocolConfigDraft = {
+            key: "wifi",
+            wifi_channels: cleanWifiChannels(String(wifiButton.dataset.wifiChannelGroup || "").split(",")),
+          };
+        } else {
+          protocolConfigDraft = {
+            key: String(deviceButton.dataset.protocolDeviceKey || "").toLowerCase(),
+            device_id: String(deviceButton.dataset.protocolDeviceId || "").trim(),
+          };
+        }
+        protocolConfigOptions.querySelectorAll(".config-option").forEach((item) => item.classList.remove("active"));
+        event.target.closest(".config-option")?.classList.add("active");
+      });
+      async function applyProtocolConfigOverlay() {
+        if (!protocolConfigDraft?.key) {
+          closeProtocolConfigOverlay();
+          return;
+        }
+        if (protocolConfigDraft.key === "wifi" && protocolConfigDraft.wifi_channels) {
+          wifiChannelSelection = cleanWifiChannels(protocolConfigDraft.wifi_channels);
+        } else if (DEVICE_SELECT_PROTOCOLS.has(protocolConfigDraft.key)) {
+          if (protocolConfigDraft.device_id) protocolDeviceOverrides[protocolConfigDraft.key] = protocolConfigDraft.device_id;
+          else delete protocolDeviceOverrides[protocolConfigDraft.key];
+        }
+        renderProtocolControls();
+        closeProtocolConfigOverlay();
+        await applyProtocolSelection({ commit: true });
+      }
+      protocolConfigApply.addEventListener("click", () => {
+        applyProtocolConfigOverlay().catch((err) => showToast(err.message || "Config apply failed"));
+      });
+      protocolConfigClose.addEventListener("click", closeProtocolConfigOverlay);
+      protocolConfigCancel.addEventListener("click", closeProtocolConfigOverlay);
+      protocolConfigOverlay.addEventListener("click", (event) => {
+        if (event.target === protocolConfigOverlay) closeProtocolConfigOverlay();
+      });
       document.querySelector(".protocol-toggles")?.addEventListener("click", (event) => {
         if (event.target.closest(".protocol-row")) event.preventDefault();
       });
@@ -4173,7 +4701,7 @@
           [btcTabBtn, "BTC"],
           [btleTabBtn, "BTLE"],
           [zigbeeTabBtn, "ZIGBEE"],
-          [tpmsTabBtn, "TPMS"],
+          [tpmsTabBtn, "SUBGHZ"],
           [wifiTabBtn, "WIFI"],
           [fmTabBtn, "FM"],
           [lfmfTabBtn, "LFMF"],
@@ -4186,7 +4714,7 @@
       btcTabBtn.addEventListener("click", () => setDetectionTab("BTC"));
       btleTabBtn.addEventListener("click", () => setDetectionTab("BTLE"));
       zigbeeTabBtn.addEventListener("click", () => setDetectionTab("ZIGBEE"));
-      tpmsTabBtn.addEventListener("click", () => setDetectionTab("TPMS"));
+      tpmsTabBtn.addEventListener("click", () => setDetectionTab("SUBGHZ"));
       wifiTabBtn.addEventListener("click", () => setDetectionTab("WIFI"));
       fmTabBtn.addEventListener("click", () => setDetectionTab("FM"));
       lfmfTabBtn.addEventListener("click", () => setDetectionTab("LFMF"));
@@ -4221,7 +4749,7 @@
         await loadDevices();
         pollStatus();
       })();
-      setInterval(pollStatus, 900);
+      setInterval(pollStatus, 350);
     </script>
   </body>
 </html>

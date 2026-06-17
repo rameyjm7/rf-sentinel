@@ -19,8 +19,8 @@ DEFAULT_HOP_DEVICE = "hackrf:0"
 DEFAULT_BTC_CENTER_MHZ = 2442.0
 DEFAULT_BTC_BANDWIDTH_MHZ = 60
 DEFAULT_BLE_DWELL_S = 0.5
-DEFAULT_JOB_DWELL_S = 8.0
-DEFAULT_ZIGBEE_SLICE_S = 16.0
+DEFAULT_JOB_DWELL_S = 30.0
+DEFAULT_ZIGBEE_SLICE_S = 30.0
 DEFAULT_ZIGBEE_DISCOVERY_SWEEP_S = 2.0
 DEFAULT_ZIGBEE_ACTIVE_DWELL_S = 1.0
 DEFAULT_ZIGBEE_FOLLOW_SAMPLE_RATE_SPS = 8_000_000
@@ -32,6 +32,8 @@ DEFAULT_LFMF_INTERVAL_S = 120.0
 DEFAULT_CELLULAR_CENTER_FREQ_HZ = 751_000_000
 DEFAULT_CELLULAR_SAMPLE_RATE_SPS = 20_000_000
 DEFAULT_CELLULAR_SLICE_S = 12.0
+DEFAULT_WALKIE_CENTER_FREQ_HZ = 462_500_000
+DEFAULT_WALKIE_SAMPLE_RATE_SPS = 1_000_000
 
 
 @dataclass(frozen=True)
@@ -50,6 +52,8 @@ class ProcessSupervisor:
         self.stop_requested = threading.Event()
 
     def start(self, job: ScanJob) -> subprocess.Popen[str]:
+        env = os.environ.copy()
+        env["PYTHONUNBUFFERED"] = "1"
         proc = subprocess.Popen(
             job.command,
             stdout=subprocess.PIPE,
@@ -57,7 +61,7 @@ class ProcessSupervisor:
             text=True,
             bufsize=1,
             start_new_session=True,
-            env=os.environ.copy(),
+            env=env,
         )
         with self._lock:
             self._processes[job.name] = proc
@@ -77,6 +81,15 @@ class ProcessSupervisor:
             names = list(self._processes)
         for name in names:
             self.stop(name)
+
+    def is_running(self, name: str) -> bool:
+        with self._lock:
+            proc = self._processes.get(name)
+        return bool(proc is not None and proc.poll() is None)
+
+    def names(self) -> list[str]:
+        with self._lock:
+            return list(self._processes)
 
     def _pipe_output(self, name: str, proc: subprocess.Popen[str]) -> None:
         assert proc.stdout is not None
@@ -269,6 +282,32 @@ def _build_jobs(args: argparse.Namespace) -> tuple[list[ScanJob], list[ScanJob]]
             ],
         )
 
+    def walkie_job(name: str, device_id: str) -> ScanJob:
+        return ScanJob(
+            name=name,
+            protocol="walkie",
+            dwell_s=args.walkie_slice_s,
+            command=[
+                _bin("walkie_talkie_scanner"),
+                "scan",
+                "--device-id",
+                device_id,
+                "--center-freq-hz",
+                str(args.walkie_center_freq_hz),
+                "--sample-rate-sps",
+                str(args.walkie_sample_rate_sps),
+                "--baseband-filter-hz",
+                str(args.walkie_baseband_filter_hz),
+                "--scan-window-s",
+                str(args.walkie_slice_s),
+                "--lna-gain-db",
+                str(args.walkie_lna_gain_db),
+                "--vga-gain-db",
+                str(args.walkie_vga_gain_db),
+                "--json",
+            ],
+        )
+
     def wifi_job(name: str) -> ScanJob:
         command = [
             _bin("wifi_scanner"),
@@ -296,37 +335,57 @@ def _build_jobs(args: argparse.Namespace) -> tuple[list[ScanJob], list[ScanJob]]
         return ScanJob(name=name, protocol="wifi", dwell_s=args.wifi_slice_s, command=command)
 
     def fm_job(name: str, device_id: str) -> ScanJob:
+        is_hackrf = str(device_id or "").strip().lower().startswith("hackrf:")
+        is_bladerf = str(device_id or "").strip().lower().startswith("bladerf:")
+        discovery_mode = "wideband" if is_bladerf else str(args.fm_discovery_mode)
+        sample_rate_sps = max(int(args.fm_sample_rate_sps), 20_000_000) if is_bladerf else int(args.fm_sample_rate_sps)
+        sweep_prominence_db = 0.0 if is_hackrf else float(args.fm_sweep_prominence_db)
+        station_merge_hz = 0 if is_hackrf else int(args.fm_station_merge_hz)
+        active_threshold_db = 4.0 if is_hackrf else float(args.fm_active_threshold_db)
+        min_power_dbfs = -90.0 if is_hackrf else float(args.fm_min_power_dbfs)
+        max_stations = max(int(args.fm_max_stations), 50) if is_hackrf else int(args.fm_max_stations)
+        command = [
+            _bin("fm_broadcast"),
+            "scan",
+            "--device-id",
+            device_id,
+            "--json",
+            "--tuner-offset-hz",
+            str(args.fm_tuner_offset_hz),
+            "--discovery-mode",
+            discovery_mode,
+            "--sample-rate-sps",
+            str(sample_rate_sps),
+            "--sweep-bin-width-hz",
+            str(args.fm_sweep_bin_width_hz),
+            "--sweep-prominence-db",
+            str(sweep_prominence_db),
+            "--station-merge-hz",
+            str(station_merge_hz),
+            "--discovery-dwell-s",
+            str(args.fm_discovery_dwell_s),
+            "--decode-dwell-s",
+            str(args.fm_decode_dwell_s),
+            "--active-threshold-db",
+            str(active_threshold_db),
+            "--min-power-dbfs",
+            str(min_power_dbfs),
+            "--max-stations",
+            str(max_stations),
+            "--lna-gain-db",
+            str(args.fm_lna_gain_db),
+            "--vga-gain-db",
+            str(args.fm_vga_gain_db),
+        ]
+        if args.fm_debug:
+            command.append("--debug")
+        if args.fm_skip_decode:
+            command.append("--skip-decode")
         return ScanJob(
             name=name,
             protocol="fm",
             dwell_s=args.fm_slice_s,
-            command=[
-                _bin("fm_broadcast"),
-                "scan",
-                "--device-id",
-                device_id,
-                "--json",
-                "--discovery-mode",
-                args.fm_discovery_mode,
-                "--sample-rate-sps",
-                str(args.fm_sample_rate_sps),
-                "--sweep-bin-width-hz",
-                str(args.fm_sweep_bin_width_hz),
-                "--discovery-dwell-s",
-                str(args.fm_discovery_dwell_s),
-                "--decode-dwell-s",
-                str(args.fm_decode_dwell_s),
-                "--active-threshold-db",
-                str(args.fm_active_threshold_db),
-                "--min-power-dbfs",
-                str(args.fm_min_power_dbfs),
-                "--max-stations",
-                str(args.fm_max_stations),
-                "--lna-gain-db",
-                str(args.fm_lna_gain_db),
-                "--vga-gain-db",
-                str(args.fm_vga_gain_db),
-            ],
+            command=command,
         )
 
     def lfmf_job(name: str, device_id: str) -> ScanJob:
@@ -337,6 +396,8 @@ def _build_jobs(args: argparse.Namespace) -> tuple[list[ScanJob], list[ScanJob]]
             device_id,
             "--band",
             args.lfmf_band,
+            "--step-khz",
+            str(args.lfmf_step_khz),
             "--sample-rate-sps",
             str(args.lfmf_sample_rate_sps),
             "--bandwidth-hz",
@@ -351,6 +412,20 @@ def _build_jobs(args: argparse.Namespace) -> tuple[list[ScanJob], list[ScanJob]]
             "--yes",
             "--replace-existing",
         ]
+        if args.lfmf_wideband:
+            command.extend(
+                [
+                    "--wideband",
+                    "--wideband-center-khz",
+                    str(args.lfmf_wideband_center_khz),
+                    "--wideband-sample-rate-sps",
+                    str(args.lfmf_wideband_sample_rate_sps),
+                    "--wideband-bandwidth-hz",
+                    str(args.lfmf_wideband_bandwidth_hz),
+                    "--active-only",
+                    "--confirm",
+                ]
+            )
         if args.lfmf_serial:
             command.extend(["--serial", args.lfmf_serial])
         return ScanJob(name=name, protocol="lfmf", dwell_s=args.lfmf_slice_s, command=command)
@@ -405,22 +480,22 @@ def _build_jobs(args: argparse.Namespace) -> tuple[list[ScanJob], list[ScanJob]]
         for prefix, device_id, btc_bandwidth_mhz, btc_lna, btc_vga in radios:
             if not device_id:
                 continue
-            if not args.no_btc:
+            if prefix == "radio_a" and not args.no_btc:
                 cycled.append(btc_job(f"{prefix}:btc", device_id, btc_bandwidth_mhz, btc_lna, btc_vga))
-            if not args.no_ble:
+            if prefix == "radio_a" and not args.no_ble:
                 cycled.append(ble_job(f"{prefix}:ble", device_id))
-            if not args.no_zigbee:
+            if prefix == "radio_b" and not args.no_zigbee:
                 cycled.append(zigbee_job(f"{prefix}:zigbee", device_id))
-            if not args.no_tpms:
+            if prefix == "radio_b" and not args.no_tpms:
                 cycled.append(tpms_job(f"{prefix}:tpms", device_id))
             if not args.no_lfmf and _is_sdrplay_device_id(device_id):
                 cycled.append(lfmf_job(f"{prefix}:lfmf", device_id))
-            if not args.no_cellular:
+            if prefix == "radio_b" and not args.no_cellular:
                 cycled.append(cellular_job(f"{prefix}:cellular", device_id))
         if not args.no_fm:
             fm_device_id = _pick_fm_device_id(args)
             if fm_device_id:
-                cycled.append(fm_job("fm:scan", fm_device_id))
+                cycled.append(fm_job("radio_b:fm", fm_device_id))
             else:
                 print("[rf-sentinel] FM disabled; no allowed FM-capable SDR", flush=True)
         return continuous, cycled
@@ -441,6 +516,10 @@ def _build_jobs(args: argparse.Namespace) -> tuple[list[ScanJob], list[ScanJob]]
 
     if not args.no_tpms:
         cycled.append(tpms_job("tpms", args.hop_device_id))
+
+    if not args.no_walkie:
+        walkie_device_id = str(args.walkie_device_id or args.hop_device_id).strip() or args.hop_device_id
+        cycled.append(walkie_job("walkie", walkie_device_id))
 
     if not args.no_fm:
         fm_device_id = _pick_fm_device_id(args)
@@ -463,7 +542,7 @@ def _build_jobs(args: argparse.Namespace) -> tuple[list[ScanJob], list[ScanJob]]
 
 
 def _configured_protocols(args: argparse.Namespace) -> set[str]:
-    protocols = {"btc", "ble", "zigbee", "tpms", "wifi", "fm", "lfmf", "cellular"}
+    protocols = {"btc", "ble", "zigbee", "tpms", "walkie", "wifi", "fm", "lfmf", "cellular"}
     if args.no_btc:
         protocols.discard("btc")
     if args.no_ble:
@@ -472,6 +551,8 @@ def _configured_protocols(args: argparse.Namespace) -> set[str]:
         protocols.discard("zigbee")
     if args.no_tpms:
         protocols.discard("tpms")
+    if args.no_walkie:
+        protocols.discard("walkie")
     if args.no_wifi:
         protocols.discard("wifi")
     if args.no_fm:
@@ -494,6 +575,9 @@ def _is_rtlsdr_device_id(device_id: str) -> bool:
 
 
 def _pick_fm_device_id(args: argparse.Namespace) -> str:
+    configured = _control_protocol_device(args, "fm")
+    if configured:
+        return configured
     preferred = str(getattr(args, "fm_device_id", "") or "").strip()
     allowed = [str(item).strip() for item in getattr(args, "allowed_device_id", []) if str(item).strip()]
     if allowed:
@@ -553,6 +637,82 @@ def _enabled_protocols(args: argparse.Namespace) -> set[str]:
     return protocols & live_protocols
 
 
+def _control_protocol_device(args: argparse.Namespace, protocol: str) -> str:
+    payload = _control_payload(args)
+    devices = payload.get("protocol_devices")
+    if not isinstance(devices, dict):
+        return ""
+    protocol_key = str(protocol or "").strip().lower()
+    selected = str(devices.get(protocol_key) or "").strip()
+    if selected:
+        return selected
+    if protocol_key == "walkie":
+        return str(devices.get("tpms") or "").strip()
+    return ""
+
+
+def _control_wifi_channels(args: argparse.Namespace) -> str:
+    payload = _control_payload(args)
+    channels = payload.get("wifi_channels")
+    if not isinstance(channels, list):
+        return ""
+    clean: list[str] = []
+    for channel in channels:
+        try:
+            channel_int = int(channel)
+        except (TypeError, ValueError):
+            continue
+        if channel_int > 0 and str(channel_int) not in clean:
+            clean.append(str(channel_int))
+    return ",".join(clean)
+
+
+def _replace_command_value(command: list[str], flag: str, value: str) -> list[str]:
+    updated = list(command)
+    try:
+        updated[updated.index(flag) + 1] = value
+    except (ValueError, IndexError):
+        updated.extend([flag, value])
+    return updated
+
+
+def _fm_apply_device_defaults(command: list[str], device_id: str) -> list[str]:
+    updated = list(command)
+    lowered = str(device_id or "").lower()
+    if lowered.startswith("bladerf:"):
+        updated = _replace_command_value(updated, "--discovery-mode", "wideband")
+        updated = _replace_command_value(updated, "--sample-rate-sps", "20000000")
+    elif lowered.startswith("hackrf:"):
+        updated = _replace_command_value(updated, "--discovery-mode", "sweep")
+        updated = _replace_command_value(updated, "--sample-rate-sps", "20000000")
+        updated = _replace_command_value(updated, "--sweep-prominence-db", "0.0")
+        updated = _replace_command_value(updated, "--station-merge-hz", "0")
+        updated = _replace_command_value(updated, "--active-threshold-db", "4.0")
+        updated = _replace_command_value(updated, "--min-power-dbfs", "-90.0")
+        updated = _replace_command_value(updated, "--max-stations", "50")
+    return updated
+
+
+def _apply_control_overrides(args: argparse.Namespace, job: ScanJob) -> ScanJob:
+    command = list(job.command)
+    changed = False
+    if job.protocol in {"zigbee", "tpms", "walkie", "fm", "cellular"}:
+        device_id = _control_protocol_device(args, job.protocol)
+        if device_id:
+            command = _replace_command_value(command, "--device-id", device_id)
+            if job.protocol == "fm":
+                command = _fm_apply_device_defaults(command, device_id)
+            changed = True
+    if job.protocol == "wifi":
+        channels = _control_wifi_channels(args)
+        if channels:
+            command = _replace_command_value(command, "--channels", channels)
+            changed = True
+    if not changed:
+        return job
+    return ScanJob(name=job.name, protocol=job.protocol, command=command, dwell_s=job.dwell_s, continuous=job.continuous)
+
+
 def _zigbee_follow_channel(args: argparse.Namespace) -> int | None:
     payload = _control_payload(args)
     follow = payload.get("follow")
@@ -570,6 +730,17 @@ def _zigbee_follow_channel(args: argparse.Namespace) -> int | None:
     return None
 
 
+def _zigbee_follow_device_id(args: argparse.Namespace) -> str:
+    payload = _control_payload(args)
+    follow = payload.get("follow")
+    if not isinstance(follow, dict):
+        return ""
+    zigbee = follow.get("zigbee")
+    if not isinstance(zigbee, dict):
+        return ""
+    return str(zigbee.get("device_id") or "").strip()
+
+
 def _command_value(command: list[str], flag: str, default: str = "") -> str:
     try:
         return command[command.index(flag) + 1]
@@ -578,7 +749,7 @@ def _command_value(command: list[str], flag: str, default: str = "") -> str:
 
 
 def _follow_device_id(args: argparse.Namespace) -> str:
-    return str(args.radio_b_device_id or args.hop_device_id or "").strip()
+    return _zigbee_follow_device_id(args) or str(args.radio_b_device_id or args.hop_device_id or "").strip()
 
 
 def _job_device_id(args: argparse.Namespace, job: ScanJob) -> str:
@@ -590,19 +761,11 @@ def _is_follow_device_job(args: argparse.Namespace, job: ScanJob) -> bool:
     return bool(follow_device) and _job_device_id(args, job) == follow_device
 
 
-def _materialize_job(args: argparse.Namespace, job: ScanJob) -> tuple[ScanJob, str]:
-    if job.protocol != "zigbee":
-        return job, ""
-    follow_channel = _zigbee_follow_channel(args)
-    if follow_channel is None:
-        return job, ""
-    if not _is_follow_device_job(args, job):
-        return job, ""
-    device_id = _command_value(job.command, "--device-id", args.hop_device_id)
-    followed = ScanJob(
-        name=f"{job.name}:follow{follow_channel}",
-        protocol=job.protocol,
-        dwell_s=job.dwell_s,
+def _zigbee_follow_job(args: argparse.Namespace, name: str, device_id: str, follow_channel: int, dwell_s: float) -> ScanJob:
+    return ScanJob(
+        name=name,
+        protocol="zigbee",
+        dwell_s=dwell_s,
         command=[
             _bin("zigbee_802154"),
             "listen",
@@ -627,6 +790,27 @@ def _materialize_job(args: argparse.Namespace, job: ScanJob) -> tuple[ScanJob, s
             "--live-decode-queue",
             str(args.zigbee_live_decode_queue),
         ],
+    )
+
+
+def _materialize_job(args: argparse.Namespace, job: ScanJob) -> tuple[ScanJob, str]:
+    if job.protocol != "zigbee":
+        return job, ""
+    follow_channel = _zigbee_follow_channel(args)
+    if follow_channel is None:
+        return job, ""
+    follow_device_id = _zigbee_follow_device_id(args)
+    if follow_device_id:
+        return job, ""
+    elif _is_follow_device_job(args, job):
+        device_id = _command_value(job.command, "--device-id", args.hop_device_id)
+    else:
+        return job, ""
+    followed = _zigbee_follow_job(
+        name=f"{job.name}:follow{follow_channel}",
+        device_id=device_id,
+        follow_channel=follow_channel,
+        dwell_s=job.dwell_s,
     )
     return followed, str(follow_channel)
 
@@ -665,13 +849,45 @@ def _run(args: argparse.Namespace) -> int:
         print(f"[rf-sentinel] starting continuous {job.name}: {_format_command(job.command)}", flush=True)
         supervisor.start(job)
 
+    def sync_zigbee_follow_sidecar(group_name: str) -> None:
+        if group_name not in {"main", "radio_b"}:
+            return
+        prefix = f"{group_name}:zigbee-follow:"
+        follow_channel = _zigbee_follow_channel(args)
+        follow_device = _zigbee_follow_device_id(args)
+        enabled = "zigbee" in _enabled_protocols(args)
+        wanted_name = ""
+        if enabled and follow_channel is not None and follow_device:
+            safe_device = follow_device.replace(":", "_").replace("/", "_")
+            wanted_name = f"{prefix}{safe_device}:ch{follow_channel}"
+        for name in supervisor.names():
+            if name.startswith(prefix) and name != wanted_name:
+                print(f"[rf-sentinel] stopping zigbee follow sidecar job={name}", flush=True)
+                supervisor.stop(name)
+        if not wanted_name or supervisor.is_running(wanted_name):
+            return
+        job = _zigbee_follow_job(
+            args,
+            name=wanted_name,
+            device_id=follow_device,
+            follow_channel=int(follow_channel),
+            dwell_s=86_400.0,
+        )
+        print(
+            f"[rf-sentinel] sidecar group={group_name} job={job.name} dwell_s=continuous: {_format_command(job.command)}",
+            flush=True,
+        )
+        supervisor.start(job)
+
     def cycle_jobs(name: str, jobs: list[ScanJob]) -> None:
         cycle_index = 0
         idle_notice = False
         next_run_at: dict[str, float] = {}
         while jobs and not supervisor.stop_requested.is_set():
+            sync_zigbee_follow_sidecar(name)
             job = jobs[cycle_index % len(jobs)]
             cycle_index += 1
+            job = _apply_control_overrides(args, job)
             enabled_protocols = _enabled_protocols(args)
             priority_protocol = _priority_protocol(args, job)
             if priority_protocol and job.protocol != priority_protocol:
@@ -712,7 +928,7 @@ def _run(args: argparse.Namespace) -> int:
                 if priority_protocol and job.protocol != priority_protocol:
                     print(f"[rf-sentinel] stopping deprioritized job={active_job.name}", flush=True)
                     break
-                if job.protocol == "zigbee" and str(_zigbee_follow_channel(args) or "") != follow_marker:
+                if follow_marker and job.protocol == "zigbee" and str(_zigbee_follow_channel(args) or "") != follow_marker:
                     print(f"[rf-sentinel] retuning zigbee job={active_job.name}", flush=True)
                     break
                 time.sleep(0.1)
@@ -745,8 +961,10 @@ def _run(args: argparse.Namespace) -> int:
         idle_notice = False
         next_run_at: dict[str, float] = {}
         while not supervisor.stop_requested.is_set():
+            sync_zigbee_follow_sidecar("main")
             job = cycled[cycle_index % len(cycled)]
             cycle_index += 1
+            job = _apply_control_overrides(args, job)
             enabled_protocols = _enabled_protocols(args)
             priority_protocol = _priority_protocol(args, job)
             if priority_protocol and job.protocol != priority_protocol:
@@ -787,7 +1005,7 @@ def _run(args: argparse.Namespace) -> int:
                 if priority_protocol and job.protocol != priority_protocol:
                     print(f"[rf-sentinel] stopping deprioritized job={active_job.name}", flush=True)
                     break
-                if job.protocol == "zigbee" and str(_zigbee_follow_channel(args) or "") != follow_marker:
+                if follow_marker and job.protocol == "zigbee" and str(_zigbee_follow_channel(args) or "") != follow_marker:
                     print(f"[rf-sentinel] retuning zigbee job={active_job.name}", flush=True)
                     break
                 time.sleep(0.1)
@@ -851,6 +1069,14 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--tpms-lna-gain-db", type=int, default=16)
     parser.add_argument("--tpms-vga-gain-db", type=int, default=20)
 
+    parser.add_argument("--walkie-device-id", default="", help="Preferred SDR for walkie-talkie detection")
+    parser.add_argument("--walkie-slice-s", type=float, default=DEFAULT_JOB_DWELL_S)
+    parser.add_argument("--walkie-center-freq-hz", type=int, default=DEFAULT_WALKIE_CENTER_FREQ_HZ)
+    parser.add_argument("--walkie-sample-rate-sps", type=int, default=DEFAULT_WALKIE_SAMPLE_RATE_SPS)
+    parser.add_argument("--walkie-baseband-filter-hz", type=int, default=250_000)
+    parser.add_argument("--walkie-lna-gain-db", type=int, default=24)
+    parser.add_argument("--walkie-vga-gain-db", type=int, default=28)
+
     parser.add_argument("--wifi-slice-s", type=float, default=DEFAULT_JOB_DWELL_S)
     parser.add_argument("--wifi-interface", default=os.getenv("RF_SENTINEL_WIFI_INTERFACE", DEFAULT_WIFI_INTERFACE))
     parser.add_argument("--wifi-command", choices=("scapy", "tcpdump", "tshark"), default="scapy")
@@ -865,27 +1091,42 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--fm-slice-s", type=float, default=DEFAULT_JOB_DWELL_S)
     parser.add_argument("--fm-interval-s", type=float, default=DEFAULT_FM_INTERVAL_S)
     parser.add_argument("--fm-device-id", default=DEFAULT_FM_DEVICE, help="Preferred SDR for FM broadcast discovery")
+    parser.add_argument("--fm-tuner-offset-hz", type=int, default=0)
     parser.add_argument("--fm-discovery-mode", choices=("auto", "wideband", "sweep", "iq"), default="sweep")
     parser.add_argument("--fm-sample-rate-sps", type=int, default=DEFAULT_FM_SAMPLE_RATE_SPS)
     parser.add_argument("--fm-sweep-bin-width-hz", type=int, default=100_000)
+    parser.add_argument("--fm-sweep-prominence-db", type=float, default=2.0)
+    parser.add_argument("--fm-station-merge-hz", type=int, default=300_000)
     parser.add_argument("--fm-discovery-dwell-s", type=float, default=3.0)
     parser.add_argument("--fm-decode-dwell-s", type=float, default=1.0)
-    parser.add_argument("--fm-active-threshold-db", type=float, default=6.0)
-    parser.add_argument("--fm-min-power-dbfs", type=float, default=-115.0)
+    parser.add_argument("--fm-active-threshold-db", type=float, default=10.0)
+    parser.add_argument("--fm-min-power-dbfs", type=float, default=-102.0)
     parser.add_argument("--fm-max-stations", type=int, default=24)
     parser.add_argument("--fm-lna-gain-db", type=int, default=32)
     parser.add_argument("--fm-vga-gain-db", type=int, default=32)
+    parser.add_argument("--fm-debug", action=argparse.BooleanOptionalAction, default=True)
+    parser.add_argument(
+        "--fm-skip-decode",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help="emit FM sweep candidates without the slower retuned pilot/RDS quality pass",
+    )
 
     parser.add_argument("--lfmf-device-id", default="sdrplay:0", help="SDRplay device reserved for VLF/LF/MF scans")
     parser.add_argument("--lfmf-serial", default=os.getenv("SDRPLAY_SERIAL", ""))
-    parser.add_argument("--lfmf-band", choices=("vlf", "lf", "mf", "am", "1khz-1mhz", "vlf-lf-mf"), default="vlf-lf-mf")
+    parser.add_argument("--lfmf-band", choices=("vlf", "lf", "mf", "am", "1khz-1mhz", "vlf-lf-mf"), default="1khz-1mhz")
     parser.add_argument("--lfmf-slice-s", type=float, default=90.0)
     parser.add_argument("--lfmf-interval-s", type=float, default=DEFAULT_LFMF_INTERVAL_S)
-    parser.add_argument("--lfmf-sample-rate-sps", type=int, default=250_000)
-    parser.add_argument("--lfmf-bandwidth-hz", type=int, default=80_000)
-    parser.add_argument("--lfmf-dwell-s", type=float, default=0.16)
+    parser.add_argument("--lfmf-sample-rate-sps", type=int, default=1_000_000)
+    parser.add_argument("--lfmf-bandwidth-hz", type=int, default=1_000_000)
+    parser.add_argument("--lfmf-dwell-s", type=float, default=0.35)
     parser.add_argument("--lfmf-active-threshold-db", type=float, default=6.0)
-    parser.add_argument("--lfmf-top-signals", type=int, default=50)
+    parser.add_argument("--lfmf-top-signals", type=int, default=20)
+    parser.add_argument("--lfmf-step-khz", type=int, default=5)
+    parser.add_argument("--lfmf-wideband", action=argparse.BooleanOptionalAction, default=True)
+    parser.add_argument("--lfmf-wideband-center-khz", type=int, default=501)
+    parser.add_argument("--lfmf-wideband-sample-rate-sps", type=int, default=1_000_000)
+    parser.add_argument("--lfmf-wideband-bandwidth-hz", type=int, default=1_000_000)
 
     parser.add_argument("--cellular-slice-s", type=float, default=DEFAULT_CELLULAR_SLICE_S)
     parser.add_argument("--cellular-interval-s", type=float, default=30.0)
@@ -905,6 +1146,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--no-ble", action="store_true")
     parser.add_argument("--no-zigbee", action="store_true")
     parser.add_argument("--no-tpms", action="store_true")
+    parser.add_argument("--no-walkie", action="store_true")
     parser.add_argument("--no-wifi", action="store_true")
     parser.add_argument("--no-fm", action="store_true")
     parser.add_argument("--no-lfmf", action="store_true")
@@ -916,7 +1158,7 @@ def build_parser() -> argparse.ArgumentParser:
         help="SDR device allowed by the UI; repeatable and currently used for compatibility with UI launches",
     )
     parser.add_argument("--control-file", default="", help="optional JSON file with a live protocols list")
-    parser.add_argument("--once", action="store_true", help="run one BLE/Zigbee/TPMS cycle and exit")
+    parser.add_argument("--once", action="store_true", help="run one BLE/Zigbee/TPMS/Walkie cycle and exit")
     return parser
 
 

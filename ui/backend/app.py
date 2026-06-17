@@ -15,6 +15,7 @@ import sys
 import threading
 import time
 import zipfile
+from collections import deque
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
@@ -79,7 +80,13 @@ RF_SENTINEL_ARCHIVE_DIR = RF_SENTINEL_LOG_DIR / "archives"
 RF_SENTINEL_CSV_RETENTION_DAYS = max(1, int(os.getenv("RF_SENTINEL_CSV_RETENTION_DAYS", "7")))
 RF_SENTINEL_CSV_ARCHIVE_MAX_MB = max(1, int(os.getenv("RF_SENTINEL_CSV_ARCHIVE_MAX_MB", "1000")))
 RF_SENTINEL_NO_CHANGE = object()
-RF_SENTINEL_PROTOCOLS = {"btc", "ble", "zigbee", "tpms", "wifi", "fm", "lfmf", "cellular"}
+RF_SENTINEL_PROTOCOLS = {"btc", "ble", "zigbee", "tpms", "walkie", "wifi", "fm", "lfmf", "cellular"}
+WIFI_SUPPORTED_CHANNELS = {
+    1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13,
+    36, 40, 44, 48, 52, 56, 60, 64,
+    100, 104, 108, 112, 116, 120, 124, 128, 132, 136, 140,
+}
+PROTOCOL_DEVICE_OVERRIDES = {"zigbee", "tpms", "walkie", "fm", "cellular"}
 RF_SENTINEL_KEEP_BAD_FCS = os.getenv("RF_SENTINEL_KEEP_BAD_FCS", "0").strip().lower() in {"1", "true", "yes", "on"}
 BLE_IDENTITY_CACHE_PATH = DATA_DIR / "ble_identities.json"
 COMPANY_IDENTIFIERS_PATH = DATA_DIR / "company_identifiers.json"
@@ -116,13 +123,13 @@ def _design_lowpass_taps(sample_rate_hz: int, cutoff_hz: float, num_taps: int) -
 
 
 class FmAudioDemod:
-    def __init__(self, in_rate: int, out_rate: int = 48_000) -> None:
+    def __init__(self, in_rate: int, out_rate: int = 48_000, channel_cutoff_hz: float = 125_000.0) -> None:
         self.in_rate = int(in_rate)
         self.out_rate = int(out_rate)
         self.decim = max(1, int(round(self.in_rate / 240_000.0)))
         self.demod_rate = self.in_rate / float(self.decim)
         self.prev = np.complex64(1.0 + 0j)
-        self.channel_filter = self._design_lowpass(257, 125_000.0, float(self.in_rate))
+        self.channel_filter = self._design_lowpass(257, channel_cutoff_hz, float(self.in_rate))
         self._channel_tail = np.zeros(max(0, self.channel_filter.size - 1), dtype=np.complex64)
         self.mono_filter = self._design_lowpass(129, 15_000.0, float(self.demod_rate))
         self._mono_tail = np.zeros(max(0, self.mono_filter.size - 1), dtype=np.float32)
@@ -320,6 +327,29 @@ class FmPlaybackState:
     produced_chunks: int = 0
     served_chunks: int = 0
     empty_audio_polls: int = 0
+    scanner_protocol_paused: bool = False
+
+
+@dataclass
+class WalkiePlaybackState:
+    running: bool = False
+    pending: bool = False
+    pending_freq_mhz: float = 0.0
+    pending_device_id: str = ""
+    device_id: str = ""
+    freq_mhz: float = 462.5
+    sample_rate_sps: int = 1_000_000
+    lna_gain_db: int = 16
+    vga_gain_db: int = 20
+    stream_id: str = ""
+    worker_alive: bool = False
+    worker_error: str = ""
+    last_audio_rms: float = 0.0
+    produced_chunks: int = 0
+    served_chunks: int = 0
+    recent_chunks: int = 0
+    recent_started_at: float = 0.0
+    recent_updated_at: float = 0.0
     scanner_protocol_paused: bool = False
 
 
@@ -1503,6 +1533,7 @@ app.logger.setLevel(logging.INFO)
 logging.getLogger("werkzeug").setLevel(logging.WARNING)
 state = ExplorerState()
 fm_playback = FmPlaybackState()
+walkie_playback = WalkiePlaybackState()
 state_lock = threading.RLock()
 csv_log_lock = threading.Lock()
 identity_cache_lock = threading.Lock()
@@ -1515,6 +1546,13 @@ fm_worker_thread: threading.Thread | None = None
 fm_audio_q: queue.Queue[bytes] = queue.Queue(maxsize=96)
 fm_pending_thread: threading.Thread | None = None
 fm_request_serial = 0
+walkie_worker_stop = threading.Event()
+walkie_worker_thread: threading.Thread | None = None
+walkie_audio_q: queue.Queue[bytes] = queue.Queue(maxsize=96)
+walkie_recent_audio: deque[bytes] = deque(maxlen=160)
+walkie_recent_lock = threading.Lock()
+walkie_pending_thread: threading.Thread | None = None
+walkie_request_serial = 0
 
 CONSOLE_DASHBOARD = os.getenv("RF_SENTINEL_CONSOLE_DASHBOARD", "1").strip().lower() not in {"0", "false", "no", "off"}
 CONSOLE_COLOR = os.getenv("RF_SENTINEL_CONSOLE_COLOR", "1").strip().lower() not in {"0", "false", "no", "off"}
@@ -1602,6 +1640,20 @@ CSV_PROTOCOL_COLUMNS = {
     ],
     "zigbee": ["pan_id", "fcs_ok", "fcs_hex", "decoded_text", "sequence_number", "psdu_hex"],
     "tpms": ["protocol_variant", "sensor_id"],
+    "walkie": [
+        "classification",
+        "modulation",
+        "signal_dbfs",
+        "audio_rms_dbfs",
+        "audio_bandwidth_hz",
+        "voice_band_ratio",
+        "voice_activity_ratio",
+        "occupied_ratio",
+        "freq_std_hz",
+        "saved_iq_path",
+        "saved_meta_path",
+        "saved_wav_path",
+    ],
     "wifi": ["ssid_visible", "count"],
     "fm": ["power_dbfs", "noise_dbfs", "excess_db", "audio_rms", "pilot_db", "rds_subcarrier_db", "stereo_likely", "rds_likely"],
     "lfmf": [
@@ -1653,6 +1705,7 @@ CSV_PROTOCOL_FILE_NAMES = {
     "BTC": "btc.csv",
     "ZIGBEE": "zigbee.csv",
     "TPMS": "tpms.csv",
+    "WALKIE": "walkie.csv",
     "WIFI": "wifi.csv",
     "FM": "fm.csv",
     "LFMF": "lfmf.csv",
@@ -1663,6 +1716,7 @@ CSV_LOGGABLE_KINDS = {
     "classic_lap",
     "zigbee_frame",
     "tpms_frame",
+    "walkie_signal",
     "wifi_frame",
     "fm_station",
     "lfmf_signal",
@@ -2256,6 +2310,11 @@ def _pick_non_bluetooth_hop_device(
     ]
     if not candidates:
         return ""
+    bluetooth_driver = str(bluetooth_device_id or "").split(":", 1)[0].lower()
+    if bluetooth_driver == "bladerf":
+        extra_bladerf = _pick_device(candidates, "bladerf")
+        if extra_bladerf:
+            return extra_bladerf
     return _pick_device(candidates, "hackrf", "sidekiq")
 
 
@@ -2826,6 +2885,26 @@ def _drain_fm_audio_queue() -> None:
             break
 
 
+def _drain_walkie_audio_queue() -> None:
+    while not walkie_audio_q.empty():
+        try:
+            walkie_audio_q.get_nowait()
+        except queue.Empty:
+            break
+
+
+def _append_walkie_recent_audio(pcm: bytes) -> None:
+    if not pcm:
+        return
+    now = time.time()
+    with walkie_recent_lock:
+        if not walkie_recent_audio:
+            walkie_playback.recent_started_at = now
+        walkie_recent_audio.append(bytes(pcm))
+        walkie_playback.recent_chunks = len(walkie_recent_audio)
+        walkie_playback.recent_updated_at = now
+
+
 def _fm_playback_status_payload() -> dict[str, Any]:
     return {
         "running": fm_playback.running,
@@ -2844,6 +2923,30 @@ def _fm_playback_status_payload() -> dict[str, Any]:
         "produced_chunks": fm_playback.produced_chunks,
         "served_chunks": fm_playback.served_chunks,
         "queued_chunks": fm_audio_q.qsize(),
+    }
+
+
+def _walkie_playback_status_payload() -> dict[str, Any]:
+    return {
+        "running": walkie_playback.running,
+        "pending": walkie_playback.pending,
+        "pending_freq_mhz": walkie_playback.pending_freq_mhz,
+        "pending_device_id": walkie_playback.pending_device_id,
+        "device_id": walkie_playback.device_id,
+        "freq_mhz": walkie_playback.freq_mhz,
+        "sample_rate_sps": walkie_playback.sample_rate_sps,
+        "lna_gain_db": walkie_playback.lna_gain_db,
+        "vga_gain_db": walkie_playback.vga_gain_db,
+        "stream_id": walkie_playback.stream_id,
+        "worker_alive": walkie_playback.worker_alive,
+        "worker_error": walkie_playback.worker_error,
+        "last_audio_rms": walkie_playback.last_audio_rms,
+        "produced_chunks": walkie_playback.produced_chunks,
+        "served_chunks": walkie_playback.served_chunks,
+        "queued_chunks": walkie_audio_q.qsize(),
+        "recent_chunks": walkie_playback.recent_chunks,
+        "recent_started_at": walkie_playback.recent_started_at,
+        "recent_updated_at": walkie_playback.recent_updated_at,
     }
 
 
@@ -2878,6 +2981,25 @@ def _current_fm_scanner_device_id() -> str:
     if hop_device:
         return hop_device
     return ""
+
+
+def _current_walkie_scanner_device_id() -> str:
+    assignments = dict(state.scanner_assignments or {})
+    for protocol_name in ("walkie", "tpms"):
+        for assignment in assignments.values():
+            if str(assignment.get("protocol") or "").lower() == protocol_name:
+                device_id = str(assignment.get("device_id") or "").strip()
+                if device_id:
+                    return device_id
+    protocol_devices = _read_ui_config().get("protocol_devices", {})
+    if isinstance(protocol_devices, dict):
+        device_id = str(protocol_devices.get("tpms") or protocol_devices.get("walkie") or "").strip()
+        if device_id:
+            return device_id
+    hop_device = str(state.device_ids.get("hop") or state.device_ids.get("radio_b") or "").strip()
+    if hop_device:
+        return hop_device
+    return "hackrf:0"
 
 
 def _pause_fm_scanner_for_playback() -> None:
@@ -2923,6 +3045,51 @@ def _restore_fm_scanner_after_playback() -> None:
         _append_scanner_log("[ui] FM scanner restored after playback")
 
 
+def _pause_walkie_scanner_for_playback() -> None:
+    protocols = _runtime_enabled_protocols()
+    if not ({"tpms", "walkie"} & protocols):
+        return
+    protocols.discard("tpms")
+    protocols.discard("walkie")
+    existing = _read_rf_sentinel_control()
+    devices = existing.get("devices") if isinstance(existing.get("devices"), list) else None
+    enabled_devices = {str(item).strip() for item in devices if str(item).strip()} if devices is not None else None
+    control = _write_rf_sentinel_control(
+        protocols,
+        enabled_devices=enabled_devices,
+        zigbee_follow_channel=RF_SENTINEL_NO_CHANGE,
+    )
+    with state_lock:
+        state.decoder_stats["enabled_protocols"] = sorted(protocols)
+        state.decoder_stats["follow"] = _follow_state_for_protocols(control, protocols)
+        walkie_playback.scanner_protocol_paused = True
+        _append_scanner_log("[ui] Sub-GHz scanner paused for walkie playback")
+
+
+def _restore_walkie_scanner_after_playback() -> None:
+    if not walkie_playback.scanner_protocol_paused:
+        return
+    walkie_playback.scanner_protocol_paused = False
+    protocols = _runtime_enabled_protocols()
+    saved_protocols = set(_read_ui_config().get("protocols", [])) & RF_SENTINEL_PROTOCOLS
+    if "tpms" in saved_protocols:
+        protocols.add("tpms")
+    if "walkie" in saved_protocols:
+        protocols.add("walkie")
+    existing = _read_rf_sentinel_control()
+    devices = existing.get("devices") if isinstance(existing.get("devices"), list) else None
+    enabled_devices = {str(item).strip() for item in devices if str(item).strip()} if devices is not None else None
+    control = _write_rf_sentinel_control(
+        protocols,
+        enabled_devices=enabled_devices,
+        zigbee_follow_channel=RF_SENTINEL_NO_CHANGE,
+    )
+    with state_lock:
+        state.decoder_stats["enabled_protocols"] = sorted(protocols)
+        state.decoder_stats["follow"] = _follow_state_for_protocols(control, protocols)
+        _append_scanner_log("[ui] Sub-GHz scanner restored after walkie playback")
+
+
 def _device_available(device_id: str) -> bool:
     requested = str(device_id or "").strip()
     if not requested:
@@ -2942,6 +3109,18 @@ def _wait_for_device_available(device_id: str, timeout_s: float = 5.0) -> bool:
     return _device_available(device_id)
 
 
+def _preferred_lock_device(prefer_free: bool = True) -> str:
+    devices = _available_devices()
+    for predicate in (_is_rtlsdr_device,):
+        for device in devices:
+            dev_id = str(device.get("id") or "").strip()
+            if not dev_id or not predicate(device):
+                continue
+            if not prefer_free or not bool(device.get("occupied")):
+                return dev_id
+    return ""
+
+
 def _preferred_fm_playback_device(requested_device_id: str = "") -> str:
     devices = _available_devices()
     requested = str(requested_device_id or "").strip()
@@ -2950,6 +3129,9 @@ def _preferred_fm_playback_device(requested_device_id: str = "") -> str:
             if str(device.get("id") or "").strip() == requested and not bool(device.get("occupied")):
                 return requested
         raise RuntimeError(f"resource busy: SDR {requested} is not free for FM playback")
+    rtl_device = _preferred_lock_device(prefer_free=True)
+    if rtl_device:
+        return rtl_device
     for preferred in ("hackrf", "sidekiq", "bladerf"):
         for device in devices:
             dev_id = str(device.get("id") or "").strip()
@@ -2965,7 +3147,7 @@ def _preferred_fm_playback_device(requested_device_id: str = "") -> str:
 
 def _start_fm_playback_now(freq_mhz: float, requested_device_id: str = "") -> None:
     global fm_worker_thread
-    requested = str(requested_device_id or "").strip() or _current_fm_scanner_device_id()
+    requested = str(requested_device_id or "").strip() or _preferred_lock_device(prefer_free=False) or _current_fm_scanner_device_id()
     active_stream = _gateway_stream_for_device(requested)
     if requested and not _device_available(requested):
         _pause_fm_scanner_for_playback()
@@ -3153,6 +3335,208 @@ def _start_fm_pending_thread(request_serial: int, freq_mhz: float, device_id: st
     fm_pending_thread.start()
 
 
+def _preferred_walkie_playback_device(requested_device_id: str = "") -> str:
+    devices = _available_devices()
+    requested = str(requested_device_id or "").strip()
+    if requested:
+        for device in devices:
+            if str(device.get("id") or "").strip() == requested and not bool(device.get("occupied")):
+                return requested
+        raise RuntimeError(f"resource busy: SDR {requested} is not free for walkie playback")
+    current = _current_walkie_scanner_device_id()
+    for device in devices:
+        if str(device.get("id") or "").strip() == current and not bool(device.get("occupied")):
+            return current
+    for preferred in ("hackrf", "rtlsdr", "sidekiq", "bladerf"):
+        for device in devices:
+            dev_id = str(device.get("id") or "").strip()
+            haystack = f"{dev_id} {str(device.get('label') or '')} {str(device.get('driver') or '')}".lower()
+            if preferred in haystack and not bool(device.get("occupied")):
+                return dev_id
+    for device in devices:
+        dev_id = str(device.get("id") or "").strip()
+        if dev_id and not bool(device.get("occupied")):
+            return dev_id
+    raise RuntimeError("No free SDR is available for walkie playback")
+
+
+def _start_walkie_playback_now(freq_mhz: float = 462.5, requested_device_id: str = "") -> None:
+    global walkie_worker_thread
+    requested = str(requested_device_id or "").strip() or _current_walkie_scanner_device_id()
+    active_stream = _gateway_stream_for_device(requested)
+    if requested and not _device_available(requested):
+        _pause_walkie_scanner_for_playback()
+        if active_stream is None:
+            _force_release_gateway_device(requested)
+            _wait_for_device_available(requested, timeout_s=2.0)
+            active_stream = _gateway_stream_for_device(requested)
+    picked_device_id = requested if active_stream is not None else _preferred_walkie_playback_device(requested)
+    target_freq_hz = int(round(float(freq_mhz) * 1_000_000.0))
+    target_rate = 1_000_000
+    target_filter = 250_000
+    target_lna = 16
+    target_vga = 20
+    if active_stream is not None:
+        stream_id = str(active_stream.get("stream_id") or "").strip()
+        body, actual_rate, actual_lna, actual_vga = _retune_gateway_stream(
+            stream_id,
+            picked_device_id,
+            target_freq_hz,
+            target_rate,
+            target_lna,
+            target_vga,
+            baseband_filter_hz=target_filter,
+        )
+    else:
+        _stop_duplicate_gateway_streams(picked_device_id)
+        body, actual_rate, actual_lna, actual_vga = _start_gateway_stream(
+            picked_device_id,
+            target_freq_hz,
+            target_rate,
+            target_lna,
+            target_vga,
+            baseband_filter_hz=target_filter,
+        )
+    _drain_walkie_audio_queue()
+    stream_id = str(body.get("stream_id") or "")
+    walkie_worker_stop.clear()
+    walkie_playback.running = True
+    walkie_playback.pending = False
+    walkie_playback.pending_freq_mhz = 0.0
+    walkie_playback.pending_device_id = ""
+    walkie_playback.device_id = picked_device_id
+    walkie_playback.freq_mhz = float(freq_mhz)
+    walkie_playback.sample_rate_sps = actual_rate
+    walkie_playback.lna_gain_db = actual_lna
+    walkie_playback.vga_gain_db = actual_vga
+    walkie_playback.stream_id = stream_id
+    walkie_playback.worker_error = ""
+    walkie_playback.last_audio_rms = 0.0
+    walkie_playback.produced_chunks = 0
+    walkie_playback.served_chunks = 0
+    walkie_worker_thread = threading.Thread(target=_walkie_worker_loop, args=(stream_id, actual_rate), daemon=True)
+    walkie_worker_thread.start()
+
+
+def _stop_walkie_playback(stop_stream: bool = True) -> None:
+    global walkie_worker_thread, walkie_request_serial
+    walkie_request_serial += 1
+    walkie_worker_stop.set()
+    if walkie_worker_thread and walkie_worker_thread.is_alive():
+        walkie_worker_thread.join(timeout=2.0)
+    walkie_worker_thread = None
+    if stop_stream and walkie_playback.stream_id:
+        _stop_gateway_stream(walkie_playback.stream_id)
+    _drain_walkie_audio_queue()
+    walkie_playback.running = False
+    walkie_playback.pending = False
+    walkie_playback.pending_freq_mhz = 0.0
+    walkie_playback.pending_device_id = ""
+    walkie_playback.device_id = ""
+    walkie_playback.stream_id = ""
+    walkie_playback.worker_alive = False
+    walkie_playback.worker_error = ""
+    walkie_playback.last_audio_rms = 0.0
+    walkie_playback.produced_chunks = 0
+    walkie_playback.served_chunks = 0
+    _restore_walkie_scanner_after_playback()
+
+
+def _walkie_worker_loop(stream_id: str, sample_rate_sps: int) -> None:
+    demod = FmAudioDemod(sample_rate_sps, out_rate=48_000, channel_cutoff_hz=25_000.0)
+    pcm_accum = bytearray()
+    target_chunk_bytes = 8192
+    headers = []
+    token = _gateway_token()
+    if token:
+        headers.append(f"Authorization: Bearer {token}")
+        headers.append(f"x-api-key: {token}")
+    walkie_playback.worker_alive = True
+    walkie_playback.worker_error = ""
+    try:
+        while not walkie_worker_stop.is_set() and walkie_playback.stream_id == stream_id:
+            ws = websocket.WebSocket()
+            try:
+                ws.connect(_ws_url_for_stream(stream_id), timeout=8, header=headers)
+                ws.settimeout(1.0)
+                while not walkie_worker_stop.is_set() and walkie_playback.stream_id == stream_id:
+                    try:
+                        chunk = ws.recv()
+                    except websocket.WebSocketTimeoutException:
+                        continue
+                    except WebSocketConnectionClosedException:
+                        walkie_playback.worker_error = "Walkie websocket closed"
+                        break
+                    if not isinstance(chunk, (bytes, bytearray)):
+                        continue
+                    pcm = demod.process_iq_i8(bytes(chunk))
+                    if not pcm:
+                        continue
+                    pcm_accum.extend(pcm)
+                    if len(pcm_accum) < target_chunk_bytes:
+                        continue
+                    out = bytes(pcm_accum)
+                    pcm_accum.clear()
+                    audio_i16 = np.frombuffer(out, dtype=np.int16)
+                    if audio_i16.size:
+                        walkie_playback.last_audio_rms = float(np.sqrt(np.mean((audio_i16.astype(np.float32) / 32768.0) ** 2)))
+                    walkie_playback.produced_chunks += 1
+                    _append_walkie_recent_audio(out)
+                    try:
+                        walkie_audio_q.put(out, timeout=0.1)
+                    except queue.Full:
+                        try:
+                            walkie_audio_q.get_nowait()
+                        except queue.Empty:
+                            pass
+                        try:
+                            walkie_audio_q.put_nowait(out)
+                        except queue.Full:
+                            pass
+            except Exception as exc:
+                walkie_playback.worker_error = f"Walkie websocket error: {exc}"
+            finally:
+                try:
+                    ws.close()
+                except Exception:
+                    pass
+            if not walkie_worker_stop.is_set() and walkie_playback.stream_id == stream_id:
+                walkie_worker_stop.wait(0.5)
+    finally:
+        if walkie_playback.stream_id == stream_id:
+            walkie_playback.worker_alive = False
+
+
+def _walkie_pending_loop(request_serial: int, freq_mhz: float, requested_device_id: str) -> None:
+    while request_serial == walkie_request_serial and not walkie_worker_stop.is_set():
+        try:
+            _start_walkie_playback_now(freq_mhz, requested_device_id)
+            return
+        except Exception as exc:
+            if not _fm_busy_error(exc):
+                if request_serial == walkie_request_serial:
+                    walkie_playback.pending = False
+                    walkie_playback.worker_error = f"Walkie start failed: {exc}"
+                    _restore_walkie_scanner_after_playback()
+                return
+            if request_serial == walkie_request_serial:
+                walkie_playback.pending = True
+                walkie_playback.pending_freq_mhz = float(freq_mhz)
+                walkie_playback.pending_device_id = str(requested_device_id or "")
+                walkie_playback.worker_error = "Walkie waiting for SDR availability"
+            time.sleep(0.5)
+
+
+def _start_walkie_pending_thread(request_serial: int, freq_mhz: float, device_id: str) -> None:
+    global walkie_pending_thread
+    walkie_pending_thread = threading.Thread(
+        target=_walkie_pending_loop,
+        args=(request_serial, float(freq_mhz), device_id),
+        daemon=True,
+    )
+    walkie_pending_thread.start()
+
+
 def _printable_hex_text(hex_text: Any) -> str:
     try:
         raw = bytes.fromhex(str(hex_text or ""))
@@ -3249,6 +3633,7 @@ def _csv_protocol_key(event: dict[str, Any]) -> str:
         "classic_lap": "BTC",
         "zigbee_frame": "ZIGBEE",
         "tpms_frame": "TPMS",
+        "walkie_signal": "WALKIE",
         "wifi_frame": "WIFI",
         "fm_station": "FM",
         "lfmf_signal": "LFMF",
@@ -3271,6 +3656,8 @@ def _csv_loggable_event(event: dict[str, Any]) -> bool:
         return bool(event.get("identity") or event.get("source_address") or event.get("destination_address") or event.get("payload_hex") or event.get("psdu_hex"))
     if kind == "tpms_frame":
         return bool(event.get("identity") or event.get("mac") or event.get("payload_hex"))
+    if kind == "walkie_signal":
+        return bool(event.get("identity") or event.get("center_freq_hz") or event.get("classification"))
     if kind == "wifi_frame":
         return bool(event.get("identity") or event.get("source_address") or event.get("destination_address") or event.get("bssid") or event.get("ssid"))
     if kind == "fm_station":
@@ -3624,6 +4011,53 @@ def _scanner_json_to_events(source: str, payload: dict[str, Any]) -> list[dict[s
             }
         ]
 
+    if protocol == "walkie" or source_protocol == "walkie":
+        frequency_hz = payload.get("frequency_hz") or payload.get("center_freq_hz")
+        try:
+            frequency_hz_int = int(frequency_hz)
+        except (TypeError, ValueError):
+            frequency_hz_int = 0
+        label = str(payload.get("identity") or "").strip() or (
+            f"Walkie {frequency_hz_int / 1_000_000:.3f} MHz" if frequency_hz_int else "Walkie activity"
+        )
+        classification = str(payload.get("classification") or "walkie_activity").strip()
+        detail_bits = [
+            str(payload.get("modulation") or "NBFM").strip(),
+            classification.replace("_", " "),
+            f"audio {float(payload.get('audio_rms_dbfs')):.1f} dBFS" if payload.get("audio_rms_dbfs") is not None else "",
+            f"bw {float(payload.get('audio_bandwidth_hz')):.0f} Hz" if payload.get("audio_bandwidth_hz") is not None else "",
+        ]
+        return [
+            {
+                "kind": "walkie_signal",
+                "protocol": "WALKIE",
+                "seen_at": now,
+                "identity": label,
+                "mac": str(frequency_hz_int or label),
+                "detail": " · ".join(bit for bit in detail_bits if bit),
+                "device_type": "Walkie-talkie",
+                "device_type_detail": classification.replace("_", " "),
+                "center_freq_hz": frequency_hz_int or None,
+                "frequency_hz": frequency_hz_int or None,
+                "frequency_mhz": payload.get("frequency_mhz"),
+                "last_rssi_dbfs": payload.get("last_rssi_dbfs") or payload.get("rssi_dbfs") or payload.get("signal_dbfs"),
+                "rssi_dbfs": payload.get("rssi_dbfs") or payload.get("signal_dbfs"),
+                "signal_dbfs": payload.get("signal_dbfs"),
+                "classification": classification,
+                "modulation": payload.get("modulation"),
+                "audio_rms_dbfs": payload.get("audio_rms_dbfs"),
+                "audio_bandwidth_hz": payload.get("audio_bandwidth_hz"),
+                "voice_band_ratio": payload.get("voice_band_ratio"),
+                "voice_activity_ratio": payload.get("voice_activity_ratio"),
+                "occupied_ratio": payload.get("occupied_ratio"),
+                "freq_std_hz": payload.get("freq_std_hz"),
+                "saved_iq_path": payload.get("saved_iq_path"),
+                "saved_meta_path": payload.get("saved_meta_path"),
+                "saved_wav_path": payload.get("saved_wav_path"),
+                "confidence": payload.get("confidence"),
+            }
+        ]
+
     if protocol == "wifi" or source_protocol == "wifi":
         source_mac = str(payload.get("source") or payload.get("mac_sa") or "").strip()
         destination_mac = str(payload.get("destination") or payload.get("mac_da") or "").strip()
@@ -3870,6 +4304,7 @@ def _append_detections(events: list[dict[str, Any]], candidates: list[dict[str, 
                 "classic_lap": "classic",
                 "zigbee_frame": "zigbee",
                 "tpms_frame": "tpms",
+                "walkie_signal": "walkie",
                 "wifi_frame": "wifi",
                 "fm_station": "fm",
                 "lfmf_signal": "lfmf",
@@ -3889,7 +4324,7 @@ def _append_detections(events: list[dict[str, Any]], candidates: list[dict[str, 
                         state.noise_floor_dbfs = round((state.noise_floor_dbfs * 0.92) + (rssi * 0.08), 1)
                 except (TypeError, ValueError):
                     pass
-            if event["kind"] in {"ble_adv", "classic_lap", "zigbee_frame", "tpms_frame", "wifi_frame", "fm_station", "lfmf_signal", "cellular_signal"}:
+            if event["kind"] in {"ble_adv", "classic_lap", "zigbee_frame", "tpms_frame", "walkie_signal", "wifi_frame", "fm_station", "lfmf_signal", "cellular_signal"}:
                 _upsert_discovery_row(event)
             if event["kind"] == "classic_lap":
                 _upsert_classic_address(event)
@@ -4029,6 +4464,37 @@ def _upsert_discovery_row(event: dict[str, Any]) -> None:
             "center_freq_hz": event.get("center_freq_hz"),
             "confidence": event.get("confidence"),
             "payload_hex": event.get("payload_hex"),
+        }
+    elif event.get("kind") == "walkie_signal":
+        identity = str(event.get("identity") or "Walkie activity")
+        frequency_hz = event.get("frequency_hz") or event.get("center_freq_hz")
+        row = {
+            "key": f"walkie:{frequency_hz or identity}",
+            "protocol": "WALKIE",
+            "identity": identity,
+            "mac": str(frequency_hz or identity),
+            "detail": str(event.get("detail") or "Walkie-talkie activity"),
+            "device_type": str(event.get("device_type") or "Walkie-talkie"),
+            "device_type_detail": str(event.get("device_type_detail") or ""),
+            "detections": 1,
+            "last_seen_at": now,
+            "last_rssi_dbfs": event.get("last_rssi_dbfs") or event.get("rssi_dbfs") or event.get("signal_dbfs"),
+            "center_freq_hz": frequency_hz,
+            "frequency_hz": frequency_hz,
+            "frequency_mhz": event.get("frequency_mhz"),
+            "confidence": event.get("confidence"),
+            "classification": event.get("classification"),
+            "modulation": event.get("modulation"),
+            "signal_dbfs": event.get("signal_dbfs"),
+            "audio_rms_dbfs": event.get("audio_rms_dbfs"),
+            "audio_bandwidth_hz": event.get("audio_bandwidth_hz"),
+            "voice_band_ratio": event.get("voice_band_ratio"),
+            "voice_activity_ratio": event.get("voice_activity_ratio"),
+            "occupied_ratio": event.get("occupied_ratio"),
+            "freq_std_hz": event.get("freq_std_hz"),
+            "saved_iq_path": event.get("saved_iq_path"),
+            "saved_meta_path": event.get("saved_meta_path"),
+            "saved_wav_path": event.get("saved_wav_path"),
         }
     elif event.get("kind") == "wifi_frame":
         identity = str(event.get("identity") or event.get("ssid") or event.get("mac") or "WiFi frame")
@@ -4562,7 +5028,10 @@ def _write_rf_sentinel_control(
     enabled_protocols: set[str] | None = None,
     *,
     enabled_devices: set[str] | None = None,
+    protocol_devices: dict[str, str] | None = None,
+    wifi_channels: list[int] | None = None,
     zigbee_follow_channel: int | None | object = RF_SENTINEL_NO_CHANGE,
+    zigbee_follow_device_id: str | None | object = RF_SENTINEL_NO_CHANGE,
 ) -> dict[str, Any]:
     RF_SENTINEL_CONTROL_PATH.parent.mkdir(parents=True, exist_ok=True)
     payload = _read_rf_sentinel_control()
@@ -4572,14 +5041,43 @@ def _write_rf_sentinel_control(
         payload["devices"] = sorted(str(item).strip() for item in enabled_devices if str(item).strip())
     elif enabled_protocols is not None:
         payload.pop("devices", None)
+    if protocol_devices is not None:
+        payload["protocol_devices"] = {
+            str(protocol).strip().lower(): str(device_id).strip()
+            for protocol, device_id in protocol_devices.items()
+            if str(protocol).strip().lower() in PROTOCOL_DEVICE_OVERRIDES and str(device_id).strip()
+        }
+    if wifi_channels is not None:
+        payload["wifi_channels"] = [
+            int(channel)
+            for channel in wifi_channels
+            if int(channel) in WIFI_SUPPORTED_CHANNELS
+        ] or [1, 6, 11]
     if zigbee_follow_channel is not RF_SENTINEL_NO_CHANGE:
         follow = payload.get("follow")
         if not isinstance(follow, dict):
             follow = {}
         if isinstance(zigbee_follow_channel, int):
-            follow["zigbee"] = {"channel": zigbee_follow_channel}
+            existing_zigbee = follow.get("zigbee") if isinstance(follow.get("zigbee"), dict) else {}
+            follow["zigbee"] = {**existing_zigbee, "channel": zigbee_follow_channel}
         else:
             follow.pop("zigbee", None)
+        payload["follow"] = follow
+    if zigbee_follow_device_id is not RF_SENTINEL_NO_CHANGE:
+        follow = payload.get("follow")
+        if not isinstance(follow, dict):
+            follow = {}
+        zigbee = follow.get("zigbee") if isinstance(follow.get("zigbee"), dict) else {}
+        device_id = str(zigbee_follow_device_id or "").strip()
+        if device_id:
+            zigbee["device_id"] = device_id
+            follow["zigbee"] = zigbee
+        elif zigbee:
+            zigbee.pop("device_id", None)
+            if zigbee:
+                follow["zigbee"] = zigbee
+            else:
+                follow.pop("zigbee", None)
         payload["follow"] = follow
     tmp_path = RF_SENTINEL_CONTROL_PATH.with_suffix(".json.tmp")
     tmp_path.write_text(json.dumps(payload, separators=(",", ":")), encoding="utf-8")
@@ -4608,17 +5106,67 @@ def _read_ui_config() -> dict[str, Any]:
     disabled = payload.get("disabled_devices")
     if not isinstance(disabled, list):
         disabled = []
+    channels = payload.get("wifi_channels")
+    if not isinstance(channels, list):
+        channels = [1, 6, 11]
+    wifi_channels: list[int] = []
+    for channel in channels:
+        try:
+            channel_int = int(channel)
+        except (TypeError, ValueError):
+            continue
+        if channel_int in WIFI_SUPPORTED_CHANNELS:
+            wifi_channels.append(channel_int)
+    protocol_devices_raw = payload.get("protocol_devices")
+    protocol_devices: dict[str, str] = {}
+    if isinstance(protocol_devices_raw, dict):
+        for protocol, device_id in protocol_devices_raw.items():
+            protocol_key = str(protocol).strip().lower()
+            device_text = str(device_id).strip()
+            if protocol_key in PROTOCOL_DEVICE_OVERRIDES and device_text:
+                protocol_devices[protocol_key] = device_text
     return {
         "protocols": sorted({str(item).strip().lower() for item in protocols} & RF_SENTINEL_PROTOCOLS),
         "disabled_devices": sorted({str(item).strip() for item in disabled if str(item).strip()}),
+        "wifi_channels": wifi_channels or [1, 6, 11],
+        "protocol_devices": protocol_devices,
     }
 
 
-def _write_ui_config(protocols: set[str], disabled_devices: set[str]) -> dict[str, Any]:
+def _clean_wifi_channels(channels: Any) -> list[int]:
+    clean: list[int] = []
+    for channel in channels if isinstance(channels, list) else []:
+        try:
+            channel_int = int(channel)
+        except (TypeError, ValueError):
+            continue
+        if channel_int in WIFI_SUPPORTED_CHANNELS and channel_int not in clean:
+            clean.append(channel_int)
+    return clean or [1, 6, 11]
+
+
+def _write_ui_config(
+    protocols: set[str],
+    disabled_devices: set[str],
+    *,
+    wifi_channels: list[int] | None = None,
+    protocol_devices: dict[str, str] | None = None,
+) -> dict[str, Any]:
     RF_SENTINEL_UI_CONFIG_PATH.parent.mkdir(parents=True, exist_ok=True)
+    existing = _read_ui_config()
+    selected_wifi_channels = wifi_channels if wifi_channels is not None else existing.get("wifi_channels", [1, 6, 11])
+    clean_wifi_channels = _clean_wifi_channels(selected_wifi_channels)
+    selected_protocol_devices = protocol_devices if protocol_devices is not None else existing.get("protocol_devices", {})
+    clean_protocol_devices = {
+        str(protocol).strip().lower(): str(device_id).strip()
+        for protocol, device_id in dict(selected_protocol_devices or {}).items()
+        if str(protocol).strip().lower() in PROTOCOL_DEVICE_OVERRIDES and str(device_id).strip()
+    }
     payload = {
         "protocols": sorted(protocols & RF_SENTINEL_PROTOCOLS),
         "disabled_devices": sorted(str(item).strip() for item in disabled_devices if str(item).strip()),
+        "wifi_channels": clean_wifi_channels,
+        "protocol_devices": clean_protocol_devices,
         "updated_at": time.time(),
     }
     tmp_path = RF_SENTINEL_UI_CONFIG_PATH.with_suffix(".json.tmp")
@@ -4633,6 +5181,22 @@ def _enabled_devices_from_disabled(devices: list[dict[str, Any]], disabled_devic
         for item in devices
         if str(item.get("id") or "").strip() and str(item.get("id") or "").strip() not in disabled_devices
     }
+
+
+def _clean_protocol_devices(raw: Any, enabled_devices: set[str], reserved_devices: set[str] | None = None) -> dict[str, str]:
+    reserved = {str(item).strip() for item in (reserved_devices or set()) if str(item).strip()}
+    clean: dict[str, str] = {}
+    if not isinstance(raw, dict):
+        return clean
+    for protocol, device_id in raw.items():
+        protocol_key = str(protocol).strip().lower()
+        device_text = str(device_id).strip()
+        if protocol_key not in PROTOCOL_DEVICE_OVERRIDES or not device_text:
+            continue
+        if device_text not in enabled_devices or device_text in reserved:
+            continue
+        clean[protocol_key] = device_text
+    return clean
 
 
 def _has_wifi_device(devices: list[dict[str, Any]], enabled_devices: set[str] | None = None) -> bool:
@@ -4667,6 +5231,11 @@ def _is_rtlsdr_device(item: dict[str, Any]) -> bool:
     return "rtlsdr" in text or "rtl-sdr" in text or str(item.get("id") or "").lower().startswith("rtlsdr:")
 
 
+def _is_bladerf_device(item: dict[str, Any]) -> bool:
+    text = f"{item.get('id') or ''} {item.get('label') or ''} {item.get('driver') or ''}".lower()
+    return "bladerf" in text or str(item.get("id") or "").lower().startswith("bladerf:")
+
+
 def _fm_device_from_devices(devices: list[dict[str, Any]], enabled_devices: set[str] | None = None) -> str:
     for predicate in (_is_sdrplay_device, _is_rtlsdr_device):
         for item in devices:
@@ -4676,6 +5245,19 @@ def _fm_device_from_devices(devices: list[dict[str, Any]], enabled_devices: set[
             if predicate(item):
                 return device_id
     return ""
+
+
+def _fm_device_for_sentinel(
+    devices: list[dict[str, Any]],
+    enabled_devices: set[str] | None,
+    services_device_id: str,
+) -> str:
+    services_device_id = str(services_device_id or "").strip()
+    if services_device_id:
+        item = next((dev for dev in devices if str(dev.get("id") or "").strip() == services_device_id), None)
+        if item is not None and _is_bladerf_device(item):
+            return services_device_id
+    return _fm_device_from_devices(devices, enabled_devices)
 
 
 def _has_lfmf_device(devices: list[dict[str, Any]], enabled_devices: set[str] | None = None) -> bool:
@@ -4727,7 +5309,37 @@ def _append_scanner_log(line: str) -> None:
     _console_append_log(text)
 
 
+def _touch_scanner_assignment(source: str, payload: dict[str, Any], events: list[dict[str, Any]]) -> None:
+    source_name = str(source or "").strip()
+    if not source_name:
+        return
+    now = time.time()
+    protocol = ""
+    if events:
+        protocol = str(events[0].get("protocol") or "").strip().lower()
+    if not protocol:
+        protocol = str(payload.get("protocol") or "").strip().lower()
+    if protocol == "btle":
+        protocol = "ble"
+    if protocol == "ieee802154":
+        protocol = "zigbee"
+    with state_lock:
+        for assignment in state.scanner_assignments.values():
+            if str(assignment.get("job_name") or "") != source_name:
+                continue
+            assignment["seen_at"] = now
+            if protocol:
+                assignment["last_protocol"] = protocol
+            if payload.get("center_freq_hz") is not None:
+                assignment["last_center_freq_hz"] = payload.get("center_freq_hz")
+            if payload.get("frequency_hz") is not None:
+                assignment["last_frequency_hz"] = payload.get("frequency_hz")
+            return
+
+
 def _scanner_protocol_from_job_name(job_name: str) -> str:
+    if "zigbee-follow" in str(job_name or "").lower():
+        return "zigbee"
     parts = [part for part in str(job_name or "").split(":") if part]
     if not parts:
         return ""
@@ -4764,6 +5376,11 @@ def _scanner_band_from_command(command: str, protocol: str) -> str:
     if protocol == "tpms":
         if "--auto-hop-known" in text:
             return "315 / 433.92 MHz"
+    if protocol == "walkie":
+        match = re.search(r"--center-freq-hz\s+([0-9]+)", text)
+        if match:
+            return f"{int(match.group(1)) / 1_000_000.0:.3f} MHz".replace(".000 MHz", " MHz")
+        return "462.500 MHz"
     if protocol == "fm":
         return "87.7-107.9 MHz"
     if protocol == "lfmf":
@@ -4784,6 +5401,39 @@ def _scanner_band_from_command(command: str, protocol: str) -> str:
     return ""
 
 
+def _console_center_from_assignment(assignment: dict[str, Any], protocol: str) -> str:
+    command = str(assignment.get("command") or "")
+    band = str(assignment.get("band") or "")
+    protocol = str(protocol or "").lower()
+    last_hz = assignment.get("last_center_freq_hz") or assignment.get("last_frequency_hz")
+    try:
+        if last_hz is not None:
+            return f"{float(last_hz) / 1_000_000.0:.3f} MHz".replace(".000 MHz", " MHz")
+    except (TypeError, ValueError):
+        pass
+    match = re.search(r"--center-mhz\s+([0-9.]+)", command)
+    if match:
+        return f"{float(match.group(1)):.3f} MHz".replace(".000 MHz", " MHz")
+    match = re.search(r"--center-freq-hz\s+([0-9]+)", command)
+    if match:
+        return f"{int(match.group(1)) / 1_000_000.0:.3f} MHz".replace(".000 MHz", " MHz")
+    match = re.search(r"--target-freq-hz\s+([0-9]+)", command)
+    if match:
+        return f"{int(match.group(1)) / 1_000_000.0:.3f} MHz".replace(".000 MHz", " MHz")
+    match = re.search(r"--channel\s+([0-9]+)", command)
+    if match and protocol == "zigbee":
+        channel = int(match.group(1))
+        return f"CH {channel} / {2405 + ((channel - 11) * 5)} MHz"
+    match = re.search(r"CH\s*([0-9,]+)", band, re.IGNORECASE)
+    if match:
+        return f"CH {match.group(1)}"
+    if protocol == "fm":
+        return "87.7-107.9 MHz"
+    if protocol == "lfmf":
+        return "1 kHz-3 MHz"
+    return "-"
+
+
 def _console_append_log(line: str) -> None:
     text = str(line or "").strip()
     if not text:
@@ -4800,12 +5450,15 @@ def _console_append_log(line: str) -> None:
 
 def _console_protocol_count(protocol: str) -> int:
     protocol = str(protocol or "").upper()
+    if "+" in protocol:
+        return sum(_console_protocol_count(part) for part in protocol.split("+") if part)
     aliases = {
         "BLE": {"BTLE"},
         "BTLE": {"BTLE"},
         "BTC": {"BTC"},
         "ZIGBEE": {"ZIGBEE"},
         "TPMS": {"TPMS"},
+        "WALKIE": {"WALKIE"},
         "WIFI": {"WIFI"},
         "FM": {"FM"},
         "LFMF": {"LFMF"},
@@ -4815,7 +5468,30 @@ def _console_protocol_count(protocol: str) -> int:
     for row in state.discovery_table:
         if str(row.get("protocol") or "").upper() in aliases:
             total += max(1, int(row.get("detections") or 0))
-    return total
+    if total > 0:
+        return total
+    if protocol == "BTC":
+        total = max(total, int(state.classic_bursts_seen or 0))
+    elif protocol in {"BLE", "BTLE"}:
+        total = max(total, int(state.ble_packets_seen or 0))
+    source_needles = {
+        "BTC": ("btc", "classic"),
+        "BLE": ("ble", "btle"),
+        "BTLE": ("ble", "btle"),
+        "ZIGBEE": ("zigbee", "802154"),
+        "TPMS": ("tpms", "subghz"),
+        "WALKIE": ("walkie",),
+        "WIFI": ("wifi",),
+        "FM": ("fm",),
+        "LFMF": ("lfmf", "lowfreq"),
+        "CELLULAR": ("cellular",),
+    }.get(protocol, (protocol.lower(),))
+    activity = 0
+    for source, count in state.chunks_by_mode.items():
+        source_l = str(source or "").lower()
+        if any(needle in source_l for needle in source_needles):
+            activity += int(count or 0)
+    return max(total, activity)
 
 
 ANSI_RE = re.compile(r"\x1b\[[0-9;]*m")
@@ -4828,18 +5504,20 @@ def _c(code: str, text: str) -> str:
 
 
 def _console_protocol_color(protocol: str) -> str:
+    protocol = str(protocol or "").upper().split("+", 1)[0]
     return {
         "BTC": "96;1",
         "BLE": "34;1",
         "BTLE": "34;1",
         "ZIGBEE": "35;1",
         "TPMS": "33;1",
+        "WALKIE": "33;1",
         "WIFI": "32;1",
         "FM": "33;1",
         "FM-AUDIO": "33;1",
         "LFMF": "36;1",
         "CELLULAR": "31;1",
-    }.get(str(protocol or "").upper(), "37;1")
+    }.get(protocol, "37;1")
 
 
 def _console_log_style(line: str) -> str:
@@ -4852,8 +5530,20 @@ def _console_log_style(line: str) -> str:
     return _c("37", line)
 
 
+def _console_is_wifi_device(device: dict[str, Any]) -> bool:
+    text = f"{device.get('id') or ''} {device.get('label') or ''} {device.get('driver') or ''}".lower()
+    return "wlan" in text or "wifi" in text or "802.11" in text
+
+
+def _console_first_enabled(enabled: set[str], choices: tuple[str, ...]) -> str:
+    for choice in choices:
+        if choice.lower() in enabled:
+            return choice.upper()
+    return ""
+
+
 def _console_assignment_rows() -> list[dict[str, Any]]:
-    rows: list[dict[str, Any]] = []
+    rows_by_device: dict[str, dict[str, Any]] = {}
     assignments = dict(state.scanner_assignments or {})
     for device_id in sorted(assignments):
         assignment = assignments[device_id]
@@ -4861,15 +5551,84 @@ def _console_assignment_rows() -> list[dict[str, Any]]:
         band = str(assignment.get("band") or "scanning")
         detections = _console_protocol_count(protocol)
         age = max(0, int(time.time() - float(assignment.get("seen_at") or time.time())))
-        rows.append({"device": device_id, "protocol": protocol, "count": detections, "band": f"{band} ({age}s)"})
+        center = _console_center_from_assignment(assignment, protocol)
+        rows_by_device[device_id] = {"device": device_id, "protocol": protocol, "center": center, "count": detections, "band": f"{band} ({age}s)", "active": True}
     if fm_playback.running or fm_playback.pending:
         status = "pending" if fm_playback.pending else "playing"
         device_id = fm_playback.pending_device_id or fm_playback.device_id or "fm-sdr"
         freq = fm_playback.pending_freq_mhz or fm_playback.freq_mhz
-        rows.append({"device": device_id, "protocol": "FM-AUDIO", "count": fm_playback.produced_chunks, "band": f"{freq:.1f} MHz {status}"})
-    if not rows:
-        rows.append({"device": "No active scanner assignments yet.", "protocol": "", "count": "", "band": ""})
-    return rows
+        rows_by_device[f"{device_id}:fm-audio"] = {"device": device_id, "protocol": "FM-AUDIO", "center": f"{freq:.1f} MHz", "count": fm_playback.produced_chunks, "band": status, "active": True}
+    if walkie_playback.running or walkie_playback.pending:
+        status = "pending" if walkie_playback.pending else "playing"
+        device_id = walkie_playback.pending_device_id or walkie_playback.device_id or "subghz-sdr"
+        freq = walkie_playback.pending_freq_mhz or walkie_playback.freq_mhz
+        rows_by_device[f"{device_id}:walkie-audio"] = {"device": device_id, "protocol": "WALKIE-AUDIO", "center": f"{freq:.3f} MHz", "count": walkie_playback.produced_chunks, "band": status, "active": True}
+    enabled = {str(item).lower() for item in state.decoder_stats.get("enabled_protocols", [])}
+    devices, _ = _cached_gateway_devices()
+    for device in devices:
+        device_id = str(device.get("id") or "").strip()
+        if not device_id or device_id in rows_by_device:
+            continue
+        if _console_is_wifi_device(device):
+            if "wifi" in enabled:
+                rows_by_device[device_id] = {"device": device_id, "protocol": "WIFI", "center": "CH 1,6,11", "count": _console_protocol_count("WIFI"), "band": "WiFi monitor (ready)", "active": False}
+            continue
+        if _is_sdrplay_device(device):
+            protocol = _console_first_enabled(enabled, ("fm", "lfmf"))
+            if protocol:
+                capability = "FM first; LFMF next" if {"fm", "lfmf"} <= enabled else ("FM broadcast" if protocol == "FM" else "VLF/LF/MF survey")
+                center = "87.7-107.9 MHz" if protocol == "FM" else "1 kHz-3 MHz"
+                rows_by_device[device_id] = {"device": device_id, "protocol": protocol, "center": center, "count": _console_protocol_count(protocol), "band": f"{capability} (ready)", "active": False}
+            continue
+        driver_text = f"{device_id} {device.get('label') or ''} {device.get('driver') or ''}".lower()
+        if "bladerf" in driver_text:
+            role = str((state.device_ids or {}).get("radio_b") or (state.device_ids or {}).get("hop") or "").strip()
+            if device_id == role:
+                protocol = _console_first_enabled(enabled, ("zigbee", "tpms", "walkie", "cellular", "fm"))
+                if protocol:
+                    center = {
+                        "ZIGBEE": "2405-2480 MHz",
+                        "TPMS": "315/433.92 MHz",
+                        "WALKIE": "462.500 MHz",
+                        "CELLULAR": "751 MHz",
+                        "FM": "87.7-107.9 MHz",
+                    }.get(protocol, "-")
+                    rows_by_device[device_id] = {
+                        "device": device_id,
+                        "protocol": protocol,
+                        "center": center,
+                        "count": _console_protocol_count(protocol),
+                        "band": "FM / cellular / walkie / Zigbee / TPMS rotation (ready)",
+                        "active": False,
+                    }
+                continue
+            protocol = _console_first_enabled(enabled, ("btc", "ble"))
+            if protocol:
+                capability = "2.4 GHz ISM shared BTC+BLE" if {"btc", "ble"} <= enabled else ("Bluetooth Classic" if protocol == "BTC" else "BLE advertisements")
+                rows_by_device[device_id] = {"device": device_id, "protocol": protocol, "center": "2442 MHz", "count": _console_protocol_count(protocol), "band": f"{capability} (ready)", "active": False}
+            continue
+        if "hackrf" in driver_text:
+            protocol = _console_first_enabled(enabled, ("zigbee", "tpms", "walkie", "cellular"))
+            if protocol:
+                center = {"ZIGBEE": "2405-2480 MHz", "TPMS": "315/433.92 MHz", "WALKIE": "462.500 MHz", "CELLULAR": "751 MHz"}.get(protocol, "-")
+                rows_by_device[device_id] = {"device": device_id, "protocol": protocol, "center": center, "count": _console_protocol_count(protocol), "band": "Zigbee / TPMS / walkie / cellular hop stack (ready)", "active": False}
+            continue
+        if "rtlsdr" in driver_text or "rtl-sdr" in driver_text:
+            protocol = _console_first_enabled(enabled, ("tpms", "walkie", "fm"))
+            if protocol:
+                center = "315/433.92 MHz" if protocol == "TPMS" else ("462.500 MHz" if protocol == "WALKIE" else "87.7-107.9 MHz")
+                rows_by_device[device_id] = {"device": device_id, "protocol": protocol, "center": center, "count": _console_protocol_count(protocol), "band": "TPMS / walkie / FM capable (ready)", "active": False}
+    if not rows_by_device:
+        return [{"device": "No active scanner assignments yet.", "protocol": "", "center": "", "count": "", "band": ""}]
+    def sort_key(row: dict[str, Any]) -> tuple[int, str]:
+        protocol = str(row.get("protocol") or "")
+        device = str(row.get("device") or "")
+        priority = 0 if row.get("active") else 1
+        if protocol == "WIFI":
+            priority = min(priority, 1)
+        return (priority, device)
+    rows = list(rows_by_device.values())
+    return sorted(rows, key=sort_key)
 
 
 def _console_term_width() -> int:
@@ -4919,18 +5678,20 @@ def _console_box(title: str, lines: list[str], width: int, height: int | None = 
 
 
 def _console_sdr_lines(rows: list[dict[str, Any]]) -> list[str]:
-    lines = [_c("90;1", f"{'DEVICE':<14} {'PROTO':<10} {'COUNT':>8}  BAND")]
+    lines = [_c("90;1", f"{'DEVICE':<14} {'PROTO':<10} {'CENTER':<18} {'COUNT':>8}  BAND")]
     for row in rows:
         device = str(row.get("device") or "")
         protocol = str(row.get("protocol") or "")
+        center = str(row.get("center") or "-")
         count = row.get("count")
         band = str(row.get("band") or "")
         if not protocol:
             lines.append(_c("90", device))
             continue
         chip = _c(_console_protocol_color(protocol), f"{protocol:<10}")
+        center_text = _c("36", f"{center:<18}")
         count_text = f"{int(count):>8}" if isinstance(count, int) else f"{str(count):>8}"
-        lines.append(f"{_c('37;1', f'{device:<14}')} {chip} {_c('32;1', count_text)}  {_c('37', band)}")
+        lines.append(f"{_c('37;1', f'{device:<14}')} {chip} {center_text} {_c('32;1', count_text)}  {_c('37', band)}")
     return lines
 
 
@@ -5072,6 +5833,29 @@ def _parse_scanner_assignment(line: str) -> dict[str, Any] | None:
             "seen_at": time.time(),
             "mode": "hop",
         }
+    sidecar_match = re.search(
+        r"^\[rf-sentinel\]\s+sidecar\s+group=(?P<group>\S+)\s+job=(?P<job>\S+)\s+dwell_s=(?P<dwell>\S+):\s+(?P<command>.+)$",
+        text,
+    )
+    if sidecar_match:
+        command = sidecar_match.group("command")
+        job_name = sidecar_match.group("job")
+        protocol = _scanner_protocol_from_job_name(job_name)
+        device_match = re.search(r"--device-id\s+(\S+)", command)
+        if not device_match:
+            return None
+        dwell_text = sidecar_match.group("dwell")
+        dwell_s = 0.0 if dwell_text == "continuous" else float(dwell_text)
+        return {
+            "device_id": device_match.group(1),
+            "job_name": job_name,
+            "protocol": protocol,
+            "band": _scanner_band_from_command(command, protocol),
+            "command": command,
+            "dwell_s": dwell_s,
+            "seen_at": time.time(),
+            "mode": "sidecar",
+        }
     return None
 
 
@@ -5119,6 +5903,7 @@ def _rf_sentinel_loop(proc: subprocess.Popen[str]) -> None:
             events = _scanner_json_to_events(source, payload)
             for event in events:
                 event.setdefault("scanner_source", source)
+            _touch_scanner_assignment(source, payload, events)
             if events:
                 _append_detections(events, [])
         rc = proc.wait()
@@ -5184,6 +5969,13 @@ def _start_rf_sentinel_engine(
         )
     protocols = enabled_protocols or set(RF_SENTINEL_PROTOCOLS)
     devices = enabled_devices or set()
+    ui_config = _read_ui_config()
+    protocol_devices = _clean_protocol_devices(
+        ui_config.get("protocol_devices"),
+        devices,
+        reserved_devices={btc_device_id},
+    )
+    wifi_channels = _clean_wifi_channels(ui_config.get("wifi_channels"))
     for device_id in sorted(devices):
         cmd.extend(["--allowed-device-id", device_id])
     if "wifi" in protocols:
@@ -5193,14 +5985,15 @@ def _start_rf_sentinel_engine(
     if "fm" in protocols:
         selected_fm_device = fm_device_id or _fm_device_from_devices(_available_devices(), enabled_devices)
         if selected_fm_device:
+            fm_is_bladerf = selected_fm_device.lower().startswith("bladerf:")
             cmd.extend(
                 [
                     "--fm-device-id",
                     selected_fm_device,
                     "--fm-discovery-mode",
-                    "sweep",
+                    "wideband" if fm_is_bladerf else "sweep",
                     "--fm-sample-rate-sps",
-                    "10000000",
+                    "20000000" if fm_is_bladerf else "10000000",
                     "--fm-sweep-bin-width-hz",
                     "100000",
                     "--fm-discovery-dwell-s",
@@ -5208,7 +6001,7 @@ def _start_rf_sentinel_engine(
                     "--fm-decode-dwell-s",
                     "1.0",
                     "--fm-active-threshold-db",
-                    "6.0",
+                    "4.0",
                     "--fm-min-power-dbfs",
                     "-115",
                     "--fm-max-stations",
@@ -5227,6 +6020,8 @@ def _start_rf_sentinel_engine(
         cmd.append("--no-zigbee")
     if "tpms" not in protocols:
         cmd.append("--no-tpms")
+    if "walkie" not in protocols:
+        cmd.append("--no-walkie")
     if "wifi" not in protocols:
         cmd.append("--no-wifi")
     if "fm" not in protocols:
@@ -5240,6 +6035,8 @@ def _start_rf_sentinel_engine(
     control = _write_rf_sentinel_control(
         protocols,
         enabled_devices=devices,
+        protocol_devices=protocol_devices,
+        wifi_channels=wifi_channels,
         zigbee_follow_channel=zigbee_follow_channel,
     )
     cmd.extend(["--control-file", str(RF_SENTINEL_CONTROL_PATH)])
@@ -5291,19 +6088,34 @@ def update_scan_protocols():
         enabled_devices = {str(item).strip() for item in requested_devices if str(item).strip()}
     disabled_devices = set()
     devices_available = _available_devices()
+    known_devices = {str(item.get("id") or "").strip() for item in devices_available if str(item.get("id") or "").strip()}
     if enabled_devices is not None:
-        known_devices = {str(item.get("id") or "").strip() for item in devices_available if str(item.get("id") or "").strip()}
         disabled_devices = known_devices - enabled_devices
     else:
         disabled_devices = set(_read_ui_config().get("disabled_devices", []))
+        enabled_devices = known_devices - disabled_devices
     if "wifi" in enabled_protocols and not _has_wifi_device(devices_available, enabled_devices):
         enabled_protocols.discard("wifi")
     if "lfmf" in enabled_protocols and not _has_lfmf_device(devices_available, enabled_devices):
         enabled_protocols.discard("lfmf")
-    _write_ui_config(enabled_protocols, disabled_devices)
+    existing_config = _read_ui_config()
+    protocol_devices = _clean_protocol_devices(
+        payload.get("protocol_devices", existing_config.get("protocol_devices")),
+        enabled_devices or known_devices,
+        reserved_devices={str(state.device_ids.get("radio_a") or state.device_ids.get("classic") or "").strip()},
+    )
+    wifi_channels = _clean_wifi_channels(payload.get("wifi_channels", existing_config.get("wifi_channels")))
+    _write_ui_config(
+        enabled_protocols,
+        disabled_devices,
+        wifi_channels=wifi_channels,
+        protocol_devices=protocol_devices,
+    )
     control = _write_rf_sentinel_control(
         enabled_protocols,
         enabled_devices=enabled_devices,
+        protocol_devices=protocol_devices,
+        wifi_channels=wifi_channels,
         zigbee_follow_channel=RF_SENTINEL_NO_CHANGE if "zigbee" in enabled_protocols else None,
     )
     follow_state = _follow_state_for_protocols(control, enabled_protocols)
@@ -5311,7 +6123,7 @@ def update_scan_protocols():
         state.decoder_stats["enabled_protocols"] = sorted(enabled_protocols)
         state.decoder_stats["follow"] = follow_state
         _append_scanner_log(f"[ui] enabled protocols updated: {', '.join(sorted(enabled_protocols)) or 'none'}")
-    return jsonify({"ok": True, "protocols": sorted(enabled_protocols)})
+    return jsonify({"ok": True, "protocols": sorted(enabled_protocols), "wifi_channels": wifi_channels, "protocol_devices": protocol_devices})
 
 
 @app.post("/api/scan/follow")
@@ -5332,14 +6144,22 @@ def update_scan_follow():
             return _json_error(400, "update_scan_follow", error="zigbee channel must be 11-26")
     else:
         channel = None
-    control = _write_rf_sentinel_control(zigbee_follow_channel=channel)
+    follow_device_id = _preferred_lock_device(prefer_free=False) if channel is not None else ""
+    if follow_device_id:
+        with contextlib.suppress(Exception):
+            _force_release_gateway_device(follow_device_id)
+    control = _write_rf_sentinel_control(
+        zigbee_follow_channel=channel,
+        zigbee_follow_device_id=follow_device_id if channel is not None else "",
+    )
     follow_state = control.get("follow") if isinstance(control.get("follow"), dict) else {}
     with state_lock:
         state.decoder_stats["follow"] = follow_state
         if channel is None:
             _append_scanner_log("[ui] zigbee follow cleared")
         else:
-            _append_scanner_log(f"[ui] zigbee follow locked channel {channel}")
+            suffix = f" on {follow_device_id}" if follow_device_id else ""
+            _append_scanner_log(f"[ui] zigbee follow locked channel {channel}{suffix}")
     return jsonify({"ok": True, "follow": follow_state})
 
 
@@ -5348,7 +6168,7 @@ def fm_play():
     global fm_pending_thread, fm_request_serial
     payload = request.get_json(silent=True) or {}
     freq_mhz = float(payload.get("freq_mhz", 0.0) or 0.0)
-    device_id = str(payload.get("device_id") or "").strip() or _current_fm_scanner_device_id()
+    device_id = str(payload.get("device_id") or "").strip() or _preferred_lock_device(prefer_free=False)
     if not 87.5 <= freq_mhz <= 108.0:
         return _json_error(400, "fm_play", error="freq_mhz must be between 87.5 and 108.0")
     try:
@@ -5400,6 +6220,73 @@ def fm_audio_batch():
         fm_playback.empty_audio_polls += 1
         return Response(b"", mimetype="application/octet-stream", status=204)
     fm_playback.empty_audio_polls = 0
+    return Response(b"".join(chunks), mimetype="application/octet-stream")
+
+
+@app.post("/api/subghz/walkie/play")
+def walkie_play():
+    global walkie_pending_thread, walkie_request_serial
+    payload = request.get_json(silent=True) or {}
+    freq_mhz = float(payload.get("freq_mhz", 462.5) or 462.5)
+    device_id = str(payload.get("device_id") or "").strip() or _current_walkie_scanner_device_id()
+    if not 300.0 <= freq_mhz <= 500.0:
+        return _json_error(400, "walkie_play", error="freq_mhz must be between 300.0 and 500.0")
+    try:
+        walkie_request_serial += 1
+        request_serial = walkie_request_serial
+        walkie_playback.pending = True
+        walkie_playback.pending_freq_mhz = float(freq_mhz)
+        walkie_playback.pending_device_id = device_id
+        walkie_playback.worker_error = "Walkie audio queued; waiting for SDR availability"
+        if device_id and not _device_available(device_id):
+            _pause_walkie_scanner_for_playback()
+            _force_release_gateway_device(device_id)
+            _start_walkie_pending_thread(request_serial, float(freq_mhz), device_id)
+        else:
+            try:
+                _start_walkie_playback_now(freq_mhz, device_id)
+            except Exception as exc:
+                if not _fm_busy_error(exc):
+                    walkie_playback.pending = False
+                    _restore_walkie_scanner_after_playback()
+                    return _json_error(409, "walkie_play", error=str(exc))
+                _start_walkie_pending_thread(request_serial, float(freq_mhz), device_id)
+    except requests.RequestException as exc:
+        return _json_error(503, "walkie_play", error="sdr-gateway is unavailable", detail=str(exc))
+    return jsonify({"ok": True, "walkie_playback": _walkie_playback_status_payload()})
+
+
+@app.post("/api/subghz/walkie/stop")
+def walkie_stop():
+    _stop_walkie_playback()
+    return jsonify({"ok": True, "walkie_playback": _walkie_playback_status_payload()})
+
+
+@app.get("/api/subghz/walkie/audio/batch")
+def walkie_audio_batch():
+    if not walkie_playback.running:
+        return Response(b"", mimetype="application/octet-stream", status=204)
+    count = max(1, min(int(request.args.get("count", 6)), 16))
+    timeout = max(0.05, min(float(request.args.get("timeout", 0.4)), 2.0))
+    chunks: list[bytes] = []
+    for idx in range(count):
+        try:
+            pcm = walkie_audio_q.get(timeout=timeout if idx == 0 else 0.02)
+        except queue.Empty:
+            break
+        chunks.append(pcm)
+        walkie_playback.served_chunks += 1
+    if not chunks:
+        return Response(b"", mimetype="application/octet-stream", status=204)
+    return Response(b"".join(chunks), mimetype="application/octet-stream")
+
+
+@app.get("/api/subghz/walkie/audio/recent")
+def walkie_audio_recent():
+    with walkie_recent_lock:
+        chunks = list(walkie_recent_audio)
+    if not chunks:
+        return Response(b"", mimetype="application/octet-stream", status=204)
     return Response(b"".join(chunks), mimetype="application/octet-stream")
 
 
@@ -5549,6 +6436,7 @@ def _available_devices() -> list[dict[str, Any]]:
 def _stop_scan(stop_gateway: bool = True) -> None:
     global worker_thread, worker_threads, worker_stops
     _stop_fm_playback()
+    _stop_walkie_playback()
     _stop_bredr_inquiry()
     _stop_rf_sentinel_engine()
     _stop_btcsniffer_engine()
@@ -5594,6 +6482,8 @@ def _shutdown_gateway_device_ids() -> set[str]:
             device_ids.add(str(assignment.get("device_id") or "").strip())
     if fm_playback.device_id:
         device_ids.add(str(fm_playback.device_id).strip())
+    if walkie_playback.device_id:
+        device_ids.add(str(walkie_playback.device_id).strip())
     return {device_id for device_id in device_ids if device_id}
 
 
@@ -5633,6 +6523,7 @@ def _start_gateway_stream(
     sample_rate_sps: int,
     lna_gain_db: int,
     vga_gain_db: int,
+    baseband_filter_hz: int | None = None,
 ) -> tuple[dict[str, Any], int, int, int]:
     resp = requests.post(
         f"{_gateway_base()}/streams/start",
@@ -5644,7 +6535,7 @@ def _start_gateway_stream(
             "lna_gain_db": lna_gain_db,
             "vga_gain_db": vga_gain_db,
             "amp_enable": False,
-            "baseband_filter_hz": sample_rate_sps,
+            "baseband_filter_hz": int(baseband_filter_hz or sample_rate_sps),
             "duration_seconds": None,
             "num_samples": None,
         },
@@ -5667,6 +6558,7 @@ def _retune_gateway_stream(
     sample_rate_sps: int,
     lna_gain_db: int,
     vga_gain_db: int,
+    baseband_filter_hz: int | None = None,
 ) -> tuple[dict[str, Any], int, int, int]:
     if not stream_id:
         raise RuntimeError("No gateway stream is available to retune")
@@ -5680,7 +6572,7 @@ def _retune_gateway_stream(
             "lna_gain_db": lna_gain_db,
             "vga_gain_db": vga_gain_db,
             "amp_enable": False,
-            "baseband_filter_hz": sample_rate_sps,
+            "baseband_filter_hz": int(baseband_filter_hz or sample_rate_sps),
             "duration_seconds": None,
             "num_samples": None,
         },
@@ -5739,14 +6631,27 @@ def update_config():
     disabled_devices = {str(item).strip() for item in requested_disabled if str(item).strip()}
     devices_available = _available_devices()
     enabled_devices = _enabled_devices_from_disabled(devices_available, disabled_devices)
+    protocol_devices = _clean_protocol_devices(
+        payload.get("protocol_devices"),
+        enabled_devices,
+        reserved_devices={str(state.device_ids.get("radio_a") or state.device_ids.get("classic") or "").strip()},
+    )
+    wifi_channels = _clean_wifi_channels(payload.get("wifi_channels"))
     if "wifi" in protocols and not _has_wifi_device(devices_available, enabled_devices):
         protocols.discard("wifi")
     if "lfmf" in protocols and not _has_lfmf_device(devices_available, enabled_devices):
         protocols.discard("lfmf")
-    config = _write_ui_config(protocols, disabled_devices)
+    config = _write_ui_config(
+        protocols,
+        disabled_devices,
+        wifi_channels=wifi_channels,
+        protocol_devices=protocol_devices,
+    )
     control = _write_rf_sentinel_control(
         protocols,
         enabled_devices=enabled_devices,
+        protocol_devices=protocol_devices,
+        wifi_channels=wifi_channels,
         zigbee_follow_channel=RF_SENTINEL_NO_CHANGE if "zigbee" in protocols else None,
     )
     follow_state = _follow_state_for_protocols(control, protocols)
@@ -5874,6 +6779,24 @@ def start_scan():
     btc_bank_start_channel = _btc_bank_start_from_center(btc_center_freq_hz, btc_bandwidth_mhz)
     center_freq_hz = btc_center_freq_hz if mode in {"classic", "both"} else _channel_freq(mode, channel)
     single_radio_bluetooth = mode == "both" and btc_engine == "python" and bool(btc_device_id) and btc_device_id == btle_device_id
+    if mode == "sentinel":
+        disabled_devices = {
+            str(item.get("id") or "").strip()
+            for item in devices_available
+            if str(item.get("id") or "").strip() and str(item.get("id") or "").strip() not in enabled_devices
+        }
+        protocol_devices = _clean_protocol_devices(
+            payload.get("protocol_devices", saved_config.get("protocol_devices")),
+            enabled_devices,
+            reserved_devices={btc_device_id},
+        )
+        wifi_channels = _clean_wifi_channels(payload.get("wifi_channels", saved_config.get("wifi_channels")))
+        _write_ui_config(
+            enabled_protocols,
+            disabled_devices,
+            wifi_channels=wifi_channels,
+            protocol_devices=protocol_devices,
+        )
     if state.running:
         _stop_scan()
     _start_csv_run()
@@ -5906,7 +6829,7 @@ def start_scan():
                 enabled_protocols=enabled_protocols,
                 enabled_devices=enabled_devices,
                 sweep_both_radios=sweep_both_radios,
-                fm_device_id=_fm_device_from_devices(devices_available, enabled_devices),
+                fm_device_id=_fm_device_for_sentinel(devices_available, enabled_devices, btle_device_id),
             )
         except RuntimeError as exc:
             return _json_error(400, "start_scan", error="scan start failed", detail=str(exc))
@@ -6182,6 +7105,7 @@ def status():
                 "csv_log_dir": state.csv_log_dir,
                 "ui_config": ui_config,
                 "fm_playback": _fm_playback_status_payload(),
+                "walkie_playback": _walkie_playback_status_payload(),
                 "available_devices": devices,
                 "channel_activity": [
                     state.channel_activity.get(idx, {"channel": idx, "hits": 0, "rssi_dbfs": -120.0})
