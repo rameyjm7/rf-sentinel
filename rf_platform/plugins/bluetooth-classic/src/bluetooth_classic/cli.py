@@ -14,7 +14,7 @@ import sys
 import threading
 import time
 from pathlib import Path
-from typing import Any
+from typing import Any, Iterable
 
 import requests
 import websocket
@@ -29,6 +29,8 @@ DEFAULT_GATEWAY_BINARY = PLUGIN_ROOT / "build" / "btcexplorer-sniffer-gateway"
 DEFAULT_PAGE_BINARY = PLUGIN_ROOT / "build" / "btcexplorer-page-stimulus"
 DEFAULT_LOG_DIR = Path(os.getenv("RF_SENTINEL_LOG_DIR", "/var/log/rf_sentinel"))
 DEFAULT_LOG = DEFAULT_LOG_DIR / "btcexplorer-sniffer.log"
+DEFAULT_IQ_DIR = Path(os.getenv("RF_SENTINEL_IQ_DIR", str(DEFAULT_LOG_DIR / "iq")))
+DEFAULT_BLUETOOTH_IQ_CAPTURE = DEFAULT_IQ_DIR / "bluetooth_combined.cs8"
 ANSI_RESET = "\033[0m"
 ANSI_BLE_BLUE = "\033[34m"
 ANSI_BTC_CYAN = "\033[36m"
@@ -317,6 +319,64 @@ def _stop_gateway_stream(base_url: str | None, token: str | None, stream_id: str
         pass
 
 
+def _path_from_arg(value: str | Path | None) -> Path | None:
+    if value is None:
+        return None
+    text = str(value).strip()
+    return Path(text).expanduser() if text else None
+
+
+def _resolve_iq_capture_path(args: argparse.Namespace) -> Path:
+    return _path_from_arg(getattr(args, "iq_capture_path", None)) or DEFAULT_BLUETOOTH_IQ_CAPTURE
+
+
+def _resolve_iq_playback_path(args: argparse.Namespace) -> Path:
+    return (
+        _path_from_arg(getattr(args, "iq_playback_path", None))
+        or _path_from_arg(getattr(args, "iq_capture_path", None))
+        or DEFAULT_BLUETOOTH_IQ_CAPTURE
+    )
+
+
+def _iq_metadata(args: argparse.Namespace, *, mode: str, path: Path, bytes_written: int = 0) -> dict[str, Any]:
+    sample_rate_sps = int(float(args.bandwidth_mhz) * 1_000_000.0)
+    return {
+        "format": "cs8",
+        "sample_layout": "interleaved_i8_iq",
+        "mode": mode,
+        "path": str(path),
+        "bytes_written": int(bytes_written),
+        "created_at": time.time(),
+        "device_id": str(args.device_id),
+        "driver": _device_driver(args.device_id, getattr(args, "driver", "")),
+        "center_freq_hz": int(round(float(args.center_mhz) * 1_000_000.0)),
+        "center_mhz": float(args.center_mhz),
+        "bandwidth_hz": sample_rate_sps,
+        "bandwidth_mhz": int(args.bandwidth_mhz),
+        "sample_rate_sps": sample_rate_sps,
+        "protocols": ["bluetooth_classic", "bluetooth_lowenergy"],
+        "decoder": "bluetooth_scanner combined",
+    }
+
+
+def _write_iq_metadata(args: argparse.Namespace, *, mode: str, path: Path, bytes_written: int = 0) -> Path:
+    metadata_path = path.with_suffix(path.suffix + ".json")
+    metadata_path.write_text(
+        json.dumps(_iq_metadata(args, mode=mode, path=path, bytes_written=bytes_written), indent=2, sort_keys=True) + "\n",
+        encoding="utf-8",
+    )
+    return metadata_path
+
+
+def _iter_iq_playback_chunks(path: Path, chunk_bytes: int = 131_072) -> Iterable[bytes]:
+    with path.open("rb") as handle:
+        while True:
+            chunk = handle.read(max(1, int(chunk_bytes)))
+            if not chunk:
+                break
+            yield chunk
+
+
 def _bridge_gateway_to_stdin(
     *,
     base_url: str | None,
@@ -363,6 +423,112 @@ def _bridge_gateway_to_stdin(
                 ws.close()
             except Exception:
                 pass
+
+
+def _combined_iq_source_worker(
+    *,
+    args: argparse.Namespace,
+    stream_id: str | None,
+    stdin: Any,
+    stop: threading.Event,
+    ble_chunks: "queue.Queue[bytes | None]",
+    events: "queue.Queue[dict[str, Any]]",
+) -> None:
+    mode = str(getattr(args, "rf_input_mode", "live") or "live").lower()
+    raw = bool(args.raw)
+    chunks = 0
+    byte_count = 0
+    last_report = time.monotonic()
+    capture_handle = None
+    capture_path: Path | None = None
+    ws = None
+
+    def forward(chunk: bytes) -> None:
+        nonlocal chunks, byte_count, last_report
+        if not chunk:
+            return
+        stdin.write(chunk)
+        stdin.flush()
+        if capture_handle is not None:
+            capture_handle.write(chunk)
+        try:
+            ble_chunks.put(chunk, timeout=0.25)
+        except queue.Full:
+            events.put({"protocol": "ble", "type": "warning", "message": "BLE IQ queue full; dropping IQ chunk"})
+        chunks += 1
+        byte_count += len(chunk)
+        now = time.monotonic()
+        if raw and now - last_report >= 5.0:
+            print(f"combined iq {mode} chunks={chunks} bytes={byte_count}", file=sys.stderr, flush=True)
+            last_report = now
+
+    try:
+        if mode == "playback":
+            playback_path = _resolve_iq_playback_path(args)
+            events.put({"protocol": "iq", "type": "status", "message": f"playback={playback_path}"})
+            for chunk in _iter_iq_playback_chunks(playback_path, getattr(args, "iq_chunk_bytes", 131_072)):
+                if stop.is_set():
+                    break
+                forward(chunk)
+            return
+
+        if mode == "capture":
+            capture_path = _resolve_iq_capture_path(args)
+            capture_path.parent.mkdir(parents=True, exist_ok=True)
+            capture_handle = capture_path.open("wb")
+            _write_iq_metadata(args, mode=mode, path=capture_path, bytes_written=0)
+            events.put({"protocol": "iq", "type": "status", "message": f"capture={capture_path}"})
+
+        if stream_id is None:
+            raise RuntimeError("live/capture mode requires an sdr-gateway stream")
+        ws = websocket.create_connection(_ws_url_for_stream(args.gateway_base_url, stream_id, args.gateway_token), timeout=8)
+        ws.settimeout(1.0)
+        if raw:
+            print(f"combined iq {mode} stream_id={stream_id}", file=sys.stderr, flush=True)
+        while not stop.is_set():
+            try:
+                chunk = ws.recv()
+            except websocket.WebSocketTimeoutException:
+                continue
+            if not isinstance(chunk, (bytes, bytearray)):
+                continue
+            forward(bytes(chunk))
+            max_bytes = int(getattr(args, "iq_capture_max_bytes", 0) or 0)
+            if mode == "capture" and max_bytes > 0 and byte_count >= max_bytes:
+                events.put({"protocol": "iq", "type": "status", "message": f"capture_limit_reached bytes={byte_count}"})
+                stop.set()
+                break
+    except (BrokenPipeError, WebSocketConnectionClosedException):
+        stop.set()
+    except Exception as exc:
+        if not stop.is_set():
+            events.put({"protocol": "iq", "type": "error", "message": str(exc)})
+            stop.set()
+    finally:
+        try:
+            stdin.close()
+        except Exception:
+            pass
+        if capture_handle is not None:
+            try:
+                capture_handle.flush()
+                capture_handle.close()
+            except Exception:
+                pass
+        if capture_path is not None:
+            try:
+                _write_iq_metadata(args, mode=mode, path=capture_path, bytes_written=byte_count)
+            except OSError:
+                pass
+        if ws is not None:
+            try:
+                ws.close()
+            except Exception:
+                pass
+        try:
+            ble_chunks.put(None, timeout=0.25)
+        except queue.Full:
+            pass
 
 
 def _csv_row(event: dict[str, Any], args: argparse.Namespace, packet: str) -> dict[str, Any]:
@@ -574,7 +740,12 @@ def _run_listen(args: argparse.Namespace) -> int:
             gateway_thread.join(timeout=1.0)
 
 
-def _combined_ble_worker(args: argparse.Namespace, stream_id: str, stop: threading.Event, events: "queue.Queue[dict[str, Any]]") -> None:
+def _combined_ble_worker(
+    args: argparse.Namespace,
+    chunks: "queue.Queue[bytes | None]",
+    stop: threading.Event,
+    events: "queue.Queue[dict[str, Any]]",
+) -> None:
     detector = WideBLEAdvertisingDetector(
         sample_rate_sps=int(args.bandwidth_mhz) * 1_000_000,
         center_freq_hz=int(round(float(args.center_mhz) * 1_000_000.0)),
@@ -583,18 +754,15 @@ def _combined_ble_worker(args: argparse.Namespace, stream_id: str, stop: threadi
     )
     visible = ",".join(str(lane["channel"]) for lane in detector.lanes) or "-"
     events.put({"protocol": "ble", "type": "status", "message": f"visible_ble_channels={visible}"})
-    ws = None
     try:
-        ws = websocket.create_connection(_ws_url_for_stream(args.gateway_base_url, stream_id, args.gateway_token), timeout=8)
-        ws.settimeout(1.0)
         while not stop.is_set():
             try:
-                chunk = ws.recv()
-            except websocket.WebSocketTimeoutException:
+                chunk = chunks.get(timeout=0.5)
+            except queue.Empty:
                 continue
-            if not isinstance(chunk, (bytes, bytearray)):
-                continue
-            _, decoded = detector.process_iq_i8(bytes(chunk))
+            if chunk is None:
+                return
+            _, decoded = detector.process_iq_i8(chunk)
             for event in decoded:
                 if event.get("kind") != "ble_adv" and not args.debug_bursts:
                     continue
@@ -611,12 +779,6 @@ def _combined_ble_worker(args: argparse.Namespace, stream_id: str, stop: threadi
         if not stop.is_set():
             events.put({"protocol": "ble", "type": "error", "message": str(exc)})
             stop.set()
-    finally:
-        if ws is not None:
-            try:
-                ws.close()
-            except Exception:
-                pass
 
 
 def _combined_btc_stdout_worker(proc: subprocess.Popen[str], args: argparse.Namespace, stop: threading.Event, events: "queue.Queue[dict[str, Any]]") -> None:
@@ -696,9 +858,11 @@ def _print_combined_event(event: dict[str, Any], args: argparse.Namespace) -> No
 def _run_combined(args: argparse.Namespace) -> int:
     binary = _ensure_binary(auto_build=not args.no_auto_build, binary=DEFAULT_GATEWAY_BINARY)
     args.log.parent.mkdir(parents=True, exist_ok=True)
-    stream_id = _start_gateway_stream(args)
+    mode = str(getattr(args, "rf_input_mode", "live") or "live").lower()
+    stream_id = None if mode == "playback" else _start_gateway_stream(args)
     stop = threading.Event()
     events: "queue.Queue[dict[str, Any]]" = queue.Queue()
+    ble_chunks: "queue.Queue[bytes | None]" = queue.Queue(maxsize=max(1, int(getattr(args, "iq_queue_chunks", 64) or 64)))
     driver = _device_driver(args.device_id, args.driver)
     cmd = [
         str(binary),
@@ -727,7 +891,7 @@ def _run_combined(args: argparse.Namespace) -> int:
         cmd.append("--show-init-failed")
 
     print(
-        f"using source=gateway-combined stream_id={stream_id} device={args.device_id} driver={driver} "
+        f"using source=gateway-combined mode={mode} stream_id={stream_id or '-'} device={args.device_id} driver={driver} "
         f"center={float(args.center_mhz):.3f}MHz bandwidth={int(args.bandwidth_mhz)}MHz "
         f"lna={args.lna_gain_db} vga={args.vga_gain_db}",
         file=sys.stderr,
@@ -745,20 +909,19 @@ def _run_combined(args: argparse.Namespace) -> int:
     assert proc.stdin is not None
     threads = [
         threading.Thread(
-            target=_bridge_gateway_to_stdin,
+            target=_combined_iq_source_worker,
             kwargs={
-                "base_url": args.gateway_base_url,
-                "token": args.gateway_token,
+                "args": args,
                 "stream_id": stream_id,
                 "stdin": proc.stdin.buffer,
                 "stop": stop,
-                "raw": bool(args.raw),
-                "label": "btc",
+                "ble_chunks": ble_chunks,
+                "events": events,
             },
             daemon=True,
         ),
         threading.Thread(target=_combined_btc_stdout_worker, args=(proc, args, stop, events), daemon=True),
-        threading.Thread(target=_combined_ble_worker, args=(args, stream_id, stop, events), daemon=True),
+        threading.Thread(target=_combined_ble_worker, args=(args, ble_chunks, stop, events), daemon=True),
     ]
 
     def _stop(_signum: int, _frame: Any) -> None:
@@ -779,12 +942,19 @@ def _run_combined(args: argparse.Namespace) -> int:
                     stop.set()
                 continue
             _print_combined_event(event, args)
+        while True:
+            try:
+                event = events.get_nowait()
+            except queue.Empty:
+                break
+            _print_combined_event(event, args)
         return proc.poll() or 0
     finally:
         stop.set()
         if proc.poll() is None:
             proc.terminate()
-        _stop_gateway_stream(args.gateway_base_url, args.gateway_token, stream_id)
+        if stream_id:
+            _stop_gateway_stream(args.gateway_base_url, args.gateway_token, stream_id)
         for thread in threads:
             thread.join(timeout=1.0)
         signal.signal(signal.SIGINT, previous_int)
@@ -1109,6 +1279,31 @@ def _add_common_gateway_capture_args(parser: argparse.ArgumentParser) -> None:
     parser.add_argument("--debug-fhs-rejects", action="store_true", help="emit limited diagnostics for FHS-shaped packets rejected by validation")
     parser.add_argument("--fhs-max-fec-errors", type=int, default=0, help="allow this many uncorrectable FHS payload FEC blocks before rejecting")
     parser.add_argument("--debug-energy-bin", type=int, default=-1, help="emit debug_bin_energy for this 1 MHz bin")
+    parser.add_argument(
+        "--rf-input-mode",
+        choices=("live", "capture", "playback"),
+        default=os.getenv("RF_SENTINEL_RF_INPUT_MODE", "live"),
+        help="global RF input mode: live SDR, capture SDR IQ, or replay captured IQ",
+    )
+    parser.add_argument(
+        "--iq-capture-path",
+        "--rf-capture-path",
+        dest="iq_capture_path",
+        type=Path,
+        default=_path_from_arg(os.getenv("RF_SENTINEL_IQ_CAPTURE_PATH")),
+        help="CS8 IQ recording path used in capture mode",
+    )
+    parser.add_argument(
+        "--iq-playback-path",
+        "--rf-playback-path",
+        dest="iq_playback_path",
+        type=Path,
+        default=_path_from_arg(os.getenv("RF_SENTINEL_IQ_PLAYBACK_PATH")),
+        help="CS8 IQ recording path used in playback mode",
+    )
+    parser.add_argument("--iq-capture-max-bytes", type=int, default=int(os.getenv("RF_SENTINEL_IQ_CAPTURE_MAX_BYTES", "0") or 0))
+    parser.add_argument("--iq-chunk-bytes", type=int, default=int(os.getenv("RF_SENTINEL_IQ_CHUNK_BYTES", "131072") or 131_072))
+    parser.add_argument("--iq-queue-chunks", type=int, default=int(os.getenv("RF_SENTINEL_IQ_QUEUE_CHUNKS", "64") or 64))
     parser.add_argument("--no-auto-build", action="store_true")
 
 

@@ -34,6 +34,8 @@ DEFAULT_CELLULAR_SAMPLE_RATE_SPS = 20_000_000
 DEFAULT_CELLULAR_SLICE_S = 12.0
 DEFAULT_WALKIE_CENTER_FREQ_HZ = 462_500_000
 DEFAULT_WALKIE_SAMPLE_RATE_SPS = 1_000_000
+DEFAULT_IQ_DIR = Path(os.getenv("RF_SENTINEL_IQ_DIR", "/var/log/rf_sentinel/iq"))
+DEFAULT_BLUETOOTH_IQ_CAPTURE = DEFAULT_IQ_DIR / "bluetooth_combined.cs8"
 
 
 @dataclass(frozen=True)
@@ -208,7 +210,15 @@ def _build_jobs(args: argparse.Namespace) -> tuple[list[ScanJob], list[ScanJob]]
             str(args.btc_amp_gain_db),
             "--json",
             "--metrics",
+            "--rf-input-mode",
+            args.rf_input_mode,
         ]
+        if args.iq_capture_path:
+            command.extend(["--iq-capture-path", args.iq_capture_path])
+        if args.iq_playback_path:
+            command.extend(["--iq-playback-path", args.iq_playback_path])
+        if args.iq_capture_max_bytes:
+            command.extend(["--iq-capture-max-bytes", str(args.iq_capture_max_bytes)])
         if args.no_page_detection:
             command.append("--no-page-detection")
         return ScanJob(
@@ -1058,6 +1068,27 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--btc-vga-gain-db", type=float, default=40.0)
     parser.add_argument("--btc-amp-gain-db", type=float, default=0.0)
     parser.add_argument("--no-page-detection", action="store_true", help="legacy Bluetooth mode: suppress page/inquiry access-code events")
+    parser.add_argument(
+        "--rf-input-mode",
+        choices=("live", "capture", "playback"),
+        default=os.getenv("RF_SENTINEL_RF_INPUT_MODE", "live"),
+        help="global RF input mode for compatible scanners",
+    )
+    parser.add_argument(
+        "--iq-capture-path",
+        "--rf-capture-path",
+        dest="iq_capture_path",
+        default=os.getenv("RF_SENTINEL_IQ_CAPTURE_PATH", str(DEFAULT_BLUETOOTH_IQ_CAPTURE)),
+        help="IQ recording path used when --rf-input-mode=capture",
+    )
+    parser.add_argument(
+        "--iq-playback-path",
+        "--rf-playback-path",
+        dest="iq_playback_path",
+        default=os.getenv("RF_SENTINEL_IQ_PLAYBACK_PATH", ""),
+        help="IQ recording path used when --rf-input-mode=playback",
+    )
+    parser.add_argument("--iq-capture-max-bytes", type=int, default=int(os.getenv("RF_SENTINEL_IQ_CAPTURE_MAX_BYTES", "0") or 0))
 
     parser.add_argument("--ble-slice-s", type=float, default=DEFAULT_JOB_DWELL_S)
     parser.add_argument("--ble-dwell-s", type=float, default=DEFAULT_BLE_DWELL_S)

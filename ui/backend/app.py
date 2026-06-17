@@ -6646,6 +6646,18 @@ def _start_rf_sentinel_engine(
         "--ble-vga-gain-db",
         str(hop_vga_gain_db),
     ]
+    rf_input_mode = os.getenv("RF_SENTINEL_RF_INPUT_MODE", "live").strip().lower() or "live"
+    if rf_input_mode in {"live", "capture", "playback"}:
+        cmd.extend(["--rf-input-mode", rf_input_mode])
+    iq_capture_path = os.getenv("RF_SENTINEL_IQ_CAPTURE_PATH", "").strip()
+    if iq_capture_path:
+        cmd.extend(["--iq-capture-path", iq_capture_path])
+    iq_playback_path = os.getenv("RF_SENTINEL_IQ_PLAYBACK_PATH", "").strip()
+    if iq_playback_path:
+        cmd.extend(["--iq-playback-path", iq_playback_path])
+    iq_capture_max_bytes = os.getenv("RF_SENTINEL_IQ_CAPTURE_MAX_BYTES", "").strip()
+    if iq_capture_max_bytes:
+        cmd.extend(["--iq-capture-max-bytes", iq_capture_max_bytes])
     if sweep_both_radios:
         cmd.extend(
             [
