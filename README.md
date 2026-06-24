@@ -2,6 +2,16 @@
 
 RF Sentinel is a passive multi-protocol RF intelligence platform. The current app is the first live dashboard and capture front end; it already uses `sdr-gateway` IQ streams for BLE and Bluetooth Classic discovery, and now hosts protocol plugins for additional RF families.
 
+## License
+
+RF Sentinel itself is proprietary commercial software licensed under the
+`RF Sentinel Commercial License`; see [`LICENSE`](LICENSE).
+
+Some plugins are distributed under separate open-source licenses. In particular,
+`rf_platform/plugins/bluetooth-classic` is a GPLv3 submodule based on
+[`bsnet/btsniffer`](https://github.com/bsnet/btsniffer). See
+[`THIRD_PARTY_NOTICES.md`](THIRD_PARTY_NOTICES.md).
+
 Product sentence:
 
 > A multi-protocol RF intelligence platform that passively discovers and tracks nearby wireless devices across Bluetooth, WiFi, TPMS, Zigbee/802.15.4, drone/UAS, and SDR-observed signals, with optional authorized test/effects modules for defense and lab environments.

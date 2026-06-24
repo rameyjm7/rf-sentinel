@@ -1,0 +1,69 @@
+RF Sentinel Commercial License
+
+Copyright (c) 2026 Jake Ramey and Intercept Labs LLC. All rights reserved.
+
+This license governs the RF Sentinel application, including its user interface,
+backend services, orchestration code, dashboards, documentation, branding,
+configuration, and platform code, except for third-party components or plugins
+that are distributed under their own separate licenses.
+
+1. Commercial License Required
+
+RF Sentinel is proprietary commercial software. You may not copy, modify,
+publish, distribute, sublicense, sell, rent, lease, host for third parties, or
+otherwise make RF Sentinel available to any third party without a separate
+written license agreement from Jake Ramey or Intercept Labs LLC.
+
+2. Internal Evaluation
+
+Unless a separate written agreement says otherwise, possession of this source
+code does not grant any right to use RF Sentinel in production, offer it as a
+service, redistribute it, or incorporate it into another product. Any evaluation
+or development use requires permission from Jake Ramey or Intercept Labs LLC.
+
+3. No Trademark or Branding Rights
+
+This license does not grant any rights to use the names, marks, logos, or trade
+dress of RF Sentinel, Intercept Labs LLC, or related products.
+
+4. Plugins and Third-Party Software
+
+RF Sentinel may interoperate with separately licensed plugins, tools, libraries,
+drivers, or services. Those components remain governed by their own licenses.
+For example, GPLv3 plugins may be copied, modified, and redistributed under the
+terms of GPLv3, but this does not grant any right to copy, modify, or
+redistribute the proprietary RF Sentinel application itself.
+
+To preserve this separation, RF Sentinel is designed to communicate with plugins
+through process, command-line, file, FIFO, JSON, HTTP, WebSocket, or similarly
+documented interfaces unless a separate license permits closer integration.
+
+5. Restrictions
+
+You may not:
+
+- Remove copyright, license, or attribution notices.
+- Circumvent license checks, access controls, or technical restrictions.
+- Misrepresent RF Sentinel or derivative products as being authorized by Jake
+  Ramey or Intercept Labs LLC.
+- Use RF Sentinel in violation of applicable law or without authorization for
+  the radio systems, environments, or devices being monitored or tested.
+
+6. No Warranty
+
+RF SENTINEL IS PROVIDED "AS IS" WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+IMPLIED, INCLUDING BUT NOT LIMITED TO WARRANTIES OF MERCHANTABILITY, FITNESS FOR
+A PARTICULAR PURPOSE, NON-INFRINGEMENT, SECURITY, ACCURACY, OR RELIABILITY.
+
+7. Limitation of Liability
+
+TO THE MAXIMUM EXTENT PERMITTED BY LAW, JAKE RAMEY AND INTERCEPT LABS LLC SHALL
+NOT BE LIABLE FOR ANY CLAIM, DAMAGES, OR OTHER LIABILITY ARISING FROM OR RELATED
+TO RF SENTINEL, WHETHER IN CONTRACT, TORT, OR OTHERWISE.
+
+8. Separate Agreements
+
+If you have a separate written commercial license, support agreement, statement
+of work, or other contract with Jake Ramey or Intercept Labs LLC, that agreement
+controls to the extent it conflicts with this license.
+
