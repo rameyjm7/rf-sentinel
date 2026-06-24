@@ -1,0 +1,3 @@
+[submodule "rf_platform/plugins/bluetooth-classic"]
+	path = rf_platform/plugins/bluetooth-classic
+	url = ../bluetooth-classic.git
