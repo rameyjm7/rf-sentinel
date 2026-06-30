@@ -62,6 +62,7 @@ class Demodulator(Protocol):
 class ProtocolDecisionEngine:
     BLE_ADV_HZ = (2_402_000_000, 2_426_000_000, 2_480_000_000)
     ZIGBEE_HZ = tuple(2_405_000_000 + (5_000_000 * i) for i in range(16))
+    WIFI_24_HZ = tuple(2_412_000_000 + (5_000_000 * i) for i in range(13)) + (2_484_000_000,)
     TPMS_HZ = (315_000_000, 433_920_000)
     BTC_LOW_HZ = 2_402_000_000
     BTC_HIGH_HZ = 2_480_000_000
@@ -73,6 +74,8 @@ class ProtocolDecisionEngine:
             decisions.append(DemodDecision("ble", "BLE advertising channel overlaps receive window", 90))
         if any(window.contains(freq, guard_hz=1_500_000) for freq in self.ZIGBEE_HZ):
             decisions.append(DemodDecision("zigbee", "802.15.4 channel overlaps receive window", 80))
+        if any(window.contains(freq, guard_hz=10_000_000) for freq in self.WIFI_24_HZ):
+            decisions.append(DemodDecision("wifi", "802.11 2.4 GHz channel overlaps receive window", 75))
         if any(window.contains(freq, guard_hz=100_000) for freq in self.TPMS_HZ):
             decisions.append(DemodDecision("tpms", "TPMS known band overlaps receive window", 70))
         low = int(window.center_freq_hz - (window.sample_rate_sps / 2))
@@ -199,6 +202,32 @@ class ZigbeeWidebandDemodulator:
         return results
 
 
+class WiFiWidebandDemodulator:
+    protocol = "wifi"
+
+    def __init__(self) -> None:
+        self._demodulator: Any | None = None
+
+    def process(self, chunk: IQChunk) -> list[DemodResult]:
+        try:
+            from wifi_80211 import WiFiActivityDemodulator
+        except Exception:
+            return []
+
+        if self._demodulator is None:
+            self._demodulator = WiFiActivityDemodulator()
+
+        events = self._demodulator.process_chunk(
+            raw_i8=chunk.raw_i8,
+            center_freq_hz=int(chunk.window.center_freq_hz),
+            sample_rate_sps=int(chunk.window.sample_rate_sps),
+            source=chunk.source,
+            source_window=chunk.window.name,
+            source_device_id=chunk.device_id,
+        )
+        return [DemodResult(protocol=self.protocol, event=event) for event in events]
+
+
 def _dbfs(value: float) -> float:
     import math
 
@@ -230,6 +259,7 @@ class DemodWorker(threading.Thread):
         self.demodulators = demodulators or {
             "ble": BLEWidebandDemodulator(),
             "zigbee": ZigbeeWidebandDemodulator(),
+            "wifi": WiFiWidebandDemodulator(),
             "tpms": PlaceholderDemodulator("tpms"),
             "bluetooth_classic": PlaceholderDemodulator("bluetooth_classic"),
         }

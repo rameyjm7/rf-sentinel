@@ -11,6 +11,7 @@ BTC_PLUGIN_DIR="${ROOT_DIR}/rf_platform/plugins/bluetooth-classic"
 BTC_BUILD_DIR="${BTC_PLUGIN_DIR}/build"
 BLE_PLUGIN_DIR="${ROOT_DIR}/rf_platform/plugins/bluetooth-lowenergy"
 ZIGBEE_PLUGIN_DIR="${ROOT_DIR}/rf_platform/plugins/zigbee-802154"
+WIFI_PLUGIN_DIR="${ROOT_DIR}/rf_platform/plugins/wifi-80211"
 SUBGHZ_PLUGIN_DIR="${ROOT_DIR}/rf_platform/plugins/subghz-stack"
 FM_PLUGIN_DIR="${ROOT_DIR}/rf_platform/plugins/fm-broadcast"
 AM_PLUGIN_DIR="${ROOT_DIR}/rf_platform/plugins/am-broadcast"
@@ -64,13 +65,14 @@ echo "[RF Sentinel] installing Python requirements"
 "${VENV_DIR}/bin/python" -m pip install -e "${BTC_PLUGIN_DIR}"
 "${VENV_DIR}/bin/python" -m pip install -e "${BLE_PLUGIN_DIR}"
 "${VENV_DIR}/bin/python" -m pip install -e "${ZIGBEE_PLUGIN_DIR}"
+"${VENV_DIR}/bin/python" -m pip install -e "${WIFI_PLUGIN_DIR}"
 "${VENV_DIR}/bin/python" -m pip install -e "${SUBGHZ_PLUGIN_DIR}"
 "${VENV_DIR}/bin/python" -m pip install -e "${FM_PLUGIN_DIR}"
 "${VENV_DIR}/bin/python" -m pip install -e "${AM_PLUGIN_DIR}"
 "${VENV_DIR}/bin/python" -m pip install -e "${CELLULAR_PLUGIN_DIR}"
 
 echo "[RF Sentinel] verifying CLI entry points"
-for cli in rf_sentinel_scan rf_sentinel_pipeline rf_sentinel_ui bluetooth_classic ble_scanner zigbee_802154 tpms_stack fm_broadcast lowfreq-scan cellular_scanner; do
+for cli in rf_sentinel_scan rf_sentinel_pipeline rf_sentinel_ui bluetooth_classic ble_scanner zigbee_802154 wifi_80211 tpms_stack fm_broadcast lowfreq-scan cellular_scanner; do
   if [[ ! -x "${VENV_DIR}/bin/${cli}" ]]; then
     echo "error: expected CLI missing or not executable: ${VENV_DIR}/bin/${cli}" >&2
     exit 1

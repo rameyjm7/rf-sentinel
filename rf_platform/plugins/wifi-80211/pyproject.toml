@@ -1,0 +1,23 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "wifi-80211"
+version = "0.1.0"
+description = "RF Sentinel 802.11 SDR activity and MAC helper plugin"
+requires-python = ">=3.10"
+dependencies = [
+  "numpy>=1.24",
+  "pyshark>=0.6",
+]
+
+[project.scripts]
+wifi-80211 = "wifi_80211.cli:main"
+wifi_80211 = "wifi_80211.cli:main"
+
+[tool.setuptools]
+package-dir = {"" = "src"}
+
+[tool.setuptools.packages.find]
+where = ["src"]
