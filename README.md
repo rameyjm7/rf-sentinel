@@ -1,6 +1,13 @@
 # RF Sentinel
 
-RF Sentinel is a passive multi-protocol RF intelligence platform. The current app is the first live dashboard and capture front end; it already uses `sdr-gateway` IQ streams for BLE and Bluetooth Classic discovery, and now hosts protocol plugins for additional RF families.
+![Python](https://img.shields.io/badge/Python-RF%20Platform-blue)
+![SDR](https://img.shields.io/badge/SDR-IQ%20Streaming-green)
+![Protocols](https://img.shields.io/badge/Protocols-BLE%20%7C%20BTC%20%7C%20Zigbee%20%7C%20Sub--GHz-orange)
+![Events](https://img.shields.io/badge/Data-Normalized%20RF%20Events-blueviolet)
+
+RF Sentinel is a passive, multi-protocol RF intelligence platform for SDR-backed discovery, normalized event processing, entity tracking, dashboards, alerts, and reports.
+
+The current app is the first live dashboard and capture front end. It uses `sdr-gateway` IQ streams for BLE and Bluetooth Classic discovery and hosts protocol plugins for additional RF families. The engineering focus is the platform layer: radio orchestration, event schemas, plugin boundaries, streaming capture, and operator-facing observability.
 
 ## License
 
