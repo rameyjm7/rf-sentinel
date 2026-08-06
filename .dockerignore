@@ -1,0 +1,11 @@
+.git
+.venv
+.venv.old
+research
+notebooks
+rf_sentinel.egg-info
+**/__pycache__
+**/*.pyc
+**/build
+**/captures
+ui/backend/data/*.log
