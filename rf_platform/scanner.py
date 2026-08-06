@@ -215,6 +215,12 @@ def _build_jobs(args: argparse.Namespace) -> tuple[list[ScanJob], list[ScanJob]]
             "--rf-input-mode",
             args.rf_input_mode,
         ]
+        iq_source = os.getenv("SDR_BACKEND", "gateway").strip().lower()
+        if iq_source == "rfiq":
+            command.extend(["--iq-source", "rfiq"])
+            rfiq_socket = os.getenv("SDR_RFIQ_SOCKET", "/tmp/rfiq0.sock")
+            rfiq_control_socket = os.getenv("SDR_RFIQ_CONTROL_SOCKET", "/tmp/rfiq0-control.sock")
+            command.extend(["--rfiq-socket", rfiq_socket, "--rfiq-control-socket", rfiq_control_socket])
         if args.iq_capture_path:
             command.extend(["--iq-capture-path", args.iq_capture_path])
         if args.iq_playback_path:

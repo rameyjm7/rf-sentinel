@@ -48,7 +48,15 @@ ENV RF_SENTINEL_HOST=0.0.0.0 \
     RF_SENTINEL_PORT=5050 \
     RF_SENTINEL_TEXTUAL_CONSOLE=0 \
     SDR_GATEWAY_BASE_URL=http://127.0.0.1:8080 \
-    PATH=/opt/rf-sentinel/.venv/bin:$PATH
+    PATH=/opt/rf-sentinel/.venv/bin:$PATH \
+    # Default the BTC/BLE combined scanner to rfiq_daemon instead of
+    # sdr-gateway - talks to the same daemon sdr-shark uses by default now,
+    # via unix sockets under /tmp (needs -v /tmp:/tmp at deploy time, not
+    # USB passthrough). Other protocol plugins (zigbee/tpms/fm/wifi) still
+    # go through sdr-gateway regardless of this setting - see docker/README.md.
+    SDR_BACKEND=rfiq \
+    SDR_RFIQ_SOCKET=/tmp/rfiq0.sock \
+    SDR_RFIQ_CONTROL_SOCKET=/tmp/rfiq0-control.sock
 
 EXPOSE 5050
 
