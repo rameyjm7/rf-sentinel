@@ -11,6 +11,7 @@ import re
 import shutil
 import signal
 import shlex
+import sqlite3
 import subprocess
 import sys
 import threading
@@ -4586,6 +4587,54 @@ def _append_detections(events: list[dict[str, Any]], candidates: list[dict[str, 
         _console_render()
 
 
+SHARED_BT_DETECTOR_DB = os.getenv("BT_DETECTOR_DB", "/tmp/bt-detections.sqlite3")
+SHARED_BT_DETECTOR_POLL_S = 2.0
+
+
+def _shared_bt_detector_poll_loop() -> None:
+    """Feed discovery_table from the always-on shared detector
+    (bt_detector_service, rf-iq-gateway/scripts) so it's populated
+    regardless of whether this app's own on-demand scan is running - this
+    used to only exist while a user had manually started a scan in this
+    specific app, matching neither "always shows detections" nor "same
+    detections as sdr-shark, which reads the same shared database."
+
+    _scanner_json_to_events() (used for this app's own rf_sentinel_scan
+    subprocess output) classifies purely from each event's own protocol/
+    kind fields - the shared detector emits the identical JSON shape
+    (same bluetooth_scanner engine), so events from either source funnel
+    through the same _append_detections()/discovery_table pipeline and
+    render as the same cards.
+    """
+    last_id = 0
+    while True:
+        try:
+            conn = sqlite3.connect(f"file:{SHARED_BT_DETECTOR_DB}?mode=ro", uri=True, timeout=2.0)
+            try:
+                cur = conn.execute(
+                    "SELECT id, raw_json FROM events WHERE id > ? ORDER BY id ASC LIMIT 200",
+                    (last_id,),
+                )
+                rows = cur.fetchall()
+            finally:
+                conn.close()
+            events: list[dict[str, Any]] = []
+            for row_id, raw_json in rows:
+                last_id = max(last_id, int(row_id))
+                try:
+                    payload = json.loads(raw_json)
+                except (json.JSONDecodeError, TypeError):
+                    continue
+                events.extend(_scanner_json_to_events("shared", payload))
+            if events:
+                _append_detections(events, [])
+        except sqlite3.OperationalError:
+            pass  # DB not created yet (detector service still starting up).
+        except Exception as exc:
+            print(f"[shared-bt] poll error: {exc}", file=sys.stderr, flush=True)
+        time.sleep(SHARED_BT_DETECTOR_POLL_S)
+
+
 def _classic_full_mac(nap: Any = None, uap: Any = None, lap: Any = None) -> str:
     nap_clean = re.sub(r"[^0-9A-Fa-f]", "", str(nap or "")).upper()
     uap_clean = re.sub(r"[^0-9A-Fa-f]", "", str(uap or "")).upper()
@@ -8433,6 +8482,17 @@ def clear():
     with state_lock:
         _reset_stats()
     return jsonify({"ok": True})
+
+
+# Module-level, not inside `if __name__ == "__main__":` below - this file
+# is loaded via importlib.exec_module() by rf_platform/ui.py (the
+# container's actual entrypoint), under a different module name, so that
+# guard never runs here. Placed at true end-of-file (not right after the
+# function definition earlier) so every module-level name it touches
+# (state, state_lock, _scanner_json_to_events, _append_detections) is
+# guaranteed to already exist before the thread's first iteration can
+# possibly run, instead of racing module exec.
+threading.Thread(target=_shared_bt_detector_poll_loop, daemon=True).start()
 
 
 if __name__ == "__main__":
