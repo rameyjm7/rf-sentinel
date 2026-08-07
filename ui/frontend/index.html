@@ -1938,15 +1938,44 @@
     <div id="toast" class="toast" role="status" aria-live="polite"></div>
     <div class="app">
       <header>
-        <div>
-          <h1>RF Sentinel</h1>
-          <div class="subtitle">Passive RF intelligence for discovering, identifying, and tracking wireless activity in the local spectrum.</div>
+        <div style="display:flex; align-items:end; gap:14px;">
+          <a
+            id="launcherBackBtn"
+            href="#"
+            style="display:none; align-items:center; gap:4px; padding:4px 10px; margin-bottom:2px; border:1px solid #3d556d; border-radius:6px; color:#d9f0ff; text-decoration:none; font-size:0.85rem; white-space:nowrap;"
+          >&larr; Launcher</a>
+          <div>
+            <h1>RF Sentinel</h1>
+            <div class="subtitle">Passive RF intelligence for discovering, identifying, and tracking wireless activity in the local spectrum.</div>
+          </div>
         </div>
         <div class="status-pill">
           <span class="dot" id="liveDot"></span>
           <strong id="runState">Idle</strong>
         </div>
       </header>
+      <script>
+        // The station1 app launcher appends ?launcher_return=<url> when it
+        // redirects here after starting this container - only show a back
+        // button when that's actually how we got here, not when someone
+        // hits this port directly. Persisted to sessionStorage so it
+        // survives a plain reload.
+        (function () {
+          const STORAGE_KEY = 'rfsentinel_launcher_return_v1';
+          const params = new URLSearchParams(window.location.search);
+          let returnUrl = params.get('launcher_return');
+          if (returnUrl) {
+            try { sessionStorage.setItem(STORAGE_KEY, returnUrl); } catch (e) {}
+          } else {
+            try { returnUrl = sessionStorage.getItem(STORAGE_KEY); } catch (e) {}
+          }
+          if (returnUrl) {
+            const btn = document.getElementById('launcherBackBtn');
+            btn.style.display = 'inline-flex';
+            btn.href = returnUrl;
+          }
+        })();
+      </script>
 
       <form class="toolbar" id="scanForm">
         <select id="btcDeviceSelect" hidden></select>
