@@ -7263,6 +7263,19 @@ def _start_rf_sentinel_engine(
         cmd.append("--no-btc")
     if "ble" not in protocols:
         cmd.append("--no-ble")
+    if "btc" in protocols and "ble" in protocols:
+        # Combined mode (scanner.py's bluetooth_combined_job) captures BLE
+        # from the same fixed BTC window instead of running a separate
+        # hopper on the second radio - real BLE traffic was getting almost
+        # entirely missed as a result: at btc_bandwidth_mhz=60 centered on
+        # btc_center_mhz, the window only spans roughly 2412-2472 MHz, which
+        # covers just 1 of BLE's 3 primary advertising channels (37=2402
+        # and 39=2480 both fall outside it; only 38=2426 is covered).
+        # --btc-band-hop is exactly the mechanism built for this - it
+        # retunes the shared capture between two overlapping windows
+        # (_band_hop_centers_mhz) that together span the full 2402-2482 MHz
+        # ISM range - it just wasn't ever being turned on here.
+        cmd.extend(["--btc-band-hop", "--btc-band-hop-dwell-s", "10"])
     if "zigbee" not in protocols:
         cmd.append("--no-zigbee")
     if "tpms" not in protocols:
