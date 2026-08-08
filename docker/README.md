@@ -20,7 +20,41 @@ relative to root):
 docker build -f docker/Dockerfile -t rf-sentinel:latest .
 ```
 
-## Deploy
+## Deploy (actual production config: `rfiq`)
+
+This is what's actually running on station1 and dev-desktop today —
+shares the radio with sdr-shark and the shared `bt-detector` sidecar
+through `rfiq_daemon` (see `rf-iq-gateway`) instead of opening SoapySDR
+directly:
+
+```
+docker run -d \
+  --name rf-sentinel \
+  --restart unless-stopped \
+  --network host \
+  -v /tmp:/tmp \
+  -e RF_SENTINEL_HOST=0.0.0.0 \
+  -e RF_SENTINEL_PORT=5050 \
+  -e RF_SENTINEL_TEXTUAL_CONSOLE=0 \
+  -e SDR_BACKEND=rfiq \
+  -e SDR_RFIQ_SOCKET=/tmp/rfiq0.sock \
+  -e SDR_RFIQ_CONTROL_SOCKET=/tmp/rfiq0-control.sock \
+  -e SDR_GATEWAY_BASE_URL=http://127.0.0.1:8080 \
+  rf-sentinel:latest
+```
+
+`SDR_GATEWAY_BASE_URL` is still set out of habit/parity with the
+original design, but **see "Known gap" below** - `sdr-gateway` isn't
+actually running on either host right now, and most of the app doesn't
+need it.
+
+## Deploy (older: direct SoapySDR via `sdr-gateway`)
+
+The original design point, before `rfiq_daemon` existed - the dashboard
+talks to a separate `sdr-gateway` HTTP service (not part of this repo)
+for device access instead of a direct SoapySDR caller. Not what's
+actually deployed anywhere currently; kept here for reference in case
+`sdr-gateway` comes back into the picture:
 
 ```
 docker run -d \
@@ -36,10 +70,39 @@ docker run -d \
 ```
 
 `--network host` is what lets it reach `sdr-gateway` at
-`127.0.0.1:8080` — the dashboard is an HTTP client of that service for
-device access, not a direct SoapySDR caller, so USB passthrough here is
-a fallback rather than the primary path. The Bluetooth Classic C++
-binary is the exception (see below) — it does open SoapySDR directly.
+`127.0.0.1:8080`. The Bluetooth Classic C++ binary is the exception in
+either mode — it does open SoapySDR directly (see below), not through
+either the gateway or `rfiq_daemon`.
+
+## Known gap: the device picker still needs `sdr-gateway`
+
+`ui/backend/app.py`'s `_available_devices()` (feeds the UI's device
+picker, and `/api/devices`) unconditionally calls `_fetch_gateway_devices()`
+against `SDR_GATEWAY_BASE_URL` — there's no `rfiq_daemon`-native fallback.
+With `sdr-gateway` not running (the normal state on both station1 and
+dev-desktop today), the UI shows **"no SDRs are available from
+sdr-gateway"** even though the actual detection pipeline (the shared
+`bt-detector` sidecar, and this container's own `discovery_table`
+polling of it - see the root README) works fine independent of any of
+this, since that path talks to `rfiq_daemon` directly and never calls
+`_available_devices()`.
+
+Similarly, `rf_sentinel_scan` (the binary `_start_rf_sentinel_engine()`
+launches when you click "start scan" in the UI) has no
+`--iq-source`/`--rfiq-socket` flags at all — unlike the Bluetooth Classic
+plugin's own scanner binary (`bluetooth_scanner`, used by the shared
+`bt-detector`), which does support talking to `rfiq_daemon` directly.
+Starting a scan from the UI still assumes direct BladeRF access via
+SoapySDR, which will conflict with `rfiq_daemon` already holding the
+radio in the `rfiq` deploy mode above.
+
+**Net effect:** the always-on shared-detector view (BT/BLE cards fed by
+`bt-detector`) works today without `sdr-gateway`. The UI's own
+"start scan" button and device picker do not, and fixing that properly
+needs either standing `sdr-gateway` back up, or adding real
+`rfiq_daemon` socket support to `rf_sentinel_scan` and an
+`rfiq`-native path in `_available_devices()` (bigger change, not yet
+done as of this writing).
 
 ## Why `docker/soapy-build/`
 

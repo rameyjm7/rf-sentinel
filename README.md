@@ -72,16 +72,30 @@ Near-term build order:
 6. Add TPMS ingestion.
 7. Build entity resolution and pattern-of-life dashboard views.
 
+## Docker
+
+A container build exists at `docker/` (own README, own soapy-build
+assets), deployed on station1 and dev-desktop. **See `docker/README.md`**
+for deploy commands (the actual `rfiq_daemon`-sharing production config,
+not the older direct-`sdr-gateway` design) and a known gap: the UI's
+device picker and "start scan" button still depend on `sdr-gateway`
+being up, even though the shared passive BT/BLE detection view does not.
+
 ## Requirements
 
-- Running `sdr-gateway` instance (`http://127.0.0.1:8080` default).
 - Python 3.10+.
-- An SDR device visible in `sdr-gateway /devices`.
+- For the shared passive detection view (BT/BLE cards): a running
+  `rfiq_daemon` instance and the shared `bt-detector` sidecar - see
+  `rf-iq-gateway` and `docker/README.md`'s "Known gap" section.
+- For the UI's own device picker / "start scan" button specifically: a
+  running `sdr-gateway` instance (`http://127.0.0.1:8080` default) - not
+  currently running on either deployed host, so that particular UI path
+  currently shows "no SDRs are available from sdr-gateway".
 
 ## Setup
 
 ```bash
-cd /home/jake/workspace/SDR/RF_Sentinel
+cd /home/jake/workspace/SDR/rf-sentinel
 ./install.sh
 ```
 
@@ -109,7 +123,7 @@ export SDR_GATEWAY_BASE_URL="http://127.0.0.1:8080"
 ## Run
 
 ```bash
-cd /home/jake/workspace/SDR/RF_Sentinel
+cd /home/jake/workspace/SDR/rf-sentinel
 source .venv/bin/activate
 python3 ui/backend/app.py
 ```
