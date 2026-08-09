@@ -7749,7 +7749,53 @@ def _cached_gateway_devices() -> tuple[list[dict[str, Any]], float]:
         return [dict(item) for item in devices_cache], float(devices_cache_updated_at)
 
 
+def _rfiq_available_devices() -> list[dict[str, Any]]:
+    # No sdr-gateway to ask in this deployment mode - synthesize a single
+    # device entry describing the BladeRF that rfiq_daemon is sharing, so
+    # the device picker (and everything built on _available_devices(), like
+    # _pick_ism24_bluetooth_device) has something real to select. Mirrors
+    # the exact env vars scanner.py's bluetooth_combined_job() already
+    # reads for SDR_BACKEND=rfiq, so a working rfiq deployment doesn't need
+    # any new config beyond what it already has.
+    socket_path = os.getenv("SDR_RFIQ_SOCKET", "/tmp/rfiq0.sock")
+    control_socket_path = os.getenv("SDR_RFIQ_CONTROL_SOCKET", "/tmp/rfiq0-control.sock")
+    if not os.path.exists(socket_path):
+        # The socket file only exists while rfiq_daemon is actually
+        # listening - absence means the radio daemon isn't up right now
+        # (stopped for a row switch, crash-looping on no hardware, etc.),
+        # not that it will never exist. Report no devices rather than a
+        # stale/fake one.
+        return []
+    device_id = os.getenv("SDR_RFIQ_DEVICE_ID", "bladerf-rfiq0")
+    # Default range covers the BladeRF 2.0 micro (47MHz-6GHz, most current
+    # hosts). Hosts with an original bladeRF1 (narrower ~300MHz-3.8GHz
+    # tunable range) should override these three via env vars, or pickers
+    # that need frequencies outside a bladeRF1's real range (e.g. AM/FM
+    # broadcast) will select a device that can't actually tune there.
+    freq_min_hz = int(os.getenv("SDR_RFIQ_FREQ_MIN_HZ", "47000000"))
+    freq_max_hz = int(os.getenv("SDR_RFIQ_FREQ_MAX_HZ", "6000000000"))
+    max_sample_rate_sps = int(os.getenv("SDR_RFIQ_MAX_SAMPLE_RATE_SPS", "61440000"))
+    return [
+        {
+            "id": device_id,
+            "driver": "bladerf",
+            "label": "BladeRF (via rfiq_daemon)",
+            "serial": None,
+            "freq_min_hz": freq_min_hz,
+            "freq_max_hz": freq_max_hz,
+            "max_sample_rate_sps": max_sample_rate_sps,
+            "notes": f"Shared through rfiq_daemon's control socket ({control_socket_path}), not a direct SoapySDR/gateway device.",
+            "occupied": False,
+            "occupied_by": None,
+            "occupied_id": None,
+            "up": True,
+        }
+    ]
+
+
 def _available_devices() -> list[dict[str, Any]]:
+    if os.getenv("SDR_BACKEND", "gateway").strip().lower() == "rfiq":
+        return _rfiq_available_devices()
     try:
         return _fetch_gateway_devices()
     except requests.RequestException:
@@ -7924,6 +7970,8 @@ def resources(filename: str):
 
 @app.get("/api/devices")
 def devices():
+    if os.getenv("SDR_BACKEND", "gateway").strip().lower() == "rfiq":
+        return jsonify(_rfiq_available_devices())
     try:
         return jsonify(_fetch_gateway_devices())
     except requests.RequestException as exc:
