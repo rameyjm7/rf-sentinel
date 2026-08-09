@@ -44,9 +44,9 @@ docker run -d \
 ```
 
 `SDR_GATEWAY_BASE_URL` is still set out of habit/parity with the
-original design, but **see "Known gap" below** - `sdr-gateway` isn't
-actually running on either host right now, and most of the app doesn't
-need it.
+original design, but `sdr-gateway` isn't actually running on any host
+today - see "Known gap" below for the one piece that still can't fully
+do without it.
 
 ## Deploy (older: direct SoapySDR via `sdr-gateway`)
 
@@ -74,35 +74,30 @@ docker run -d \
 either mode — it does open SoapySDR directly (see below), not through
 either the gateway or `rfiq_daemon`.
 
-## Known gap: the device picker still needs `sdr-gateway`
+## Known gap: standalone BLE-only scans still need `sdr-gateway`
 
-`ui/backend/app.py`'s `_available_devices()` (feeds the UI's device
-picker, and `/api/devices`) unconditionally calls `_fetch_gateway_devices()`
-against `SDR_GATEWAY_BASE_URL` — there's no `rfiq_daemon`-native fallback.
-With `sdr-gateway` not running (the normal state on both station1 and
-dev-desktop today), the UI shows **"no SDRs are available from
-sdr-gateway"** even though the actual detection pipeline (the shared
-`bt-detector` sidecar, and this container's own `discovery_table`
-polling of it - see the root README) works fine independent of any of
-this, since that path talks to `rfiq_daemon` directly and never calls
-`_available_devices()`.
+**Fixed 2026-08-09:** the device picker (`_available_devices()` /
+`/api/devices`) used to unconditionally call `_fetch_gateway_devices()`
+against `SDR_GATEWAY_BASE_URL`, so it always showed "no SDRs are
+available from sdr-gateway" in the `rfiq` deploy mode above. It now has
+an `_rfiq_available_devices()` fallback: when `SDR_BACKEND=rfiq`, it
+synthesizes a device entry as long as `SDR_RFIQ_SOCKET` actually exists
+on disk (i.e. `rfiq_daemon` is running), instead of ever touching the
+gateway. `SDR_RFIQ_FREQ_MIN_HZ`/`_MAX_HZ`/`SDR_RFIQ_MAX_SAMPLE_RATE_SPS`
+override the advertised tuning range/rate if the deployed radio isn't a
+bladeRF 2.0 micro (the default assumption) - a bladeRF1 x40, for
+example, has a much narrower real tuning range and device pickers that
+filter by frequency need to know that.
 
-Similarly, `rf_sentinel_scan` (the binary `_start_rf_sentinel_engine()`
-launches when you click "start scan" in the UI) has no
-`--iq-source`/`--rfiq-socket` flags at all — unlike the Bluetooth Classic
-plugin's own scanner binary (`bluetooth_scanner`, used by the shared
-`bt-detector`), which does support talking to `rfiq_daemon` directly.
-Starting a scan from the UI still assumes direct BladeRF access via
-SoapySDR, which will conflict with `rfiq_daemon` already holding the
-radio in the `rfiq` deploy mode above.
-
-**Net effect:** the always-on shared-detector view (BT/BLE cards fed by
-`bt-detector`) works today without `sdr-gateway`. The UI's own
-"start scan" button and device picker do not, and fixing that properly
-needs either standing `sdr-gateway` back up, or adding real
-`rfiq_daemon` socket support to `rf_sentinel_scan` and an
-`rfiq`-native path in `_available_devices()` (bigger change, not yet
-done as of this writing).
+**Still open:** starting a scan from the UI works for the combined
+Bluetooth Classic+LE mode (`bluetooth_scanner` binary, which already
+has real `rfiq_daemon` socket support - same one the shared
+`bt-detector` sidecar uses), but standalone BLE-only scans
+(`ble_scanner`'s `iq-sweep` subcommand) do not - confirmed via
+`ble_scanner iq-sweep --help`, it has no `--iq-source`/`--rfiq-socket`
+flags at all. That's a compiled-binary gap (would need changes to the
+`ble_scanner` C/C++ source and a rebuild), not something fixable in
+`ui/backend/app.py` or `rf_platform/scanner.py` alone.
 
 ## Why `docker/soapy-build/`
 
