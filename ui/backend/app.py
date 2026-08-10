@@ -562,6 +562,8 @@ class ExplorerState:
     csv_log_dir: str = ""
     wifi_deauth_events: list[dict[str, Any]] = field(default_factory=list)
     wifi_band_packet_counts: dict[str, int] = field(default_factory=lambda: {"2.4": 0, "5": 0, "6": 0})
+    playback_run_id: str = ""
+    playback_discovery_table: list[dict[str, Any]] = field(default_factory=list)
 
 
 @dataclass
@@ -5184,6 +5186,94 @@ def _record_history_row(protocol: str, row: dict[str, str], dates_by_key: dict[s
         dates_by_key.setdefault(key, set()).add(date_key)
 
 
+def _list_runs() -> list[dict[str, Any]]:
+    if not RF_SENTINEL_RUNS_DIR.exists():
+        return []
+    runs: list[dict[str, Any]] = []
+    for run_dir in RF_SENTINEL_RUNS_DIR.iterdir():
+        if not run_dir.is_dir():
+            continue
+        combined_path = run_dir / "combined.csv"
+        if not combined_path.is_file():
+            continue
+        try:
+            mtime = combined_path.stat().st_mtime
+        except OSError:
+            continue
+        protocols: set[str] = set()
+        row_count = 0
+        try:
+            with combined_path.open(newline="", encoding="utf-8") as handle:
+                for row in csv.DictReader(handle):
+                    row_count += 1
+                    protocol = str(row.get("protocol") or "").strip()
+                    if protocol:
+                        protocols.add(protocol)
+        except (OSError, csv.Error):
+            continue
+        if not row_count:
+            continue
+        runs.append({
+            "run_id": run_dir.name,
+            "modified_at": mtime,
+            "protocols": sorted(protocols),
+            "row_count": row_count,
+        })
+    runs.sort(key=lambda item: item["modified_at"], reverse=True)
+    return runs[:200]
+
+
+_PLAYBACK_NUMERIC_INT_FIELDS = {"detections", "channel", "seen_days", "seen_day_count"}
+_PLAYBACK_NUMERIC_FLOAT_FIELDS = {
+    "rssi_dbm", "rssi_dbfs", "last_rssi_dbfs", "confidence",
+    "last_seen_at", "first_seen_at", "observed_at_epoch",
+    "center_freq_hz", "frequency_hz", "frequency_mhz",
+}
+_PLAYBACK_BOOL_FIELDS = {"ssid_visible", "passive_only", "content_decoded"}
+
+
+def _csv_row_to_discovery_row(row: dict[str, str]) -> dict[str, Any]:
+    result: dict[str, Any] = {}
+    for key, value in row.items():
+        if not key:
+            continue
+        text = "" if value is None else str(value).strip()
+        if text == "":
+            result[key] = None
+        elif key in _PLAYBACK_NUMERIC_INT_FIELDS:
+            try:
+                result[key] = int(float(text))
+            except ValueError:
+                result[key] = text
+        elif key in _PLAYBACK_NUMERIC_FLOAT_FIELDS:
+            try:
+                result[key] = float(text)
+            except ValueError:
+                result[key] = text
+        elif key in _PLAYBACK_BOOL_FIELDS:
+            result[key] = text.lower() in {"1", "true", "yes"}
+        else:
+            result[key] = text
+    result.setdefault("key", f"{result.get('protocol', '')}:{result.get('mac') or result.get('bssid') or result.get('identity', '')}")
+    result["last_seen_at"] = result.get("last_seen_at") or result.get("observed_at_epoch") or 0.0
+    return result
+
+
+def _load_run_playback(run_id: str) -> list[dict[str, Any]]:
+    # Path(...).name strips any directory components, so a traversal
+    # attempt collapses to a bare filename that then fails the is_dir()
+    # check below instead of escaping RF_SENTINEL_RUNS_DIR.
+    safe_id = Path(run_id).name
+    combined_path = RF_SENTINEL_RUNS_DIR / safe_id / "combined.csv"
+    if not combined_path.is_file():
+        raise FileNotFoundError(safe_id)
+    rows: list[dict[str, Any]] = []
+    with combined_path.open(newline="", encoding="utf-8") as handle:
+        for raw_row in csv.DictReader(handle):
+            rows.append(_csv_row_to_discovery_row(raw_row))
+    return rows[-RF_SENTINEL_DISCOVERY_TABLE_MAX_ROWS:]
+
+
 def _wifi_pattern_of_life(limit_rows: int = 200000) -> dict[str, Any]:
     groups: dict[str, dict[str, Any]] = {}
     all_days: set[str] = set()
@@ -8929,7 +9019,8 @@ def status():
                 "ble_packets_seen": state.ble_packets_seen,
                 "classic_bursts_seen": state.classic_bursts_seen,
                 "detections": state.detections[:120],
-                "discovery_table": state.discovery_table,
+                "discovery_table": state.playback_discovery_table if state.playback_run_id else state.discovery_table,
+                "run_playback_id": state.playback_run_id,
                 "classic_candidates": state.classic_candidates[:32],
                 "classic_addresses": state.classic_addresses[:64],
                 "decoder_stats": {**state.decoder_stats, "follow": follow_target},
@@ -8964,6 +9055,43 @@ def wifi_deauth_events():
     with state_lock:
         events = list(reversed(state.wifi_deauth_events))
     return jsonify({"events": events, "count": len(events)})
+
+
+@app.get("/api/runs")
+def list_runs_endpoint():
+    return jsonify({"runs": _list_runs()})
+
+
+@app.get("/api/runs/<run_id>/download")
+def download_run(run_id: str):
+    safe_id = Path(run_id).name
+    run_dir = RF_SENTINEL_RUNS_DIR / safe_id
+    if not (run_dir / "combined.csv").is_file():
+        return jsonify({"error": f"no run named {run_id!r}"}), 404
+    return send_from_directory(run_dir, "combined.csv", as_attachment=True, download_name=f"{safe_id}.csv")
+
+
+@app.post("/api/runs/<run_id>/playback")
+def start_run_playback(run_id: str):
+    with state_lock:
+        if state.running:
+            return jsonify({"ok": False, "error": "stop the live scan before viewing a recorded run"}), 409
+    try:
+        rows = _load_run_playback(run_id)
+    except FileNotFoundError:
+        return jsonify({"ok": False, "error": f"no run named {run_id!r}"}), 404
+    with state_lock:
+        state.playback_discovery_table = rows
+        state.playback_run_id = Path(run_id).name
+    return jsonify({"ok": True, "run_id": state.playback_run_id, "row_count": len(rows)})
+
+
+@app.post("/api/runs/playback/stop")
+def stop_run_playback():
+    with state_lock:
+        state.playback_run_id = ""
+        state.playback_discovery_table = []
+    return jsonify({"ok": True})
 
 
 @app.get("/api/wifi/pattern-of-life")

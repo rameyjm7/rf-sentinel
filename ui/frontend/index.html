@@ -2019,6 +2019,19 @@
         <div id="gpsMapContainer" class="gps-map"></div>
       </section>
     </div>
+    <div id="runsOverlay" class="config-overlay" hidden>
+      <section class="config-panel" role="dialog" aria-modal="true" aria-labelledby="runsTitle">
+        <div class="config-panel-head">
+          <div>
+            <h2 id="runsTitle">Runs</h2>
+            <p>Every scan session is saved automatically. Download one to keep it, or play one back to view that session's discovery table again.</p>
+          </div>
+          <button class="ghost-btn" type="button" id="runsClose"><span class="material-symbols-rounded">close</span>Close</button>
+        </div>
+        <div id="runsBanner"></div>
+        <div id="runsList" class="wifi-topology-list"></div>
+      </section>
+    </div>
     <div id="toast" class="toast" role="status" aria-live="polite"></div>
     <div class="app">
       <header>
@@ -2130,6 +2143,7 @@
           <button id="runToggleBtn" type="submit"><span class="material-symbols-rounded">play_arrow</span><span id="runToggleText">Start</span></button>
           <button id="clearBtn" class="secondary" type="button"><span class="material-symbols-rounded">delete_sweep</span>Clear</button>
           <button id="patternOfLifeBtn" class="secondary" type="button"><span class="material-symbols-rounded">history</span>Pattern of Life</button>
+          <button id="runsBtn" class="secondary" type="button"><span class="material-symbols-rounded">video_library</span>Runs</button>
         </div>
       </form>
 
@@ -3721,6 +3735,96 @@
       document.getElementById("gpsClose").addEventListener("click", closeGpsOverlay);
       gpsOverlay.addEventListener("click", (event) => { if (event.target === gpsOverlay) closeGpsOverlay(); });
 
+      const runsOverlay = document.getElementById("runsOverlay");
+      const runsList = document.getElementById("runsList");
+      const runsBanner = document.getElementById("runsBanner");
+
+      function formatRunTime(epochSeconds) {
+        if (!epochSeconds) return "--";
+        return new Date(epochSeconds * 1000).toLocaleString();
+      }
+
+      async function loadRunPlayback(runId) {
+        try {
+          const resp = await fetch(`/api/runs/${encodeURIComponent(runId)}/playback`, { method: "POST" });
+          const data = await resp.json().catch(() => ({}));
+          if (!resp.ok || data.ok === false) {
+            showToast(data.error || "playback failed");
+            return;
+          }
+          await renderRuns();
+          await pollStatus();
+        } catch {
+          showToast("playback failed");
+        }
+      }
+
+      async function stopRunPlayback() {
+        try {
+          await fetch("/api/runs/playback/stop", { method: "POST" });
+          await renderRuns();
+          await pollStatus();
+        } catch {
+          showToast("failed to return to live");
+        }
+      }
+
+      async function renderRuns() {
+        runsList.innerHTML = `<div class="empty">Loading...</div>`;
+        runsBanner.innerHTML = "";
+        try {
+          const resp = await fetch("/api/runs", { cache: "no-store" });
+          const data = await resp.json();
+          const runs = data.runs || [];
+          const playingId = latestStatus?.run_playback_id || "";
+          if (playingId) {
+            runsBanner.innerHTML = `
+              <p class="hint" style="color:var(--gold); margin: 0 0 10px;">
+                Viewing recorded run <strong>${escapeHtml(playingId)}</strong>, not live data.
+                <button class="ghost-btn" type="button" id="runsReturnLive" style="margin-left:10px"><span class="material-symbols-rounded">play_circle</span>Return to live</button>
+              </p>
+            `;
+            document.getElementById("runsReturnLive").addEventListener("click", stopRunPlayback);
+          }
+          if (!runs.length) {
+            runsList.innerHTML = `<div class="empty">No saved runs yet - click Start to begin recording one.</div>`;
+            return;
+          }
+          const liveDisabled = Boolean(latestStatus?.running);
+          runsList.innerHTML = runs.map((run) => `
+            <div class="deauth-row">
+              <span class="kind" style="color:var(--wifi-green)">${run.run_id === playingId ? "viewing" : "saved"}</span>
+              <span class="parties">${escapeHtml(run.run_id)} <span class="small">(${escapeHtml((run.protocols || []).join(", "))}, ${run.row_count} rows)</span></span>
+              <span class="meta" style="display:flex; gap:8px; align-items:center; justify-content:flex-end;">
+                ${formatRunTime(run.modified_at)}
+                <a href="/api/runs/${encodeURIComponent(run.run_id)}/download" title="Download"><span class="material-symbols-rounded">download</span></a>
+                <button class="ghost-btn" type="button" data-run-id="${escapeHtml(run.run_id)}" title="${liveDisabled ? "Stop the live scan first" : "Play back"}" ${liveDisabled ? "disabled" : ""} style="padding:2px 6px; min-height:auto;">
+                  <span class="material-symbols-rounded">play_arrow</span>
+                </button>
+              </span>
+            </div>
+          `).join("");
+          runsList.querySelectorAll("button[data-run-id]").forEach((button) => {
+            button.addEventListener("click", () => loadRunPlayback(button.getAttribute("data-run-id")));
+          });
+        } catch {
+          runsList.innerHTML = `<div class="empty">Failed to load runs.</div>`;
+        }
+      }
+
+      function openRunsOverlay() {
+        runsOverlay.hidden = false;
+        renderRuns();
+      }
+
+      function closeRunsOverlay() {
+        runsOverlay.hidden = true;
+      }
+
+      document.getElementById("runsBtn").addEventListener("click", openRunsOverlay);
+      document.getElementById("runsClose").addEventListener("click", closeRunsOverlay);
+      runsOverlay.addEventListener("click", (event) => { if (event.target === runsOverlay) closeRunsOverlay(); });
+
       function protocolGroupLabel(protocol) {
         const map = {
           BTC: "Bluetooth Classic",
@@ -4566,7 +4670,7 @@
           const status = await resp.json();
           latestStatus = status;
           liveDot.classList.toggle("live", Boolean(status.running && status.worker_alive));
-          runState.textContent = statusLabel(status);
+          runState.textContent = status.run_playback_id ? `Viewing run: ${status.run_playback_id}` : statusLabel(status);
           if (status.fm_playback?.running) fmAudioLoop();
           if (status.walkie_playback?.running) walkieAudioLoop();
           runToggleBtn.classList.toggle("danger", Boolean(status.running));
