@@ -9,6 +9,13 @@ RF Sentinel is a passive, multi-protocol RF intelligence platform for SDR-backed
 
 The current app is the first live dashboard and capture front end. It uses `sdr-gateway` IQ streams for BLE and Bluetooth Classic discovery and hosts protocol plugins for additional RF families. The engineering focus is the platform layer: radio orchestration, event schemas, plugin boundaries, streaming capture, and operator-facing observability.
 
+RF Sentinel is one console in a larger RF-intelligence suite:
+[`rf-iq-gateway`](https://github.com/rameyjm7/rf-iq-gateway)'s
+`app_launcher.py` starts/stops/health-checks it alongside SDR-Shark,
+AirScope, and PASSIVE-SHIELD from one page, and
+[`trace-analyzer`](https://github.com/rameyjm7/trace-analyzer) pulls its
+`detections` feed into a single normalized, cross-tool live packet view.
+
 ## Visual Evidence
 
 | Live multi-protocol scan | Protocol group settings |
@@ -70,7 +77,6 @@ The milestone plan lives in:
 - `docs/product_strategy.md`
 - `docs/architecture.md`
 - `docs/milestones.md`
-- `/home/jake/workspace/SDR/RF_Intelligence_Platform_Milestone_Plan.docx`
 
 Near-term build order:
 
@@ -85,8 +91,9 @@ Near-term build order:
 ## Docker
 
 A container build exists at `docker/` (own README, own soapy-build
-assets), deployed on station1 and dev-desktop. **See `docker/README.md`**
-for deploy commands (the actual `rfiq_daemon`-sharing production config,
+assets), and is the recommended way to run RF Sentinel in production.
+**See `docker/README.md`** for deploy commands (the actual
+`rfiq_daemon`-sharing production config,
 not the older direct-`sdr-gateway` design) and a known gap: the UI's
 device picker and "start scan" button still depend on `sdr-gateway`
 being up, even though the shared passive BT/BLE detection view does not.
@@ -105,7 +112,8 @@ being up, even though the shared passive BT/BLE detection view does not.
 ## Setup
 
 ```bash
-cd /home/jake/workspace/SDR/rf-sentinel
+git clone https://github.com/rameyjm7/rf-sentinel.git
+cd rf-sentinel
 ./install.sh
 ```
 
@@ -133,7 +141,7 @@ export SDR_GATEWAY_BASE_URL="http://127.0.0.1:8080"
 ## Run
 
 ```bash
-cd /home/jake/workspace/SDR/rf-sentinel
+cd rf-sentinel
 source .venv/bin/activate
 python3 ui/backend/app.py
 ```
