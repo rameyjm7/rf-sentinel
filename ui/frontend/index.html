@@ -6,6 +6,8 @@
     <meta name="viewport" content="width=device-width, initial-scale=1" />
     <title>RF Sentinel</title>
     <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Material+Symbols+Rounded:opsz,wght,FILL,GRAD@20..48,400..700,0..1,0" />
+    <link rel="stylesheet" href="/vendor/maplibre-gl.css" />
+    <script src="/vendor/maplibre-gl.js"></script>
     <style>
       :root {
         --bg: #f3f0e8;
@@ -1299,6 +1301,15 @@
         }
       }
 
+      .gps-map {
+        width: 100%;
+        height: 420px;
+        border-radius: 12px;
+        overflow: hidden;
+        border: 1px solid var(--line);
+        margin-top: 10px;
+      }
+
       .wifi-map-card {
         position: relative;
         min-height: 330px;
@@ -1995,6 +2006,19 @@
         <div id="polList" class="wifi-topology-list" style="margin-top:10px"></div>
       </section>
     </div>
+    <div id="gpsOverlay" class="config-overlay" hidden>
+      <section class="config-panel" role="dialog" aria-modal="true" aria-labelledby="gpsTitle" style="width:min(880px,94vw)">
+        <div class="config-panel-head">
+          <div>
+            <h2 id="gpsTitle">GPS Status</h2>
+            <p id="gpsSubtitle">No GPS provider configured.</p>
+          </div>
+          <button class="ghost-btn" type="button" id="gpsClose"><span class="material-symbols-rounded">close</span>Close</button>
+        </div>
+        <div class="metrics" id="gpsMetrics"></div>
+        <div id="gpsMapContainer" class="gps-map"></div>
+      </section>
+    </div>
     <div id="toast" class="toast" role="status" aria-live="polite"></div>
     <div class="app">
       <header>
@@ -2016,6 +2040,10 @@
         <button class="status-pill" id="deauthPillBtn" type="button" style="border:none; cursor:pointer; font:inherit; color:inherit;">
           <span class="dot quiet" id="deauthDot"></span>
           <strong id="deauthPillCount">0</strong> deauth
+        </button>
+        <button class="status-pill" id="gpsPillBtn" type="button" style="border:none; cursor:pointer; font:inherit; color:inherit;">
+          <span class="dot quiet" id="gpsDot"></span>
+          GPS <strong id="gpsPillLabel">no fix</strong>
         </button>
       </header>
       <script>
@@ -3597,6 +3625,101 @@
       document.getElementById("patternOfLifeBtn").addEventListener("click", openPolOverlay);
       document.getElementById("polClose").addEventListener("click", closePolOverlay);
       polOverlay.addEventListener("click", (event) => { if (event.target === polOverlay) closePolOverlay(); });
+
+      const gpsOverlay = document.getElementById("gpsOverlay");
+      const gpsDot = document.getElementById("gpsDot");
+      const gpsPillLabel = document.getElementById("gpsPillLabel");
+      const gpsMetrics = document.getElementById("gpsMetrics");
+      const gpsSubtitle = document.getElementById("gpsSubtitle");
+      let gpsMap = null;
+      let gpsMarker = null;
+      let latestGps = null;
+
+      function gpsCoordText(gps) {
+        const lat = Number(gps?.latitude);
+        const lon = Number(gps?.longitude);
+        if (!Number.isFinite(lat) || !Number.isFinite(lon)) return "No position";
+        return `${lat.toFixed(6)}, ${lon.toFixed(6)}`;
+      }
+
+      function gpsHasFix(gps) {
+        return gps?.quality === "fix_2d" || gps?.quality === "fix_3d";
+      }
+
+      function updateGpsPill(gps) {
+        gpsDot.classList.toggle("quiet", !gpsHasFix(gps));
+        gpsPillLabel.textContent = gps.quality === "fix_3d" ? "3D fix" : gps.quality === "fix_2d" ? "2D fix" : "no fix";
+      }
+
+      function renderGpsMetrics(gps) {
+        gpsSubtitle.textContent = `${gps.provider || "none"} | ${gps.quality || "unknown"}${gps.last_error ? " | " + gps.last_error : ""}`;
+        gpsMetrics.innerHTML = [
+          `<div class="metric"><span>Position</span><strong>${escapeHtml(gpsCoordText(gps))}</strong></div>`,
+          `<div class="metric"><span>Altitude</span><strong>${Number.isFinite(Number(gps.altitude_m)) ? Number(gps.altitude_m).toFixed(1) + " m" : "--"}</strong></div>`,
+          `<div class="metric"><span>Speed</span><strong>${Number.isFinite(Number(gps.speed_mps)) ? Number(gps.speed_mps).toFixed(1) + " m/s" : "--"}</strong></div>`,
+          `<div class="metric"><span>Heading</span><strong>${Number.isFinite(Number(gps.heading_deg)) ? Number(gps.heading_deg).toFixed(0) + "°" : "--"}</strong></div>`,
+          `<div class="metric"><span>Accuracy</span><strong>${Number.isFinite(Number(gps.accuracy_m)) ? "±" + Number(gps.accuracy_m).toFixed(1) + " m" : "--"}</strong></div>`,
+          `<div class="metric"><span>Last fix</span><strong>${escapeHtml(gps.utc_time || "--")}</strong></div>`,
+        ].join("");
+      }
+
+      function updateGpsMap(gps) {
+        if (!gpsMap || !window.maplibregl) return;
+        const lat = Number(gps.latitude);
+        const lon = Number(gps.longitude);
+        if (!Number.isFinite(lat) || !Number.isFinite(lon)) return;
+        if (!gpsMarker) {
+          gpsMarker = new window.maplibregl.Marker({ color: "#1f8f62" }).setLngLat([lon, lat]).addTo(gpsMap);
+          gpsMap.jumpTo({ center: [lon, lat], zoom: 15 });
+        } else {
+          gpsMarker.setLngLat([lon, lat]);
+        }
+      }
+
+      function initGpsMap() {
+        if (gpsMap || !window.maplibregl) return;
+        gpsMap = new window.maplibregl.Map({
+          container: "gpsMapContainer",
+          style: "https://tiles.openfreemap.org/styles/liberty",
+          center: [-77.035279, 38.889484],
+          zoom: 2,
+        });
+        gpsMap.addControl(new window.maplibregl.NavigationControl({ visualizePitch: true }), "bottom-right");
+        gpsMap.on("load", () => { if (latestGps) updateGpsMap(latestGps); });
+      }
+
+      async function pollGps() {
+        try {
+          const resp = await fetch("/api/gps/status", { cache: "no-store" });
+          const gps = await resp.json();
+          latestGps = gps;
+          updateGpsPill(gps);
+          if (!gpsOverlay.hidden) {
+            renderGpsMetrics(gps);
+            updateGpsMap(gps);
+          }
+        } catch {
+          // GPS is a convenience overlay - polling failures shouldn't disrupt the rest of the UI.
+        }
+      }
+
+      function openGpsOverlay() {
+        gpsOverlay.hidden = false;
+        initGpsMap();
+        if (latestGps) {
+          renderGpsMetrics(latestGps);
+          updateGpsMap(latestGps);
+        }
+        setTimeout(() => gpsMap?.resize(), 50);
+      }
+
+      function closeGpsOverlay() {
+        gpsOverlay.hidden = true;
+      }
+
+      document.getElementById("gpsPillBtn").addEventListener("click", openGpsOverlay);
+      document.getElementById("gpsClose").addEventListener("click", closeGpsOverlay);
+      gpsOverlay.addEventListener("click", (event) => { if (event.target === gpsOverlay) closeGpsOverlay(); });
 
       function protocolGroupLabel(protocol) {
         const map = {
@@ -5254,6 +5377,8 @@
         pollStatus();
       })();
       setInterval(pollStatus, 350);
+      pollGps();
+      setInterval(pollGps, 2000);
     </script>
   </body>
 </html>

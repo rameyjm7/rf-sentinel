@@ -11,6 +11,7 @@ import re
 import shutil
 import signal
 import shlex
+import socket
 import sqlite3
 import subprocess
 import sys
@@ -97,6 +98,14 @@ RF_SENTINEL_CSV_ARCHIVE_MAX_MB = max(1, int(os.getenv("RF_SENTINEL_CSV_ARCHIVE_M
 RF_SENTINEL_DISCOVERY_TABLE_MAX_ROWS = max(500, int(os.getenv("RF_SENTINEL_DISCOVERY_TABLE_MAX_ROWS", "5000")))
 RF_SENTINEL_BTC_NAME_LOOKUP = os.getenv("RF_SENTINEL_BTC_NAME_LOOKUP", "0").strip().lower() in {"1", "true", "yes", "on"}
 RF_SENTINEL_NO_CHANGE = object()
+GPS_PROVIDER = os.getenv("RF_SENTINEL_GPS_PROVIDER", "none").lower()
+GPS_CACHE_SECONDS = float(os.getenv("RF_SENTINEL_GPS_CACHE_SECONDS", "1.0"))
+GPSD_HOST = os.getenv("RF_SENTINEL_GPSD_HOST", "127.0.0.1")
+GPSD_PORT = int(os.getenv("RF_SENTINEL_GPSD_PORT", "2947"))
+GPS_IO_TIMEOUT = float(os.getenv("RF_SENTINEL_GPS_IO_TIMEOUT", "1.0"))
+GPS_NMEA_DEVICE = os.getenv("RF_SENTINEL_GPS_NMEA_DEVICE", "")
+GPS_NMEA_BAUD = int(os.getenv("RF_SENTINEL_GPS_NMEA_BAUD", "9600"))
+_GPS_CACHE: tuple[float, dict[str, Any]] | None = None
 RF_SENTINEL_PROTOCOLS = {"btc", "ble", "zigbee", "tpms", "walkie", "wifi", "fm", "lfmf", "cellular"}
 WIFI_SUPPORTED_CHANNELS = {
     1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13,
@@ -124,6 +133,231 @@ BT_CLASSIC_ACCESS_REPAIR_MAX_DISTANCE = 0
 BT_CLASSIC_HEADER_MIN_PERFECT_TRIPLETS = 18
 BT_CLASSIC_USE_CPP_FFT = os.getenv("BT_CLASSIC_USE_CPP_FFT", "1").strip().lower() not in {"0", "false", "no"}
 btcsniffer_build_lock = threading.Lock()
+
+
+def empty_gps_status(provider: str, quality: str = "unavailable", last_error: str = "") -> dict[str, Any]:
+    return {
+        "provider": provider,
+        "latitude": None,
+        "longitude": None,
+        "altitude_m": None,
+        "speed_mps": None,
+        "heading_deg": None,
+        "accuracy_m": None,
+        "utc_time": None,
+        "quality": quality,
+        "last_error": last_error,
+    }
+
+
+def _gps_parse_float(value: Any) -> float | None:
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return None
+
+
+def _nmea_latlon(value: str, hemisphere: str) -> float | None:
+    if not value or not hemisphere:
+        return None
+    dot = value.find(".")
+    if dot < 0 or dot < 2:
+        return None
+    degree_len = dot - 2
+    try:
+        degrees = float(value[:degree_len])
+        minutes = float(value[degree_len:])
+    except ValueError:
+        return None
+    result = degrees + minutes / 60.0
+    if hemisphere.upper() in {"S", "W"}:
+        result = -result
+    return result
+
+
+def _nmea_utc_time(time_value: str, date_value: str = "") -> str | None:
+    if not time_value or len(time_value) < 6:
+        return None
+    try:
+        hour = int(time_value[0:2])
+        minute = int(time_value[2:4])
+        second = float(time_value[4:])
+    except ValueError:
+        return None
+    seconds = int(second)
+    micros = int(round((second - seconds) * 1_000_000))
+    if len(date_value) == 6:
+        try:
+            day = int(date_value[0:2])
+            month = int(date_value[2:4])
+            year = 2000 + int(date_value[4:6])
+            if year > 2079:
+                year -= 100
+            return f"{year:04d}-{month:02d}-{day:02d}T{hour:02d}:{minute:02d}:{seconds:02d}.{micros:06d}Z"
+        except ValueError:
+            pass
+    return f"{hour:02d}:{minute:02d}:{seconds:02d}.{micros:06d}Z"
+
+
+def _nmea_payload(sentence: str) -> list[str]:
+    line = sentence.strip()
+    if not line.startswith("$"):
+        return []
+    if "*" in line:
+        line = line.split("*", 1)[0]
+    return line[1:].split(",")
+
+
+def _parse_nmea_sentence(sentence: str) -> dict[str, Any] | None:
+    fields = _nmea_payload(sentence)
+    if not fields:
+        return None
+    kind = fields[0][-3:].upper()
+    if kind == "GGA" and len(fields) >= 10:
+        fix_quality = int(_gps_parse_float(fields[6]) or 0)
+        status = empty_gps_status("nmea", "fix_3d" if fix_quality else "no_fix")
+        status["latitude"] = _nmea_latlon(fields[2], fields[3])
+        status["longitude"] = _nmea_latlon(fields[4], fields[5])
+        status["altitude_m"] = _gps_parse_float(fields[9])
+        status["accuracy_m"] = _gps_parse_float(fields[8])
+        status["utc_time"] = _nmea_utc_time(fields[1])
+        return status
+    if kind == "RMC" and len(fields) >= 10:
+        active = fields[2].upper() == "A"
+        status = empty_gps_status("nmea", "fix_2d" if active else "no_fix")
+        status["latitude"] = _nmea_latlon(fields[3], fields[4])
+        status["longitude"] = _nmea_latlon(fields[5], fields[6])
+        knots = _gps_parse_float(fields[7])
+        status["speed_mps"] = knots * 0.514444 if knots is not None else None
+        status["heading_deg"] = _gps_parse_float(fields[8])
+        status["utc_time"] = _nmea_utc_time(fields[1], fields[9])
+        return status
+    return None
+
+
+def _merge_gps_status(base: dict[str, Any], update: dict[str, Any]) -> dict[str, Any]:
+    merged = dict(base)
+    for key, value in update.items():
+        if key == "quality":
+            continue
+        if value is not None or key in {"quality", "provider", "last_error"}:
+            merged[key] = value
+    quality_rank = {"unavailable": 0, "no_fix": 1, "fix_2d": 2, "fix_3d": 3}
+    if quality_rank.get(update.get("quality", ""), 0) > quality_rank.get(base.get("quality", ""), 0):
+        merged["quality"] = update["quality"]
+    return merged
+
+
+def gps_status_from_nmea_lines(lines: list[str], provider: str = "nmea") -> dict[str, Any]:
+    status = empty_gps_status(provider, "unavailable", "no NMEA fix sentences received")
+    found = False
+    for line in lines:
+        parsed = _parse_nmea_sentence(line)
+        if not parsed:
+            continue
+        found = True
+        parsed["provider"] = provider
+        parsed["last_error"] = ""
+        status = _merge_gps_status(status, parsed)
+    if found and status["quality"] == "unavailable":
+        status["quality"] = "no_fix"
+    return status
+
+
+def gps_status_nmea() -> dict[str, Any]:
+    if not GPS_NMEA_DEVICE:
+        return empty_gps_status("nmea", "unavailable", "RF_SENTINEL_GPS_NMEA_DEVICE is not set")
+    try:
+        import serial  # type: ignore[import-not-found]
+    except ImportError:
+        return empty_gps_status("nmea", "unavailable", "pyserial is not installed")
+    lines: list[str] = []
+    deadline = time.monotonic() + GPS_IO_TIMEOUT
+    try:
+        with serial.Serial(GPS_NMEA_DEVICE, GPS_NMEA_BAUD, timeout=0.2) as port:
+            while time.monotonic() < deadline:
+                raw = port.readline()
+                if not raw:
+                    continue
+                lines.append(raw.decode("ascii", "replace").strip())
+                if len(lines) >= 12:
+                    break
+    except Exception as exc:
+        return empty_gps_status("nmea", "unavailable", str(exc))
+    return gps_status_from_nmea_lines(lines)
+
+
+def gps_status_from_gpsd_messages(messages: list[dict[str, Any]], provider: str = "gpsd") -> dict[str, Any]:
+    status = empty_gps_status(provider, "unavailable", "no gpsd TPV fix received")
+    for message in messages:
+        if message.get("class") != "TPV":
+            continue
+        mode = int(_gps_parse_float(message.get("mode")) or 0)
+        candidate = empty_gps_status(provider, "no_fix" if mode <= 1 else ("fix_3d" if mode >= 3 else "fix_2d"))
+        candidate["latitude"] = _gps_parse_float(message.get("lat"))
+        candidate["longitude"] = _gps_parse_float(message.get("lon"))
+        candidate["altitude_m"] = _gps_parse_float(message.get("altHAE", message.get("altMSL", message.get("alt"))))
+        candidate["speed_mps"] = _gps_parse_float(message.get("speed"))
+        candidate["heading_deg"] = _gps_parse_float(message.get("track"))
+        candidate["utc_time"] = message.get("time")
+        accuracy_values = [
+            _gps_parse_float(message.get(name))
+            for name in ("eph", "epx", "epy", "sep")
+            if _gps_parse_float(message.get(name)) is not None
+        ]
+        candidate["accuracy_m"] = max(accuracy_values) if accuracy_values else None
+        candidate["last_error"] = ""
+        status = _merge_gps_status(status, candidate)
+    return status
+
+
+def gps_status_gpsd() -> dict[str, Any]:
+    messages: list[dict[str, Any]] = []
+    try:
+        with socket.create_connection((GPSD_HOST, GPSD_PORT), timeout=GPS_IO_TIMEOUT) as sock:
+            sock.settimeout(GPS_IO_TIMEOUT)
+            sock.sendall(b'?WATCH={"enable":true,"json":true};\n?POLL;\n')
+            deadline = time.monotonic() + GPS_IO_TIMEOUT
+            buffer = b""
+            while time.monotonic() < deadline:
+                try:
+                    chunk = sock.recv(4096)
+                except socket.timeout:
+                    break
+                if not chunk:
+                    break
+                buffer += chunk
+                while b"\n" in buffer:
+                    line, buffer = buffer.split(b"\n", 1)
+                    try:
+                        payload = json.loads(line.decode("utf-8", "replace"))
+                    except json.JSONDecodeError:
+                        continue
+                    if isinstance(payload, dict):
+                        messages.append(payload)
+    except OSError as exc:
+        return empty_gps_status("gpsd", "unavailable", str(exc))
+    return gps_status_from_gpsd_messages(messages)
+
+
+def gps_status_uncached() -> dict[str, Any]:
+    if GPS_PROVIDER in {"", "none", "null"}:
+        return empty_gps_status(GPS_PROVIDER or "none")
+    if GPS_PROVIDER == "nmea":
+        return gps_status_nmea()
+    if GPS_PROVIDER == "gpsd":
+        return gps_status_gpsd()
+    return empty_gps_status(GPS_PROVIDER, "unavailable", f"GPS provider {GPS_PROVIDER!r} is not implemented")
+
+
+def gps_status() -> dict[str, Any]:
+    global _GPS_CACHE
+    cache_time = _GPS_CACHE[0] if _GPS_CACHE else 0.0
+    if _GPS_CACHE and time.time() - cache_time < GPS_CACHE_SECONDS:
+        return dict(_GPS_CACHE[1])
+    status = gps_status_uncached()
+    _GPS_CACHE = (time.time(), dict(status))
+    return status
 
 
 def _design_lowpass_taps(sample_rate_hz: int, cutoff_hz: float, num_taps: int) -> np.ndarray:
@@ -8735,6 +8969,11 @@ def wifi_deauth_events():
 @app.get("/api/wifi/pattern-of-life")
 def wifi_pattern_of_life_endpoint():
     return jsonify(_wifi_pattern_of_life())
+
+
+@app.get("/api/gps/status")
+def gps_status_endpoint():
+    return jsonify(gps_status())
 
 
 @app.post("/api/test/discoverable-dongle")
