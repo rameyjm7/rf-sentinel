@@ -127,6 +127,10 @@
         background: var(--red);
       }
 
+      .dot.quiet {
+        background: var(--muted);
+      }
+
       .dot.live {
         background: var(--green);
         box-shadow: 0 0 0 5px rgba(31, 143, 98, 0.14);
@@ -1204,6 +1208,37 @@
         background: rgba(255, 253, 248, 0.86);
       }
 
+      .deauth-row {
+        display: grid;
+        grid-template-columns: 110px minmax(0, 1fr) auto;
+        align-items: center;
+        gap: 10px;
+        padding: 10px 12px;
+        border: 1px solid rgba(184, 60, 50, 0.24);
+        border-radius: 10px;
+        background: rgba(255, 250, 240, 0.86);
+      }
+
+      .deauth-row .kind {
+        font-weight: 600;
+        color: var(--red);
+        text-transform: capitalize;
+      }
+
+      .deauth-row .parties {
+        min-width: 0;
+        overflow: hidden;
+        text-overflow: ellipsis;
+        white-space: nowrap;
+      }
+
+      .deauth-row .meta {
+        color: var(--muted);
+        font-size: 0.8rem;
+        text-align: right;
+        white-space: nowrap;
+      }
+
       .wifi-network-row summary {
         display: grid;
         grid-template-columns: minmax(170px, 1.2fr) auto auto auto auto;
@@ -1935,6 +1970,31 @@
         </div>
       </section>
     </div>
+    <div id="deauthOverlay" class="config-overlay" hidden>
+      <section class="config-panel" role="dialog" aria-modal="true" aria-labelledby="deauthTitle">
+        <div class="config-panel-head">
+          <div>
+            <h2 id="deauthTitle">Deauth / Disassoc Events</h2>
+            <p>802.11 deauthentication and disassociation frames seen this session - a burst against one AP/station is a common deauth-attack signature.</p>
+          </div>
+          <button class="ghost-btn" type="button" id="deauthClose"><span class="material-symbols-rounded">close</span>Close</button>
+        </div>
+        <div id="deauthList" class="wifi-topology-list"></div>
+      </section>
+    </div>
+    <div id="polOverlay" class="config-overlay" hidden>
+      <section class="config-panel" role="dialog" aria-modal="true" aria-labelledby="polTitle">
+        <div class="config-panel-head">
+          <div>
+            <h2 id="polTitle">WiFi Pattern of Life</h2>
+            <p id="polSubtitle">Derived from saved run history. Heuristic, not a guarantee - more runs make these more reliable.</p>
+          </div>
+          <button class="ghost-btn" type="button" id="polClose"><span class="material-symbols-rounded">close</span>Close</button>
+        </div>
+        <div class="metrics" id="polSummary"></div>
+        <div id="polList" class="wifi-topology-list" style="margin-top:10px"></div>
+      </section>
+    </div>
     <div id="toast" class="toast" role="status" aria-live="polite"></div>
     <div class="app">
       <header>
@@ -1953,6 +2013,10 @@
           <span class="dot" id="liveDot"></span>
           <strong id="runState">Idle</strong>
         </div>
+        <button class="status-pill" id="deauthPillBtn" type="button" style="border:none; cursor:pointer; font:inherit; color:inherit;">
+          <span class="dot quiet" id="deauthDot"></span>
+          <strong id="deauthPillCount">0</strong> deauth
+        </button>
       </header>
       <script>
         // The station1 app launcher appends ?launcher_return=<url> when it
@@ -2037,6 +2101,7 @@
           </details>
           <button id="runToggleBtn" type="submit"><span class="material-symbols-rounded">play_arrow</span><span id="runToggleText">Start</span></button>
           <button id="clearBtn" class="secondary" type="button"><span class="material-symbols-rounded">delete_sweep</span>Clear</button>
+          <button id="patternOfLifeBtn" class="secondary" type="button"><span class="material-symbols-rounded">history</span>Pattern of Life</button>
         </div>
       </form>
 
@@ -2053,6 +2118,9 @@
             <div class="metric"><span>Zigbee Frames</span><strong id="zigbeeMetric">0</strong></div>
             <div class="metric"><span>Sub-GHz</span><strong id="tpmsMetric">0</strong></div>
             <div class="metric"><span>WiFi Frames</span><strong id="wifiMetric">0</strong></div>
+            <div class="metric"><span>WiFi 2.4GHz</span><strong id="wifi24Metric">0</strong></div>
+            <div class="metric"><span>WiFi 5GHz</span><strong id="wifi5Metric">0</strong></div>
+            <div class="metric"><span>WiFi 6GHz</span><strong id="wifi6Metric">0</strong></div>
             <div class="metric"><span>FM Stations</span><strong id="fmMetric">0</strong></div>
             <div class="metric"><span>VLF/LF/MF</span><strong id="lfmfMetric">0</strong></div>
             <div class="metric"><span>Cellular</span><strong id="cellularMetric">0</strong></div>
@@ -2230,6 +2298,9 @@
         zigbee: document.getElementById("zigbeeMetric"),
         tpms: document.getElementById("tpmsMetric"),
         wifi: document.getElementById("wifiMetric"),
+        wifi24: document.getElementById("wifi24Metric"),
+        wifi5: document.getElementById("wifi5Metric"),
+        wifi6: document.getElementById("wifi6Metric"),
         fm: document.getElementById("fmMetric"),
         lfmf: document.getElementById("lfmfMetric"),
         cellular: document.getElementById("cellularMetric"),
@@ -3409,6 +3480,124 @@
         `;
       }
 
+      const deauthOverlay = document.getElementById("deauthOverlay");
+      const deauthList = document.getElementById("deauthList");
+      const deauthDot = document.getElementById("deauthDot");
+      const deauthPillCount = document.getElementById("deauthPillCount");
+      let lastDeauthCount = 0;
+      let lastDeauthAt = 0;
+
+      function updateDeauthPill(count) {
+        if (count > lastDeauthCount) lastDeauthAt = Date.now() / 1000;
+        lastDeauthCount = count;
+        deauthPillCount.textContent = count.toLocaleString();
+        const recent = lastDeauthAt && (Date.now() / 1000 - lastDeauthAt) < 120;
+        deauthDot.classList.toggle("quiet", !recent);
+      }
+
+      async function renderDeauthEvents() {
+        deauthList.innerHTML = `<div class="empty">Loading...</div>`;
+        try {
+          const resp = await fetch("/api/wifi/deauth", { cache: "no-store" });
+          const data = await resp.json();
+          const events = data.events || [];
+          if (!events.length) {
+            deauthList.innerHTML = `<div class="empty">No deauth or disassociation frames observed yet.</div>`;
+            return;
+          }
+          deauthList.innerHTML = events.slice(0, 100).map((event) => `
+            <div class="deauth-row">
+              <span class="kind">${escapeHtml(event.kind || "")}</span>
+              <span class="parties">${escapeHtml(event.source || "?")} &rarr; ${escapeHtml(event.destination || "?")} <span class="small">(bssid ${escapeHtml(event.bssid || "?")})</span></span>
+              <span class="meta">${escapeHtml(event.reason || "unknown reason")} &middot; ${age(event.time)} ago</span>
+            </div>
+          `).join("");
+        } catch {
+          deauthList.innerHTML = `<div class="empty">Failed to load deauth events.</div>`;
+        }
+      }
+
+      function openDeauthOverlay() {
+        deauthOverlay.hidden = false;
+        renderDeauthEvents();
+      }
+
+      function closeDeauthOverlay() {
+        deauthOverlay.hidden = true;
+      }
+
+      document.getElementById("deauthPillBtn").addEventListener("click", openDeauthOverlay);
+      document.getElementById("deauthClose").addEventListener("click", closeDeauthOverlay);
+      deauthOverlay.addEventListener("click", (event) => { if (event.target === deauthOverlay) closeDeauthOverlay(); });
+
+      const POL_TAG_LABELS = {
+        weekend_only: "Weekends only",
+        after_4pm: "After 4PM only",
+        always_present: "Always present",
+        anomaly_new: "New / anomaly",
+        normal: "Normal",
+      };
+
+      const polOverlay = document.getElementById("polOverlay");
+      const polSummary = document.getElementById("polSummary");
+      const polList = document.getElementById("polList");
+      const polSubtitle = document.getElementById("polSubtitle");
+
+      function polApTile(item, label) {
+        if (!item) return "";
+        return `
+          <div class="metric">
+            <span>${escapeHtml(label)}</span>
+            <strong>${escapeHtml(item.ssid || "(hidden)")}</strong>
+          </div>
+        `;
+      }
+
+      async function renderPatternOfLife() {
+        polSummary.innerHTML = `<div class="metric"><span>Loading</span><strong>...</strong></div>`;
+        polList.innerHTML = "";
+        try {
+          const resp = await fetch("/api/wifi/pattern-of-life", { cache: "no-store" });
+          const data = await resp.json();
+          const aps = data.aps || [];
+          polSubtitle.textContent = `Derived from ${data.total_runs_observed || 0} run${data.total_runs_observed === 1 ? "" : "s"} across ${data.total_days_observed || 0} day${data.total_days_observed === 1 ? "" : "s"} of saved history. Heuristic, not a guarantee - more runs make these more reliable.`;
+          if (!aps.length) {
+            polSummary.innerHTML = "";
+            polList.innerHTML = `<div class="empty">No saved WiFi run history yet - run a few sessions first.</div>`;
+            return;
+          }
+          const openAps = data.open_security_aps || [];
+          polSummary.innerHTML = [
+            polApTile(data.strongest_ap, "Strongest AP"),
+            polApTile(data.weakest_ap, "Weakest AP"),
+            `<div class="metric"><span>Open-security APs</span><strong>${openAps.length}</strong></div>`,
+          ].join("");
+          polList.innerHTML = aps.map((item) => `
+            <div class="deauth-row">
+              <span class="kind" style="color:var(--wifi-green)">${item.tags.map((tag) => escapeHtml(POL_TAG_LABELS[tag] || tag)).join(", ")}</span>
+              <span class="parties">${escapeHtml(item.ssid || "(hidden)")} <span class="small">(${escapeHtml(item.bssid)}, ${escapeHtml(item.security)})</span></span>
+              <span class="meta">${item.days_seen}d / ${item.runs_seen} runs &middot; best ${item.best_rssi ?? "--"} dBm</span>
+            </div>
+          `).join("");
+        } catch {
+          polSummary.innerHTML = "";
+          polList.innerHTML = `<div class="empty">Failed to load pattern-of-life data.</div>`;
+        }
+      }
+
+      function openPolOverlay() {
+        polOverlay.hidden = false;
+        renderPatternOfLife();
+      }
+
+      function closePolOverlay() {
+        polOverlay.hidden = true;
+      }
+
+      document.getElementById("patternOfLifeBtn").addEventListener("click", openPolOverlay);
+      document.getElementById("polClose").addEventListener("click", closePolOverlay);
+      polOverlay.addEventListener("click", (event) => { if (event.target === polOverlay) closePolOverlay(); });
+
       function protocolGroupLabel(protocol) {
         const map = {
           BTC: "Bluetooth Classic",
@@ -4281,6 +4470,11 @@
           metrics.zigbee.textContent = Number(protocolDetections("ZIGBEE") || 0).toLocaleString();
           metrics.tpms.textContent = Number((protocolDetections("TPMS") || 0) + (protocolDetections("WALKIE") || 0)).toLocaleString();
           metrics.wifi.textContent = Number(protocolDetections("WIFI") || 0).toLocaleString();
+          const wifiBandCounts = status.wifi_band_packet_counts || {};
+          metrics.wifi24.textContent = Number(wifiBandCounts["2.4"] || 0).toLocaleString();
+          metrics.wifi5.textContent = Number(wifiBandCounts["5"] || 0).toLocaleString();
+          metrics.wifi6.textContent = Number(wifiBandCounts["6"] || 0).toLocaleString();
+          updateDeauthPill(Number(status.wifi_deauth_count || 0));
           metrics.fm.textContent = Number(protocolDetections("FM") || 0).toLocaleString();
           metrics.lfmf.textContent = Number(protocolDetections("LFMF") || 0).toLocaleString();
           metrics.cellular.textContent = Number(protocolDetections("CELLULAR") || 0).toLocaleString();

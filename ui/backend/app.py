@@ -326,6 +326,8 @@ class ExplorerState:
     scanner_assignments: dict[str, dict[str, Any]] = field(default_factory=dict)
     csv_run_id: str = ""
     csv_log_dir: str = ""
+    wifi_deauth_events: list[dict[str, Any]] = field(default_factory=list)
+    wifi_band_packet_counts: dict[str, int] = field(default_factory=lambda: {"2.4": 0, "5": 0, "6": 0})
 
 
 @dataclass
@@ -1678,7 +1680,7 @@ CSV_PROTOCOL_COLUMNS = {
         "saved_meta_path",
         "saved_wav_path",
     ],
-    "wifi": ["ssid_visible", "count"],
+    "wifi": ["ssid_visible", "count", "security"],
     "fm": ["power_dbfs", "noise_dbfs", "excess_db", "audio_rms", "pilot_db", "rds_subcarrier_db", "stereo_likely", "rds_likely"],
     "lfmf": [
         "frequency_khz",
@@ -3744,6 +3746,51 @@ def _wifi_role(frame_type: str, source_mac: str, destination_mac: str, bssid: st
     return "ap" if ssid or bssid else "station"
 
 
+WLAN_REASON_CODES = {
+    1: "Unspecified reason",
+    2: "Previous authentication no longer valid",
+    3: "Deauthenticated - leaving",
+    4: "Disassociated due to inactivity",
+    5: "AP unable to handle all associations",
+    6: "Class 2 frame from nonauthenticated station",
+    7: "Class 3 frame from nonassociated station",
+    8: "Disassociated - leaving",
+    9: "Station not authenticated",
+    10: "Power capability unacceptable",
+    11: "Supported channels unacceptable",
+    14: "MIC failure",
+    15: "4-way handshake timeout",
+    16: "Group key handshake timeout",
+    17: "IE mismatch between (re)association and EAPOL",
+    18: "Invalid group cipher",
+    19: "Invalid pairwise cipher",
+    20: "Invalid AKMP",
+    23: "802.1X authentication failed",
+}
+
+
+def _wlan_reason_text(reason_code: Any) -> str:
+    try:
+        code = int(reason_code)
+    except (TypeError, ValueError):
+        return ""
+    return WLAN_REASON_CODES.get(code, f"Reason {code}")
+
+
+def _wifi_band_from_mhz(mhz: Any) -> str:
+    try:
+        value = float(mhz)
+    except (TypeError, ValueError):
+        return ""
+    if 2400 <= value < 2500:
+        return "2.4"
+    if 4900 <= value < 5900:
+        return "5"
+    if value >= 5900:
+        return "6"
+    return ""
+
+
 def _clean_wifi_ssid(value: Any) -> str:
     text = str(value or "").replace("\x00", "").strip()
     if not text:
@@ -4286,8 +4333,11 @@ def _scanner_json_to_events(source: str, payload: dict[str, Any]) -> list[dict[s
                 "device_type_detail": frame_type,
                 "channel": payload.get("channel"),
                 "center_freq_hz": int(payload.get("frequency_mhz") or 0) * 1_000_000 if payload.get("frequency_mhz") else None,
+                "frequency_mhz": payload.get("frequency_mhz"),
                 "last_rssi_dbfs": payload.get("rssi_dbm"),
                 "rssi_dbm": payload.get("rssi_dbm"),
+                "reason_code": payload.get("reason_code"),
+                "security": payload.get("security"),
                 "count": payload.get("count"),
             }
         ]
@@ -4882,6 +4932,13 @@ def _history_keys_for_protocol(protocol: str, row: dict[str, str]) -> list[str]:
             keys.append(f"CELLULAR:identity:{identity}")
         if freq:
             keys.append(f"CELLULAR:freq:{freq}")
+    elif protocol_key == "WIFI":
+        role = str(row.get("wifi_role") or payload.get("wifi_role") or "").strip().lower()
+        bssid = row.get("bssid") or payload.get("bssid")
+        source_address = row.get("source_address") or payload.get("source_address")
+        mac_key = _clean_mac_key(bssid if role == "ap" else (source_address or row.get("mac") or payload.get("mac")))
+        if mac_key:
+            keys.append(f"WIFI:mac:{mac_key}")
     return list(dict.fromkeys(keys))
 
 
@@ -4893,6 +4950,140 @@ def _record_history_row(protocol: str, row: dict[str, str], dates_by_key: dict[s
         dates_by_key.setdefault(key, set()).add(date_key)
 
 
+def _wifi_pattern_of_life(limit_rows: int = 200000) -> dict[str, Any]:
+    groups: dict[str, dict[str, Any]] = {}
+    all_days: set[str] = set()
+    all_runs: set[str] = set()
+    row_count = 0
+
+    def handle_row(row: dict[str, str]) -> None:
+        nonlocal row_count
+        if row_count >= limit_rows:
+            return
+        if str(row.get("wifi_role") or "").strip().lower() != "ap":
+            return
+        bssid = str(row.get("bssid") or "").strip().lower()
+        if not bssid:
+            return
+        try:
+            ts = float(str(row.get("observed_at_epoch") or "").strip())
+        except (TypeError, ValueError):
+            return
+        if not ts:
+            return
+        row_count += 1
+        struct = time.gmtime(ts)
+        day_key = _utc_date_key(ts)
+        run_id = str(row.get("run_id") or "").strip()
+        all_days.add(day_key)
+        if run_id:
+            all_runs.add(run_id)
+        group = groups.get(bssid)
+        if group is None:
+            group = {
+                "bssid": bssid,
+                "ssid": str(row.get("ssid") or "").strip() or "(hidden)",
+                "security": "unknown",
+                "days": set(),
+                "runs": set(),
+                "weekday_hits": 0,
+                "weekend_hits": 0,
+                "after_4pm_hits": 0,
+                "observation_count": 0,
+                "best_rssi": None,
+                "worst_rssi": None,
+            }
+            groups[bssid] = group
+        ssid = str(row.get("ssid") or "").strip()
+        if ssid and ssid != "(hidden)":
+            group["ssid"] = ssid
+        security = str(row.get("security") or "").strip().lower()
+        if security in {"open", "encrypted"}:
+            group["security"] = security
+        group["days"].add(day_key)
+        if run_id:
+            group["runs"].add(run_id)
+        if struct.tm_wday >= 5:
+            group["weekend_hits"] += 1
+        else:
+            group["weekday_hits"] += 1
+        if struct.tm_hour >= 16:
+            group["after_4pm_hits"] += 1
+        group["observation_count"] += 1
+        try:
+            rssi = float(row.get("rssi_dbm") or row.get("rssi_dbfs"))
+        except (TypeError, ValueError):
+            rssi = None
+        if rssi is not None:
+            group["best_rssi"] = rssi if group["best_rssi"] is None else max(group["best_rssi"], rssi)
+            group["worst_rssi"] = rssi if group["worst_rssi"] is None else min(group["worst_rssi"], rssi)
+
+    for csv_path in sorted(RF_SENTINEL_RUNS_DIR.glob("*/wifi.csv")):
+        try:
+            with csv_path.open(newline="", encoding="utf-8") as handle:
+                for row in csv.DictReader(handle):
+                    handle_row(row)
+        except (OSError, csv.Error):
+            continue
+    for archive_path in sorted(RF_SENTINEL_ARCHIVE_DIR.glob("*.zip")):
+        try:
+            with zipfile.ZipFile(archive_path) as archive:
+                for name in archive.namelist():
+                    if Path(name).name != "wifi.csv":
+                        continue
+                    with archive.open(name) as raw_handle:
+                        text_handle = io.TextIOWrapper(raw_handle, encoding="utf-8", newline="")
+                        for row in csv.DictReader(text_handle):
+                            handle_row(row)
+        except (OSError, zipfile.BadZipFile, csv.Error):
+            continue
+
+    total_days = len(all_days)
+    total_runs = len(all_runs)
+    result = []
+    for group in groups.values():
+        day_count = len(group["days"])
+        run_count = len(group["runs"])
+        total_hits = group["observation_count"]
+        tags = []
+        if total_hits >= 4 and group["weekend_hits"] and group["weekday_hits"] == 0 and day_count >= 2:
+            tags.append("weekend_only")
+        if total_hits >= 4 and group["after_4pm_hits"] == total_hits:
+            tags.append("after_4pm")
+        if total_days >= 2 and day_count / total_days >= 0.7:
+            tags.append("always_present")
+        if total_runs >= 3 and run_count == 1:
+            tags.append("anomaly_new")
+        if not tags:
+            tags.append("normal")
+        result.append({
+            "bssid": group["bssid"],
+            "ssid": group["ssid"],
+            "security": group["security"],
+            "tags": tags,
+            "days_seen": day_count,
+            "runs_seen": run_count,
+            "observation_count": total_hits,
+            "best_rssi": group["best_rssi"],
+            "worst_rssi": group["worst_rssi"],
+        })
+    result.sort(key=lambda item: item["observation_count"], reverse=True)
+
+    ranked = [item for item in result if item["best_rssi"] is not None]
+    strongest = max(ranked, key=lambda item: item["best_rssi"], default=None)
+    weakest = min(ranked, key=lambda item: item["worst_rssi"], default=None)
+    open_security = [item for item in result if item["security"] == "open"]
+
+    return {
+        "aps": result,
+        "total_days_observed": total_days,
+        "total_runs_observed": total_runs,
+        "strongest_ap": strongest,
+        "weakest_ap": weakest,
+        "open_security_aps": open_security,
+    }
+
+
 def _load_seen_history() -> dict[str, Any]:
     dates_by_key: dict[str, set[str]] = {}
     protocols = {
@@ -4901,6 +5092,7 @@ def _load_seen_history() -> dict[str, Any]:
         "ZIGBEE": "zigbee.csv",
         "FM": "fm.csv",
         "CELLULAR": "cellular.csv",
+        "WIFI": "wifi.csv",
     }
     for protocol, file_name in protocols.items():
         for csv_path in sorted(RF_SENTINEL_RUNS_DIR.glob(f"*/{file_name}")):
@@ -4975,6 +5167,16 @@ def _row_history_keys(row: dict[str, Any]) -> list[str]:
             keys.append(f"CELLULAR:identity:{identity}")
         if freq:
             keys.append(f"CELLULAR:freq:{freq}")
+    elif protocol == "WIFI":
+        # Keyed on bssid for APs, source MAC for stations - matches how
+        # _upsert_discovery_row's key_mac is chosen, so history lines up
+        # with the same identity the discovery table already merges on.
+        role = str(row.get("wifi_role") or "").strip().lower()
+        mac_key = _clean_mac_key(
+            row.get("bssid") if role == "ap" else (row.get("source_address") or row.get("mac"))
+        )
+        if mac_key:
+            keys.append(f"WIFI:mac:{mac_key}")
     return list(dict.fromkeys(keys))
 
 
@@ -5225,7 +5427,24 @@ def _upsert_discovery_row(event: dict[str, Any]) -> None:
             "rssi_dbm": event.get("rssi_dbm"),
             "channel": event.get("channel"),
             "center_freq_hz": event.get("center_freq_hz"),
+            "security": event.get("security") or "unknown",
         }
+        band = _wifi_band_from_mhz(event.get("frequency_mhz") or (float(event.get("center_freq_hz")) / 1_000_000 if event.get("center_freq_hz") else None))
+        if band in state.wifi_band_packet_counts:
+            state.wifi_band_packet_counts[band] += 1
+        lowered_frame_type = frame_type.lower()
+        if "deauthentication" in lowered_frame_type or "disassociation" in lowered_frame_type:
+            reason_code = event.get("reason_code")
+            state.wifi_deauth_events.append({
+                "kind": "deauthentication" if "deauthentication" in lowered_frame_type else "disassociation",
+                "source": source_address,
+                "destination": destination_address,
+                "bssid": bssid,
+                "reason_code": reason_code,
+                "reason": _wlan_reason_text(reason_code),
+                "time": now,
+            })
+            state.wifi_deauth_events[:] = state.wifi_deauth_events[-200:]
     elif event.get("kind") == "fm_station":
         identity = str(event.get("identity") or "FM station")
         frequency_hz = event.get("frequency_hz") or event.get("center_freq_hz")
@@ -5381,6 +5600,8 @@ def _upsert_discovery_row(event: dict[str, Any]) -> None:
                 row["detail"] = existing["detail"]
         if not row.get("name") and existing.get("name"):
             row["name"] = existing["name"]
+        if row.get("security") == "unknown" and existing.get("security") not in {None, "", "unknown"}:
+            row["security"] = existing["security"]
         if row.get("protocol") == "BTC" and row.get("name"):
             row["identity"] = str(row.get("name") or "")
             row.setdefault("device_type", "Bluetooth Classic")
@@ -8498,8 +8719,22 @@ def status():
                     for idx in range(79)
                 ],
                 "gateway_start_response": state.gateway_start_response,
+                "wifi_band_packet_counts": state.wifi_band_packet_counts,
+                "wifi_deauth_count": len(state.wifi_deauth_events),
             }
         )
+
+
+@app.get("/api/wifi/deauth")
+def wifi_deauth_events():
+    with state_lock:
+        events = list(reversed(state.wifi_deauth_events))
+    return jsonify({"events": events, "count": len(events)})
+
+
+@app.get("/api/wifi/pattern-of-life")
+def wifi_pattern_of_life_endpoint():
+    return jsonify(_wifi_pattern_of_life())
 
 
 @app.post("/api/test/discoverable-dongle")
