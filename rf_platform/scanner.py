@@ -929,12 +929,16 @@ def _run(args: argparse.Namespace) -> int:
         cycle_index = 0
         idle_notice = False
         next_run_at: dict[str, float] = {}
+        # See the single-radio cycle loop below for why this exists - a
+        # protocol whose job binary is missing on this host/image gets
+        # skipped for the rest of this run instead of crashing the group.
+        failed_protocols: set[str] = set()
         while jobs and not supervisor.stop_requested.is_set():
             sync_zigbee_follow_sidecar(name)
             job = jobs[cycle_index % len(jobs)]
             cycle_index += 1
             job = _apply_control_overrides(args, job)
-            enabled_protocols = _enabled_protocols(args)
+            enabled_protocols = _enabled_protocols(args) - failed_protocols
             priority_protocol = _priority_protocol(args, job)
             if priority_protocol and job.protocol != priority_protocol:
                 time.sleep(0.15)
@@ -957,7 +961,17 @@ def _run(args: argparse.Namespace) -> int:
             )
             if interval_s > 0.0:
                 next_run_at[job.name] = time.time() + interval_s
-            proc = supervisor.start(active_job)
+            try:
+                proc = supervisor.start(active_job)
+            except OSError as exc:
+                print(
+                    f"[rf-sentinel] hop group={name} job={active_job.name} protocol={active_job.protocol} "
+                    f"failed to start ({exc}); disabling this protocol for the rest of this run",
+                    file=sys.stderr,
+                    flush=True,
+                )
+                failed_protocols.add(active_job.protocol)
+                continue
             deadline = time.time() + max(1.0, float(active_job.dwell_s))
             proc_exited = False
             while time.time() < deadline and not supervisor.stop_requested.is_set():
@@ -1006,12 +1020,18 @@ def _run(args: argparse.Namespace) -> int:
         cycle_index = 0
         idle_notice = False
         next_run_at: dict[str, float] = {}
+        # Protocols whose job failed to even spawn (e.g. a missing plugin
+        # binary on this particular host/image) - skipped for the rest of
+        # this run instead of retried every cycle, so one broken protocol
+        # can't take the whole sentinel engine down or spam retries for a
+        # failure that won't resolve itself mid-run.
+        failed_protocols: set[str] = set()
         while not supervisor.stop_requested.is_set():
             sync_zigbee_follow_sidecar("main")
             job = cycled[cycle_index % len(cycled)]
             cycle_index += 1
             job = _apply_control_overrides(args, job)
-            enabled_protocols = _enabled_protocols(args)
+            enabled_protocols = _enabled_protocols(args) - failed_protocols
             priority_protocol = _priority_protocol(args, job)
             if priority_protocol and job.protocol != priority_protocol:
                 time.sleep(0.15)

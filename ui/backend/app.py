@@ -30,6 +30,8 @@ from flask import Flask, Response, jsonify, request, send_from_directory
 from werkzeug.exceptions import BadRequest
 from websocket._exceptions import WebSocketConnectionClosedException
 
+from mqtt_bridge import MqttBridge
+
 try:
     from rich.text import Text
     from textual.app import App as TextualApp
@@ -4869,6 +4871,9 @@ def _append_detections(events: list[dict[str, Any]], candidates: list[dict[str, 
         state.detections = (visible_events + state.detections)[:240]
         if candidates:
             state.classic_candidates = (candidates + state.classic_candidates)[:64]
+    if mqtt_bridge is not None:
+        for event in visible_events:
+            mqtt_bridge.publish_detection(event)
     if not CONSOLE_DASHBOARD:
         _console_render()
 
@@ -9143,6 +9148,76 @@ def clear():
 # guaranteed to already exist before the thread's first iteration can
 # possibly run, instead of racing module exec.
 threading.Thread(target=_shared_bt_detector_poll_loop, daemon=True).start()
+
+
+def _mqtt_status_provider() -> dict[str, Any]:
+    with state_lock:
+        running = state.running
+        mode = state.mode
+        detection_count = len(state.detections)
+    return {
+        "running": running,
+        "mode": mode,
+        "detection_count": detection_count,
+        "gps": gps_status(),
+    }
+
+
+def _mqtt_on_detection_message(payload: dict[str, Any]) -> None:
+    # Only ingest mock/remote detections while this unit isn't running a
+    # real scan itself - _append_detections is also where we publish (see
+    # above), so ingesting our own real detections back from the topic
+    # they were just published to would double them up in state.detections.
+    # A real scan owns the data whenever one is running; MQTT-sourced
+    # detections are for the "no real scan, feed the UI a demo" case.
+    with state_lock:
+        if state.running:
+            return
+    event = payload.get("event")
+    if isinstance(event, dict):
+        _append_detections([dict(event)], [])
+
+
+def _mqtt_on_command(payload: dict[str, Any]) -> None:
+    action = str(payload.get("action") or "").lower()
+    if action == "start":
+        # Reuses the real start_scan() route function unmodified via a
+        # Flask test request context, rather than duplicating its ~380
+        # lines of device/mode/engine resolution logic here.
+        error = None
+        with app.test_request_context(json=payload, method="POST", path="/api/scan/start"):
+            try:
+                response = start_scan()
+                # start_scan() returns either a jsonify()'d success body or
+                # a (jsonify(...), status_code) error tuple from _json_error -
+                # inspect the status code either way to know which happened.
+                status_code = response[1] if isinstance(response, tuple) else response.status_code
+                if status_code >= 400:
+                    body = response[0] if isinstance(response, tuple) else response
+                    error = body.get_json(silent=True) or {"error": "start_scan failed"}
+            except Exception as exc:
+                logging.exception("mqtt_bridge: start_scan() failed")
+                error = str(exc)
+        mqtt_bridge.publish_command_response(payload, ok=error is None, error=str(error) if error else None)
+    elif action == "stop":
+        error = None
+        try:
+            _stop_scan()
+        except Exception as exc:
+            logging.exception("mqtt_bridge: _stop_scan() failed")
+            error = str(exc)
+        mqtt_bridge.publish_command_response(payload, ok=error is None, error=error)
+    else:
+        logging.warning("mqtt_bridge: ignoring command with unknown action=%r", action)
+        mqtt_bridge.publish_command_response(payload, ok=False, error=f"unknown action: {action!r}")
+
+
+mqtt_bridge = MqttBridge(
+    status_provider=_mqtt_status_provider,
+    on_command=_mqtt_on_command,
+    on_detection_message=_mqtt_on_detection_message,
+)
+mqtt_bridge.start()
 
 
 if __name__ == "__main__":
