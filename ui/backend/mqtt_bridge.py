@@ -23,6 +23,20 @@ Topics (unit defaults to socket.gethostname()):
     rf-sentinel/<unit>/status
     rf-sentinel/<unit>/detections
     rf-sentinel/<unit>/command
+
+Also subscribes to cellular/<unit>/detections - the Cellular Survey
+app's own detections topic (a separate app, same per-host broker, same
+unit since both default to socket.gethostname()) - so a real cell the
+RM520N-GL modem observes shows up here as a first-class "cellular_signal"
+entity (confirmed PLMN/cell identity/RSRP from the modem's own protocol
+stack, richer than RF-Sentinel's existing SDR-based passive cellular
+awareness, which only has frequency/power and a guessed operator). This
+is a distinct callback (on_cellular_survey_detection), not routed through
+on_detection_message - that one is deliberately gated on "not state.running"
+to prevent RF-Sentinel's own detections looping back on themselves; a
+different app's real hardware feed has no such self-loop risk and should
+never be silently dropped just because RF-Sentinel's own SDR scan happens
+to be running at the same time.
 """
 
 from __future__ import annotations
@@ -62,10 +76,12 @@ class MqttBridge:
         status_provider: Callable[[], dict[str, Any]],
         on_command: Callable[[dict[str, Any]], None],
         on_detection_message: Callable[[dict[str, Any]], None],
+        on_cellular_survey_detection: Callable[[dict[str, Any]], None] | None = None,
     ) -> None:
         self.status_provider = status_provider
         self.on_command = on_command
         self.on_detection_message = on_detection_message
+        self.on_cellular_survey_detection = on_cellular_survey_detection
         self.unit = os.getenv("RF_SENTINEL_MQTT_UNIT") or socket.gethostname()
         self.host = os.getenv("RF_SENTINEL_MQTT_HOST", "127.0.0.1")
         self.port = int(os.getenv("RF_SENTINEL_MQTT_PORT", "1883"))
@@ -74,6 +90,10 @@ class MqttBridge:
         self.topic_detections = f"rf-sentinel/{self.unit}/detections"
         self.topic_command = f"rf-sentinel/{self.unit}/command"
         self.topic_command_response = f"rf-sentinel/{self.unit}/command/response"
+        # Cellular Survey's own unit defaults the same way (both apps use
+        # socket.gethostname() unless overridden), so on the same host
+        # this naturally points at the right station without extra config.
+        self.topic_cellular_survey_detections = f"cellular/{self.unit}/detections"
         self._client: Any = None
         self._started = False
 
@@ -108,7 +128,11 @@ class MqttBridge:
         if rc == 0:
             client.subscribe(self.topic_detections, qos=0)
             client.subscribe(self.topic_command, qos=0)
-            logging.info("mqtt_bridge: connected, subscribed to %s and %s", self.topic_detections, self.topic_command)
+            subscribed = [self.topic_detections, self.topic_command]
+            if self.on_cellular_survey_detection is not None:
+                client.subscribe(self.topic_cellular_survey_detections, qos=0)
+                subscribed.append(self.topic_cellular_survey_detections)
+            logging.info("mqtt_bridge: connected, subscribed to %s", ", ".join(subscribed))
         else:
             logging.warning("mqtt_bridge: connect rc=%s", rc)
 
@@ -122,6 +146,8 @@ class MqttBridge:
                 self.on_detection_message(payload)
             elif msg.topic == self.topic_command:
                 self.on_command(payload)
+            elif msg.topic == self.topic_cellular_survey_detections and self.on_cellular_survey_detection is not None:
+                self.on_cellular_survey_detection(payload)
         except Exception:
             logging.exception("mqtt_bridge: failed handling message on %s", msg.topic)
 

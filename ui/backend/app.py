@@ -9212,10 +9212,93 @@ def _mqtt_on_command(payload: dict[str, Any]) -> None:
         mqtt_bridge.publish_command_response(payload, ok=False, error=f"unknown action: {action!r}")
 
 
+def _cellular_survey_event_to_signal(event: dict[str, Any]) -> dict[str, Any] | None:
+    """Translates a Cellular Survey observation (cellular/<unit>/detections,
+    see that app's mqtt_bridge.py) into RF-Sentinel's existing
+    "cellular_signal" event shape - the kind RF-Sentinel already has full
+    entity/discovery-row support for (see _upsert_discovery_row), built
+    originally for its own SDR-based passive cellular awareness (frequency
+    + power + a *guessed* operator from LTE PSS sync attempts, no real
+    cell identity). Cellular Survey gives the real thing instead: a
+    confirmed PLMN, exact PCI/cell ID/TAC/band, and real RSRP/RSRQ/RSSI in
+    dBm straight from the RM520N-GL's own protocol stack (AT+QENG/QSCAN or
+    DIAG) - decoded_mcc/decoded_mnc/decoded_plmn get the *confirmed*
+    values here instead of the likely_*/guessed ones the SDR path uses.
+
+    identity is set to Cellular Survey's own cell_key (e.g.
+    "LTE:PLMN:310410:CELL:18BBAD7") rather than a constructed label - it's
+    already a clean, unique, deterministic string (it's what Cellular
+    Survey itself uses as its DB primary key for the same physical cell),
+    and reusing it verbatim keeps the two apps' records for the same cell
+    directly cross-referenceable. That also makes the entity dedup key
+    RF-Sentinel computes (f"cellular:{frequency_hz or identity}:{link}")
+    correctly per-cell without needing frequency_hz - two different real
+    cells sharing an EARFCN won't collide, unlike the frequency-only SDR
+    case this key shape was originally designed around.
+
+    RSRP/RSRQ/RSSI land in the existing power_dbfs/last_rssi_dbfs fields
+    despite the "dbfs" naming (dB full-scale, an SDR/ADC-relative unit) -
+    those are actually dBm here, not dBFS. There's no dedicated dBm slot
+    in this schema yet; the detail string spells out "dBm RSRP" explicitly
+    so this isn't silently misleading. A proper dBm field is a reasonable
+    later cleanup, not a blocker for this first integration milestone.
+    """
+    identity = event.get("identity") or {}
+    signal = event.get("signal") or {}
+    key = identity.get("key")
+    if not key:
+        return None
+    rat = str(identity.get("rat") or "Cellular")
+    band = identity.get("band")
+    role = str(event.get("role") or "serving")
+    rsrp = signal.get("rsrp_dbm")
+    rsrq = signal.get("rsrq_db")
+    rssi = signal.get("rssi_dbm")
+    detail_bits = [
+        f"{rsrp:.1f} dBm RSRP" if isinstance(rsrp, (int, float)) else "",
+        f"RSRQ {rsrq:.1f}" if isinstance(rsrq, (int, float)) else "",
+        f"Band {band}" if band else "",
+        f"{role} cell",
+        "via Cellular Survey (RM520N-GL)",
+    ]
+    return {
+        "kind": "cellular_signal",
+        "protocol": "CELLULAR",
+        "seen_at": time.time(),
+        "identity": key,
+        "detail": " · ".join(bit for bit in detail_bits if bit),
+        "device_type": "Cellular Tower",
+        "device_type_detail": rat,
+        "band": band,
+        "cellular_type": rat,
+        "technology": rat,
+        "decoded_mcc": identity.get("mcc"),
+        "decoded_mnc": identity.get("mnc"),
+        "decoded_plmn": identity.get("plmn"),
+        "decoded_plmn_source": "cellular-survey (RM520N-GL modem)",
+        "power_dbfs": rsrp,
+        "last_rssi_dbfs": rsrp,
+        "rssi_dbfs": rssi,
+        "classification": f"Confirmed {role} cell (RM520N-GL modem)",
+        "passive_only": True,
+        "content_decoded": True,
+    }
+
+
+def _mqtt_on_cellular_survey_detection(payload: dict[str, Any]) -> None:
+    event = payload.get("event")
+    if not isinstance(event, dict):
+        return
+    translated = _cellular_survey_event_to_signal(event)
+    if translated is not None:
+        _append_detections([translated], [])
+
+
 mqtt_bridge = MqttBridge(
     status_provider=_mqtt_status_provider,
     on_command=_mqtt_on_command,
     on_detection_message=_mqtt_on_detection_message,
+    on_cellular_survey_detection=_mqtt_on_cellular_survey_detection,
 )
 mqtt_bridge.start()
 
