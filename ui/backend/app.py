@@ -31,6 +31,7 @@ from werkzeug.exceptions import BadRequest
 from websocket._exceptions import WebSocketConnectionClosedException
 
 from mqtt_bridge import MqttBridge
+import emitter_geolocation
 
 try:
     from rich.text import Text
@@ -566,6 +567,12 @@ class ExplorerState:
     wifi_band_packet_counts: dict[str, int] = field(default_factory=lambda: {"2.4": 0, "5": 0, "6": 0})
     playback_run_id: str = ""
     playback_discovery_table: list[dict[str, Any]] = field(default_factory=list)
+    # discovery_table `key` -> list of {timestamp, lat, lon, rssi_dbfs}
+    # sightings gathered *since tracking was turned on* for that entity -
+    # see _maybe_record_geolocation_sample() / the /api/geolocate/* routes.
+    # A key only appears here once an operator has opted in; there's no
+    # retroactive history, since none was ever recorded before that.
+    geolocation_tracking: dict[str, list[dict[str, Any]]] = field(default_factory=dict)
 
 
 @dataclass
@@ -5978,6 +5985,38 @@ def _upsert_discovery_row(event: dict[str, Any]) -> None:
         state.discovery_table.insert(0, row)
     state.discovery_table.sort(key=lambda item: float(item.get("last_seen_at") or 0), reverse=True)
     state.discovery_table = state.discovery_table[:RF_SENTINEL_DISCOVERY_TABLE_MAX_ROWS]
+    _maybe_record_geolocation_sample(row)
+
+
+GEOLOCATION_MAX_SAMPLES_PER_ENTITY = 500
+
+
+def _maybe_record_geolocation_sample(row: dict[str, Any]) -> None:
+    """If this entity's key is being tracked for geolocation (see
+    /api/geolocate/track), append one (timestamp, lat, lon, rssi_dbfs)
+    sample using the operator's *current* GPS position - not the
+    entity's, which is exactly the unknown this is trying to estimate.
+    Called from inside _upsert_discovery_row() with state_lock already
+    held (state_lock is an RLock, so this never needs its own).
+    A no-op for every untracked entity - most callers hit this and
+    return immediately, which is deliberate: recording a sample for
+    everything RF-Sentinel ever sees would be unbounded and pointless
+    for entities nobody's trying to locate."""
+    key = row.get("key")
+    if not key or key not in state.geolocation_tracking:
+        return
+    fix = gps_status()
+    lat, lon = fix.get("latitude"), fix.get("longitude")
+    if lat is None or lon is None:
+        return
+    rssi = row.get("last_rssi_dbfs")
+    try:
+        rssi = float(rssi) if rssi is not None else None
+    except (TypeError, ValueError):
+        rssi = None
+    samples = state.geolocation_tracking[key]
+    samples.append({"timestamp": time.time(), "lat": lat, "lon": lon, "rssi_dbfs": rssi})
+    del samples[:-GEOLOCATION_MAX_SAMPLES_PER_ENTITY]
 
 
 def _upsert_classic_address(event: dict[str, Any]) -> None:
@@ -9107,6 +9146,68 @@ def wifi_pattern_of_life_endpoint():
 @app.get("/api/gps/status")
 def gps_status_endpoint():
     return jsonify(gps_status())
+
+
+# ---- Emitter geolocation: estimate where a stationary, already-tracked
+# entity (BLE/BT/WiFi/Zigbee/TPMS/walkie/FM/cellular_signal - anything
+# with a discovery_table key) physically is, from repeated sightings
+# gathered while the operator moves around - see emitter_geolocation.py
+# for the WCL math (ported from rm520n-survey's validated
+# estimate_cell_location()) and _maybe_record_geolocation_sample() for
+# where sightings actually get recorded. Opt-in per entity, and only
+# from the moment tracking starts - no retroactive history exists to
+# draw on. This does NOT add any new signal-detection capability (a raw
+# drone-controller FHSS/ISM emission with no decodable identity still
+# isn't visible to RF-Sentinel today) - it locates anything already
+# trackable by a stable key, which covers most real WiFi/BLE-based
+# drone controllers even though it can't cover pure undecoded RF energy. ----
+
+
+@app.post("/api/geolocate/track")
+def api_geolocate_track():
+    payload = request.get_json(force=True, silent=True) or {}
+    key = str(payload.get("key") or "").strip()
+    if not key:
+        return jsonify({"ok": False, "error": "key is required"}), 400
+    with state_lock:
+        state.geolocation_tracking.setdefault(key, [])
+    return jsonify({"ok": True, "key": key})
+
+
+@app.post("/api/geolocate/untrack")
+def api_geolocate_untrack():
+    payload = request.get_json(force=True, silent=True) or {}
+    key = str(payload.get("key") or "").strip()
+    with state_lock:
+        state.geolocation_tracking.pop(key, None)
+    return jsonify({"ok": True, "key": key})
+
+
+@app.get("/api/geolocate/tracked")
+def api_geolocate_tracked():
+    with state_lock:
+        entities = [{"key": key, "sample_count": len(samples)} for key, samples in state.geolocation_tracking.items()]
+    return jsonify({"entities": entities})
+
+
+@app.get("/api/geolocate/estimate")
+def api_geolocate_estimate():
+    key = str(request.args.get("key") or "").strip()
+    if not key:
+        return jsonify({"ok": False, "error": "key is required"}), 400
+    with state_lock:
+        samples = list(state.geolocation_tracking.get(key, []))
+    observations = [(s["lat"], s["lon"], s["rssi_dbfs"]) for s in samples]
+    estimate = emitter_geolocation.estimate_emitter_location(observations)
+    return jsonify(
+        {
+            "ok": True,
+            "key": key,
+            "sample_count": len(samples),
+            "raw_samples": samples,
+            "estimate": estimate,
+        }
+    )
 
 
 @app.post("/api/test/discoverable-dongle")
