@@ -96,7 +96,15 @@ def estimate_emitter_location(
         sector_hits[int(bearing_deg // (360.0 / SECTOR_COUNT))] = True
     weighted_rms_m = math.sqrt(sq_dist_sum / total_weight)
     sector_coverage = sum(sector_hits) / SECTOR_COUNT
-    diversity_penalty = 1.0 / max(0.15, sector_coverage)
+    # Normalized against how many sectors THIS MANY sightings could
+    # possibly have hit, not a flat /SECTOR_COUNT - fewer than
+    # SECTOR_COUNT sightings can never fill every sector even with ideal
+    # geometry (3 sightings can light up at most 3 of 8), so a flat
+    # penalty would over-penalize a well-arranged handful of sightings
+    # just as much as a badly-arranged one. sector_coverage itself
+    # (returned below) stays the raw, unnormalized fraction.
+    achievable_sector_ceiling = min(1.0, len(usable) / SECTOR_COUNT)
+    diversity_penalty = 1.0 / max(0.15, sector_coverage / achievable_sector_ceiling)
     uncertainty_radius_m = weighted_rms_m * diversity_penalty
 
     return {
