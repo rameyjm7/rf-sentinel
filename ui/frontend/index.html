@@ -1635,6 +1635,12 @@
         background: rgba(255, 255, 255, 0.04);
       }
 
+      .geoloc-track-btn.tracking {
+        background: var(--teal);
+        border-color: rgba(8, 123, 131, 0.9);
+        color: #06282b;
+      }
+
       .primary-btn {
         background: var(--teal);
         border-color: rgba(8, 123, 131, 0.9);
@@ -2032,6 +2038,18 @@
         <div id="runsList" class="wifi-topology-list"></div>
       </section>
     </div>
+    <div id="geolocateOverlay" class="config-overlay" hidden>
+      <section class="config-panel" role="dialog" aria-modal="true" aria-labelledby="geolocateTitle" style="width:min(760px,94vw)">
+        <div class="config-panel-head">
+          <div>
+            <h2 id="geolocateTitle">Emitter Geolocation</h2>
+            <p>Track an entity from its card (the pin icon), then walk or drive around while it keeps getting re-detected. Once enough spatially-spread sightings accumulate, get a position fix - weighted centroid localization from each sighting's GPS position and signal strength, same technique the RF-Sentinel/Cellular Survey/Fix Bench family already uses elsewhere.</p>
+          </div>
+          <button class="ghost-btn" type="button" id="geolocateClose"><span class="material-symbols-rounded">close</span>Close</button>
+        </div>
+        <div id="geolocateList" class="wifi-topology-list"></div>
+      </section>
+    </div>
     <div id="toast" class="toast" role="status" aria-live="polite"></div>
     <div class="app">
       <header>
@@ -2144,6 +2162,7 @@
           <button id="clearBtn" class="secondary" type="button"><span class="material-symbols-rounded">delete_sweep</span>Clear</button>
           <button id="patternOfLifeBtn" class="secondary" type="button"><span class="material-symbols-rounded">history</span>Pattern of Life</button>
           <button id="runsBtn" class="secondary" type="button"><span class="material-symbols-rounded">video_library</span>Runs</button>
+          <button id="geolocateBtn" class="secondary" type="button"><span class="material-symbols-rounded">my_location</span>Geolocation</button>
         </div>
       </form>
 
@@ -2278,6 +2297,12 @@
       const sdrAssignmentList = document.getElementById("sdrAssignmentList");
       const channelChart = document.getElementById("channelChart");
       const identityTableWrap = document.getElementById("identityTableWrap");
+      identityTableWrap.addEventListener("click", (event) => {
+        const button = event.target.closest("[data-track-key]");
+        if (!button) return;
+        event.preventDefault();
+        toggleTracked(button.getAttribute("data-track-key"), button);
+      });
       const allTabBtn = document.getElementById("allTabBtn");
       const btcTabBtn = document.getElementById("btcTabBtn");
       const btleTabBtn = document.getElementById("btleTabBtn");
@@ -3825,6 +3850,117 @@
       document.getElementById("runsClose").addEventListener("click", closeRunsOverlay);
       runsOverlay.addEventListener("click", (event) => { if (event.target === runsOverlay) closeRunsOverlay(); });
 
+      // ---- Emitter geolocation: track a detected entity across
+      // repeated sightings (each one GPS-tagged server-side as it comes
+      // in - see app.py's _maybe_record_geolocation_sample()) and get a
+      // WCL position fix once enough spatially-spread sightings exist.
+      // trackedKeys mirrors server state locally just for instant button
+      // styling; the server (state.geolocation_tracking) is the source
+      // of truth, re-synced via /api/geolocate/tracked whenever the
+      // overlay opens or a card re-renders.
+      const geolocateOverlay = document.getElementById("geolocateOverlay");
+      const geolocateList = document.getElementById("geolocateList");
+      let trackedKeys = new Set();
+      let geolocateFixCache = new Map();
+
+      async function refreshTrackedKeys() {
+        try {
+          const resp = await fetch("/api/geolocate/tracked");
+          const data = await resp.json();
+          trackedKeys = new Set((data.entities || []).map((entity) => entity.key));
+          return data.entities || [];
+        } catch {
+          return [];
+        }
+      }
+
+      async function toggleTracked(key, button) {
+        const nowTracking = trackedKeys.has(key);
+        try {
+          await fetch(`/api/geolocate/${nowTracking ? "untrack" : "track"}`, {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ key }),
+          });
+          if (nowTracking) { trackedKeys.delete(key); geolocateFixCache.delete(key); }
+          else trackedKeys.add(key);
+          if (button) {
+            button.classList.toggle("tracking", !nowTracking);
+            button.title = nowTracking ? "Track for geolocation" : "Stop tracking";
+          }
+        } catch {
+          showToast("Geolocation tracking request failed");
+        }
+      }
+
+      async function fetchFix(key) {
+        try {
+          const resp = await fetch(`/api/geolocate/estimate?key=${encodeURIComponent(key)}`);
+          const data = await resp.json();
+          geolocateFixCache.set(key, data);
+        } catch {
+          geolocateFixCache.set(key, { ok: false, error: "request failed" });
+        }
+        renderGeolocateList();
+      }
+
+      function geolocateEntityLabel(key) {
+        const row = (latestStatus?.discovery_table || []).find((item) => item.key === key);
+        return row ? (row.identity || row.mac || key) : key;
+      }
+
+      async function renderGeolocateList() {
+        const entities = await refreshTrackedKeys();
+        if (!entities.length) {
+          geolocateList.innerHTML = `<div class="empty">Not tracking anything yet - open a detection card and click the pin icon to start.</div>`;
+          return;
+        }
+        geolocateList.innerHTML = entities.map((entity) => {
+          const fix = geolocateFixCache.get(entity.key);
+          let fixHtml = `<span class="small">click "Get fix" to estimate position (needs &ge;3 spatially-spread sightings)</span>`;
+          if (fix?.ok && fix.estimate) {
+            const est = fix.estimate;
+            fixHtml = `<span class="chip">${est.latitude.toFixed(6)}, ${est.longitude.toFixed(6)}</span><span class="chip">&plusmn;${Math.round(est.uncertainty_radius_m)} m</span><span class="chip">${est.observation_count} sightings</span>`;
+          } else if (fix?.ok) {
+            fixHtml = `<span class="small">${fix.sample_count} sighting${fix.sample_count === 1 ? "" : "s"} recorded, no fix yet</span>`;
+          }
+          return `
+            <div class="detection-card" style="margin-bottom:8px;">
+              <h3>${escapeHtml(geolocateEntityLabel(entity.key))}</h3>
+              <div class="chips">
+                <span class="chip">${entity.sample_count} sighting${entity.sample_count === 1 ? "" : "s"}</span>
+              </div>
+              <p class="small" data-fix-row="${escapeHtml(entity.key)}">${fixHtml}</p>
+              <div class="chips" style="margin-top:6px;">
+                <button class="ghost-btn ${fix ? "" : "primary"}" type="button" data-fix-key="${escapeHtml(entity.key)}" style="padding:2px 10px; min-height:auto;">Get fix</button>
+                <button class="ghost-btn" type="button" data-untrack-key="${escapeHtml(entity.key)}" style="padding:2px 10px; min-height:auto;">Stop tracking</button>
+              </div>
+            </div>
+          `;
+        }).join("");
+        geolocateList.querySelectorAll("button[data-fix-key]").forEach((button) => {
+          button.addEventListener("click", () => fetchFix(button.getAttribute("data-fix-key")));
+        });
+        geolocateList.querySelectorAll("button[data-untrack-key]").forEach((button) => {
+          button.addEventListener("click", async () => { await toggleTracked(button.getAttribute("data-untrack-key"), null); renderGeolocateList(); });
+        });
+      }
+
+      function openGeolocateOverlay() {
+        geolocateOverlay.hidden = false;
+        renderGeolocateList();
+      }
+
+      function closeGeolocateOverlay() {
+        geolocateOverlay.hidden = true;
+      }
+
+      document.getElementById("geolocateBtn").addEventListener("click", openGeolocateOverlay);
+      document.getElementById("geolocateClose").addEventListener("click", closeGeolocateOverlay);
+      geolocateOverlay.addEventListener("click", (event) => { if (event.target === geolocateOverlay) closeGeolocateOverlay(); });
+      refreshTrackedKeys();
+      if (location.hash === "#geolocate") setTimeout(openGeolocateOverlay, 800);
+
       function protocolGroupLabel(protocol) {
         const map = {
           BTC: "Bluetooth Classic",
@@ -3876,7 +4012,7 @@
             const deviceTypeDetail = fmtDeviceTypeDetail(row);
             return `
               <article class="detection-card ${protocolClass(row.protocol)}"${followAttrs(row)}>
-                <h3>${titleWithFollowLock(row)}</h3>
+                <h3>${titleWithFollowLock(row)}${row.key ? `<button type="button" class="ghost-btn geoloc-track-btn ${trackedKeys.has(row.key) ? "tracking" : ""}" data-track-key="${escapeHtml(row.key)}" title="${trackedKeys.has(row.key) ? "Stop tracking" : "Track for geolocation"}" style="padding:2px 6px; min-height:auto; margin-left:6px;"><span class="material-symbols-rounded" style="font-size:16px;">my_location</span></button>` : ""}</h3>
                 <div class="chips">
                   ${protocolChip(row.protocol)}
                   ${fcsChip(row)}
